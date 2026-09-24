@@ -1,9 +1,12 @@
-//! Single-producer development network (M1): one node produces every block.
-//! M2 adds followers that sync over IPFS; M3 replaces the single producer with HotStuff-2.
+//! Single-producer development network: one node produces every block and announces it over
+//! IPFS (gossipsub + Bitswap). Followers (`boltchain follow`) sync from those announcements.
+//! M3 replaces the single producer with HotStuff-2.
 
+use crate::p2p::P2pArgs;
 use alloy_primitives::Address;
 use anyhow::{Context, Result};
-use bolt_chain::Chain;
+use bolt_chain::{BuiltBlock, Chain};
+use bolt_net::NetEvent;
 use bolt_primitives::Genesis;
 use bolt_rpc::{HeadState, RpcContext};
 use bolt_txpool::{PoolConfig, TxPool};
@@ -27,6 +30,12 @@ pub struct DevnetArgs {
     /// Seconds between blocks (defaults to the genesis slot length).
     #[arg(long)]
     pub block_time: Option<u64>,
+    /// Disable P2P (no announcements, no followers).
+    #[arg(long)]
+    pub no_p2p: bool,
+    /// P2P options.
+    #[command(flatten)]
+    pub p2p: P2pArgs,
 }
 
 fn now() -> u64 {
@@ -36,11 +45,15 @@ fn now() -> u64 {
         .unwrap_or_default()
 }
 
+pub(crate) fn load_genesis(path: &std::path::Path) -> Result<Genesis> {
+    let json =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(Genesis::from_json(&json)?)
+}
+
 /// Runs the devnet until Ctrl-C.
 pub async fn run(args: DevnetArgs) -> Result<()> {
-    let json = std::fs::read_to_string(&args.genesis)
-        .with_context(|| format!("reading {}", args.genesis.display()))?;
-    let genesis = Genesis::from_json(&json)?;
+    let genesis = load_genesis(&args.genesis)?;
     let chain = Arc::new(Chain::open(&args.datadir, &genesis)?);
     let cfg = chain.config().clone();
     let pool =
@@ -50,9 +63,33 @@ pub async fn run(args: DevnetArgs) -> Result<()> {
         chain: chain.clone(),
         pool: pool.clone(),
         client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
+        forwarder: None,
     };
     let (addr, handle) = bolt_rpc::start(args.rpc, ctx).await?;
     tracing::info!(%addr, chain_id = cfg.chain_id, genesis = %chain.genesis_hash(), "JSON-RPC listening");
+
+    let net = if args.no_p2p {
+        None
+    } else {
+        let (net, mut events) = args.p2p.start(&args.datadir, chain.clone(), None).await?;
+        // Transactions forwarded by followers go into the local pool.
+        let (chain2, pool2) = (chain.clone(), pool.clone());
+        tokio::spawn(async move {
+            while let Some(ev) = events.recv().await {
+                if let NetEvent::Tx { raw, reply } = ev {
+                    let (c, p) = (chain2.clone(), pool2.clone());
+                    let res = tokio::task::spawn_blocking(move || {
+                        let r = c.store().reader().map_err(|e| e.to_string())?;
+                        p.add_raw(&raw, &HeadState(&r)).map_err(|e| e.to_string())
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                    let _ = reply.send(res);
+                }
+            }
+        });
+        Some(net)
+    };
 
     let block_time = Duration::from_secs(args.block_time.unwrap_or(cfg.slot_seconds).max(1));
     let producer = {
@@ -64,11 +101,15 @@ pub async fn run(args: DevnetArgs) -> Result<()> {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                let (chain, pool) = (chain.clone(), pool.clone());
-                let res =
-                    tokio::task::spawn_blocking(move || produce(&chain, &pool, coinbase)).await;
-                match res {
-                    Ok(Ok(())) => {}
+                let (c, p) = (chain.clone(), pool.clone());
+                match tokio::task::spawn_blocking(move || produce(&c, &p, coinbase)).await {
+                    Ok(Ok(built)) => {
+                        if let Some(net) = &net
+                            && let Err(e) = bolt_sync::publish(net, &built).await
+                        {
+                            tracing::warn!("announce failed: {e}");
+                        }
+                    }
                     Ok(Err(e)) => tracing::error!("block production failed: {e:#}"),
                     Err(e) => tracing::error!("producer task panicked: {e}"),
                 }
@@ -84,7 +125,7 @@ pub async fn run(args: DevnetArgs) -> Result<()> {
 }
 
 /// Produces one block from the pool.
-pub fn produce(chain: &Chain, pool: &TxPool, coinbase: Address) -> Result<()> {
+pub fn produce(chain: &Chain, pool: &TxPool, coinbase: Address) -> Result<BuiltBlock> {
     let base_fee = chain.next_base_fee()?;
     let candidates = {
         let r = chain.store().reader()?;
@@ -101,6 +142,7 @@ pub fn produce(chain: &Chain, pool: &TxPool, coinbase: Address) -> Result<()> {
     tracing::info!(
         number = built.header.number,
         hash = %built.hash,
+        root = %built.bundle.root,
         txs = built.included.len(),
         rejected = built.rejected.len(),
         gas = built.header.gas_used,
@@ -110,5 +152,5 @@ pub fn produce(chain: &Chain, pool: &TxPool, coinbase: Address) -> Result<()> {
     for (h, why, _) in &built.rejected {
         tracing::debug!(tx = %h, reason = %why, "rejected");
     }
-    Ok(())
+    Ok(built)
 }

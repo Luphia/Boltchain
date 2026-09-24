@@ -9,6 +9,7 @@ use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use bolt_exec::{
     BlockExecutor, BlockInput, BlockParams, ExecutedBlock, TxRejection, next_base_fee,
 };
+use bolt_ipld::{BlockBundle, Cid};
 use bolt_primitives::{Genesis, genesis::ChainConfig};
 use bolt_store::{InitAccount, StateView, Store, StoreError, StoredBlock};
 use std::{collections::BTreeMap, path::Path};
@@ -50,6 +51,8 @@ pub struct BuiltBlock {
     /// Transactions that were tried and rejected: hash, reason, and whether the rejection is
     /// permanent (invalid) rather than "did not fit in this block".
     pub rejected: Vec<(B256, String, bool)>,
+    /// The block's IPFS representation (already stored in the blockstore).
+    pub bundle: BlockBundle,
 }
 
 /// The chain.
@@ -98,6 +101,8 @@ impl Chain {
                         header.state_root
                     )));
                 }
+                let bundle = bolt_ipld::bundle(&header, &[], None, vec![]);
+                w.put_ipld_bundle(0, &bundle.root, &bundle.blocks)?;
                 w.put_block(&StoredBlock { header, transactions: vec![], senders: vec![] }, &[])?;
                 w.commit()?;
                 tracing::info!(hash = %expected, "initialised genesis");
@@ -192,13 +197,24 @@ impl Chain {
             }
             ex.finish()
         };
-        let header = self.commit(executed, None)?;
+        let (header, bundle) = self.commit(executed, None, None)?;
         let hash = header.hash_slow();
-        Ok(BuiltBlock { header, hash, included, rejected })
+        Ok(BuiltBlock { header, hash, included, rejected, bundle })
     }
 
     /// Validates and imports a block produced elsewhere. Every transaction must execute.
     pub fn import_block(&self, header: &Header, transactions: Vec<TxEnvelope>) -> Result<B256> {
+        self.import_block_with_root(header, transactions, None)
+    }
+
+    /// Like [`Chain::import_block`], additionally requiring the block's IPFS envelope to hash to
+    /// `root` (the CID it was announced under).
+    pub fn import_block_with_root(
+        &self,
+        header: &Header,
+        transactions: Vec<TxEnvelope>,
+        root: Option<Cid>,
+    ) -> Result<B256> {
         let parent = self.head()?;
         let invalid = |m: String| ChainError::InvalidBlock(m);
         if header.parent_hash != parent.hash_slow() || header.number != parent.number + 1 {
@@ -240,13 +256,18 @@ impl Chain {
             }
             ex.finish()
         };
-        let sealed = self.commit(executed, Some(header))?;
+        let (sealed, _) = self.commit(executed, Some(header), root)?;
         Ok(sealed.hash_slow())
     }
 
     /// Applies an executed block. With `expected`, the resulting header must match exactly or
     /// nothing is written.
-    fn commit(&self, executed: ExecutedBlock, expected: Option<&Header>) -> Result<Header> {
+    fn commit(
+        &self,
+        executed: ExecutedBlock,
+        expected: Option<&Header>,
+        expected_root: Option<Cid>,
+    ) -> Result<(Header, BlockBundle)> {
         let number = executed.params.input.number;
         let w = self.store.writer()?;
         let root = w.apply_bundle(number, executed.bundle.clone())?;
@@ -260,6 +281,17 @@ impl Chain {
                 header.state_root, exp.state_root
             )));
         }
+        let parent_root = w.envelope_root(number - 1)?;
+        let bundle = bolt_ipld::bundle(&header, &executed.transactions, parent_root, vec![]);
+        if let Some(exp) = expected_root
+            && exp != bundle.root
+        {
+            return Err(ChainError::InvalidBlock(format!(
+                "envelope {} != announced {exp}",
+                bundle.root
+            )));
+        }
+        w.put_ipld_bundle(number, &bundle.root, &bundle.blocks)?;
         w.put_block(
             &StoredBlock {
                 header: header.clone(),
@@ -270,8 +302,8 @@ impl Chain {
         )?;
         w.prune_history(number)?;
         w.commit()?;
-        tracing::debug!(number, hash = %header.hash_slow(), gas = header.gas_used, "committed block");
-        Ok(header)
+        tracing::debug!(number, hash = %header.hash_slow(), root = %bundle.root, gas = header.gas_used, "committed block");
+        Ok((header, bundle))
     }
 }
 

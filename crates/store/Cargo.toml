@@ -15,6 +15,7 @@ alloy-eips.workspace = true
 revm.workspace = true
 libmdbx.workspace = true
 thiserror.workspace = true
+bolt-ipld.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

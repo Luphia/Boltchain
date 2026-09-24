@@ -48,8 +48,12 @@ async fn wallet_flow_over_json_rpc() {
     let cfg = chain.config().clone();
     let pool =
         Arc::new(TxPool::new(PoolConfig::new(cfg.chain_id, cfg.gas_limit, cfg.min_base_fee_wei)));
-    let ctx =
-        RpcContext { chain: chain.clone(), pool: pool.clone(), client_version: "test".into() };
+    let ctx = RpcContext {
+        chain: chain.clone(),
+        pool: pool.clone(),
+        client_version: "test".into(),
+        forwarder: None,
+    };
     let (addr, _handle) = bolt_rpc::start("127.0.0.1:0".parse().unwrap(), ctx).await.unwrap();
     let url = format!("http://{addr}").parse().unwrap();
 

@@ -20,6 +20,23 @@ cargo run --release -p boltchain -- devnet \
 
 資料會保存在 `--datadir`，重新啟動會接續原本的鏈；刪掉該目錄就能從 genesis 重來。
 
+## 跟隨節點（M2）
+
+出塊者啟動時會印出 `p2p identity peer_id=12D3KooW...`，P2P 預設埠 8017（QUIC 與 TCP）。
+在另一個終端機啟動跟隨節點：
+
+```sh
+cargo run --release -p boltchain -- follow \
+  --datadir data/follower --rpc 127.0.0.1:8546 --p2p-port 8018 \
+  --producer <peer id> --bootnode /ip4/127.0.0.1/udp/8017/quic-v1/p2p/<peer id>
+```
+
+跟隨節點只透過 IPFS 取得區塊：收到 gossipsub 公告後，用 Bitswap 抓取 body chunk，重新執行並核對 header 與 envelope。
+它的 JSON-RPC 可以查詢，`eth_sendRawTransaction` 會轉發給出塊者。跟隨節點也可以當作其他跟隨節點的 `--bootnode`，
+不必直接連到出塊者。
+
+節點身分金鑰預設存在 `<datadir>/node.key`；`boltchain node-id --node-key <檔案>` 會印出 peer ID。
+
 ## MetaMask
 
 新增自訂網路：

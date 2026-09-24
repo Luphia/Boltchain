@@ -4,7 +4,7 @@
 | --- | --- | --- | --- |
 | M0 骨架 | workspace、CI、genesis 格式、資料庫選型 | Osaka statetest 全數通過；CI 在 ARM64 上跑測試 | 程式完成，等 CI 首次執行 |
 | M1 單節點鏈 | revm 執行、MPT、MDBX、RPC，暫用單一簽名者出塊 | Foundry 部署合約、MetaMask 轉帳；30M gas / 6 s；樹莓派執行最壞情況區塊 < 2 s | 程式完成；ARM 數據等 CI，實機 MetaMask/Foundry 待手動驗證 |
-| M2 IPFS 同步 | IPLD 格式、內嵌 bitswap、gossipsub 公告 | 5 個跟隨節點只靠 IPFS 同步；公告到資料取完 p95 < 1 s | 未開始 |
+| M2 IPFS 同步 | IPLD 格式、內嵌 bitswap、gossipsub 公告 | 5 個跟隨節點只靠 IPFS 同步；公告到資料取完 p95 < 1 s | 程式完成，驗收測試通過（本機） |
 | M3 BFT 共識 | HotStuff-2、模擬器、DA 投票規則，固定 7 人驗證者集 | 10,000 個故障情境無安全違規；關掉 2 個節點仍持續出塊 | 未開始 |
 | M4 PoS | 系統合約、BLS-VRF、512 席抽籤、獎勵、罰沒、啟動期 | 100 個驗證者完成 epoch 輪替；鏈上驗證雙重簽名證據 | 未開始 |
 | M5 儲存層 | 檢查點同步、CAR 快照、修剪、歷史分片與抽查 | 新節點從快照起步追上最新區塊 | 未開始 |
@@ -44,10 +44,41 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 - [ ] ARM64 基準數據（等 CI），以及樹莓派實機測試
 - [ ] 以真正的 MetaMask 與 Foundry 手動驗證一次（自動化測試已涵蓋同樣的 RPC 流程）
 
-## M2 待辦（下一步）
+## M2 結果（2026-09-25）
 
-- [ ] `ipld`：eth-block (0x90) header、1 MiB body chunk、dag-cbor envelope、epoch index、CAR
-- [ ] `store`：blockstore 資料表與 pin 狀態
-- [ ] `net`：libp2p（QUIC、Kademlia、gossipsub、bitswap / beetswap、request-response）
-- [ ] 出塊者公告 → 跟隨節點用 bitswap 抓取 → `Chain::import_block`
-- [ ] 驗收：5 個跟隨節點只靠 IPFS 同步；從公告到取完資料 p95 < 1 s
+完成項目：
+
+- [x] `ipld`：header 用 `eth-block`（0x90）+ keccak-256，CID 的 digest 就是 block hash；body 切成 ≤ 1 MiB 的 raw chunk；dag-cbor envelope 以 `parent` 串起整條鏈；CAR v1 讀寫
+- [x] `store`：`ipld` 與 `envelopes` 資料表；區塊的 IPLD 資料與狀態在同一個寫入交易提交
+- [x] `net`：QUIC/TCP + DNS（支援 `/dnsaddr`）、Kademlia（`/bolt/<chain id>/kad/1.0.0`）、gossipsub 公告（只接受指定出塊者簽署的訊息）、交易轉發
+- [x] Bitswap 1.2.0：自行實作，與 Kubo/Helia 線上格式相容（見 ADR 0004）；以 Helia 7.1.15 實測可取回並驗證區塊
+- [x] `sync`：收到公告 → 驗證 envelope 與 header → 用 Bitswap 抓 chunk（先向轉發者要，對方回 DONT_HAVE 或 150 ms 內沒回應就改問其他節點）→ 重新執行並核對 header 與 envelope；落後時沿 `parent` 回填
+- [x] `boltchain follow`、`boltchain node-id`；出塊者每塊發公告並接收轉發的交易
+- [x] 主網 genesis 範本：7 個驗證者收款地址、9 位多簽簽署者（EIP-55 校驗碼全數正確）、bootstrap `node001`–`node009.cafeca.io`
+
+### 驗收測試（`crates/node/tests/m2_sync.rs`）
+
+1 個出塊者 + 5 個跟隨者，其中 3 個跟隨者只連到另一個跟隨者、不直接連出塊者。24 個區塊輪流包含：空塊、小 body（內嵌在公告裡）、約 190 KB body（走 Bitswap）、約 1.4 MB body（兩個 chunk）。
+全部跟隨者的 head 與 envelope root 都與出塊者一致；第 6 個晚加入的節點只連到其中一個跟隨者，沿 parent 回填 25 個區塊。
+
+| 建置 | 公告 → 資料到手 p50 | p95 | 最大值 |
+| --- | --- | --- | --- |
+| release | 3 ms | 58 ms | 164 ms |
+| debug（CI 跑的版本，7 個節點共用 2 vCPU） | 92 ms | 661 ms | 1,145 ms |
+
+這是同一台機器上的 localhost 數字。跨網路的實際延遲要到 M6 測試網才量得到；每多一跳大約增加一個 RTT 加上一次 1.4 MB 的傳輸時間。
+
+### 尚未完成
+
+- [ ] 驗證者 BLS 公鑰（M3 的 `boltchain keys`）
+- [ ] 公開 IPFS 網路的橋接與 epoch 索引（M5）
+- [ ] NAT 穿透（AutoNAT、Circuit Relay v2、DCUtR）與連線數上限（M6）
+
+## M3 待辦（下一步）
+
+- [ ] `boltchain keys`：BLS12-381 金鑰產生、持有證明、以 `feeRecipient` 地址簽署的綁定聲明
+- [ ] `consensus`：HotStuff-2 狀態機（純函式、無 I/O）、QC/TC、BLS 聚合
+- [ ] `sim`：決定性模擬器（延遲、分區、拜占庭行為）
+- [ ] DA 投票規則：投票前必須抓到並 pin 住完整區塊、重新執行通過
+- [ ] 固定 7 人驗證者集跑 devnet
+- [ ] 驗收：模擬 10,000 個故障情境無安全違規；關掉 2 個節點仍持續出塊

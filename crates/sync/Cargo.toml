@@ -1,12 +1,23 @@
 [package]
 name = "bolt-sync"
-description = "Follow, checkpoint, backfill and light-client sync over IPFS, plus epoch state snapshots"
+description = "Block propagation over IPFS: announcing produced blocks, following announcements, backfilling along parent links"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bolt-chain.workspace = true
+bolt-ipld.workspace = true
+bolt-net.workspace = true
+bolt-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+libp2p.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

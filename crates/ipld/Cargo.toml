@@ -1,12 +1,31 @@
 [package]
 name = "bolt-ipld"
-description = "IPLD encoding for Boltchain blocks: eth-block (0x90) headers whose CID equals the block hash, 1 MiB raw body chunks, dag-cbor envelopes and epoch indexes, CAR import/export"
+description = "IPLD encoding for Boltchain blocks: eth-block headers whose CID is the block hash, raw body chunks, dag-cbor envelopes, CAR files"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-rlp.workspace = true
+bolt-primitives.workspace = true
+cid.workspace = true
+multihash.workspace = true
+serde.workspace = true
+serde_ipld_dagcbor.workspace = true
+ipld-core.workspace = true
+serde_bytes.workspace = true
+sha2.workspace = true
+unsigned-varint.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+alloy-signer-local = "2.5"
+alloy-network = "2.5"
+proptest.workspace = true
 
 [lints]
 workspace = true

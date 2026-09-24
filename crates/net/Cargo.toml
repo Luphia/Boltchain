@@ -1,12 +1,33 @@
 [package]
 name = "bolt-net"
-description = "libp2p networking: QUIC transport, Kademlia on a Boltchain protocol id, gossipsub topics (announce/vote/checkpoint), bitswap and request-response"
+description = "libp2p networking: QUIC/TCP, Kademlia, gossipsub announcements, Bitswap 1.2.0 block exchange, transaction forwarding"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bolt-ipld.workspace = true
+alloy-primitives.workspace = true
+libp2p.workspace = true
+libp2p-stream.workspace = true
+futures.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+prost.workspace = true
+unsigned-varint = { workspace = true, features = ["futures"] }
+serde.workspace = true
+serde_bytes.workspace = true
+serde_ipld_dagcbor.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+sha2.workspace = true
+multihash.workspace = true
+cid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

@@ -35,6 +35,15 @@ pub struct RpcContext {
     pub pool: Arc<TxPool>,
     /// Reported by `web3_clientVersion`.
     pub client_version: String,
+    /// When set (on non-producing nodes), `eth_sendRawTransaction` hands transactions to this
+    /// forwarder instead of the local pool.
+    pub forwarder: Option<Arc<dyn TxForwarder>>,
+}
+
+/// Forwards raw transactions to the block producer.
+pub trait TxForwarder: Send + Sync + std::fmt::Debug + 'static {
+    /// Forwards and returns the transaction hash or the producer's rejection.
+    fn forward(&self, raw: Vec<u8>) -> Result<B256, String>;
 }
 
 pub(crate) type RpcResult<T> = Result<T, ErrorObjectOwned>;
@@ -215,6 +224,9 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
     });
     method!("eth_sendRawTransaction", |p, c| -> RpcResult<B256> {
         let (raw,): (Bytes,) = p.parse()?;
+        if let Some(f) = &c.forwarder {
+            return f.forward(raw.to_vec()).map_err(|e| err(-32000, e));
+        }
         let r = c.chain.store().reader().map_err(internal)?;
         c.pool.add_raw(&raw, &HeadState(&r)).map_err(|e| err(-32000, e.to_string()))
     });

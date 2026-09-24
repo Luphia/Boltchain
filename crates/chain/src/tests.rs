@@ -140,3 +140,40 @@ fn reopen_checks_genesis() {
     let other = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     assert!(matches!(Chain::open(d.path(), &other), Err(ChainError::GenesisMismatch { .. })));
 }
+
+#[test]
+fn blocks_are_published_to_the_blockstore_and_linked() {
+    let g = dev_genesis();
+    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let producer = Chain::open(d1.path(), &g).unwrap();
+    let follower = Chain::open(d2.path(), &g).unwrap();
+    let key = dev_key();
+    let t = tx(
+        &key,
+        g.config.chain_id,
+        0,
+        TxKind::Call(Address::repeat_byte(0xb0)),
+        Bytes::new(),
+        21_000,
+    );
+    let built = producer.build_block(vec![(t.clone(), key.address())], 10, Address::ZERO).unwrap();
+
+    let r = producer.store().reader().unwrap();
+    let genesis_root = r.envelope_root(0).unwrap().unwrap();
+    assert_eq!(built.bundle.envelope.parent, Some(genesis_root));
+    assert_eq!(r.envelope_root(1).unwrap(), Some(built.bundle.root));
+    // The block can be rebuilt purely from the blockstore.
+    let env = bolt_ipld::Envelope::decode(&r.ipld(&built.bundle.root).unwrap().unwrap()).unwrap();
+    let decoded = bolt_ipld::decode_block(env, |c| r.ipld(c).unwrap()).unwrap();
+    assert_eq!(decoded.header, built.header);
+    assert_eq!(decoded.transactions, vec![t.clone()]);
+    // Both nodes derive the same genesis envelope.
+    assert_eq!(follower.store().reader().unwrap().envelope_root(0).unwrap(), Some(genesis_root));
+
+    // A wrong announced root is rejected and nothing is written.
+    let wrong = bolt_ipld::sha256_cid(bolt_ipld::DAG_CBOR, b"nope");
+    assert!(follower.import_block_with_root(&built.header, vec![t.clone()], Some(wrong)).is_err());
+    assert_eq!(follower.head().unwrap().number, 0);
+    follower.import_block_with_root(&built.header, vec![t], Some(built.bundle.root)).unwrap();
+    assert!(follower.store().reader().unwrap().ipld(&built.bundle.root).unwrap().is_some());
+}

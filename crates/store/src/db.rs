@@ -6,6 +6,7 @@ use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_rlp::{Decodable, Encodable};
 use alloy_trie::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+use bolt_ipld::Cid;
 use libmdbx::{
     Database, DatabaseOptions, Mode, NoWriteMap, RO, RW, ReadWriteOptions, SyncMode, Table,
     TableFlags, Transaction, TransactionKind, WriteFlags,
@@ -44,10 +45,14 @@ pub(crate) mod t {
     pub const HIST_KEYS: &str = "hist_keys";
     /// name -> value
     pub const META: &str = "meta";
+    /// CID bytes -> IPFS block (the blockstore served over bitswap)
+    pub const IPLD: &str = "ipld";
+    /// number(8 BE) -> CID bytes of the block's envelope (its IPFS root)
+    pub const ENVELOPES: &str = "envelopes";
 
     pub const ALL: &[&str] = &[
         ACCOUNTS, STORAGE, CODES, TRIE_ACC, TRIE_STO, HEADERS, HASH_NUM, BODIES, SENDERS, RECEIPTS,
-        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META,
+        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META, IPLD, ENVELOPES,
     ];
 }
 
@@ -371,6 +376,18 @@ impl<'e, K: TransactionKind> Tx<'e, K> {
         Ok(Some(self.storage(addr, slot)?))
     }
 
+    /// An IPFS block from the blockstore.
+    pub fn ipld(&self, cid: &Cid) -> Result<Option<Vec<u8>>> {
+        self.get_raw(t::IPLD, &cid.to_bytes())
+    }
+
+    /// Envelope CID (IPFS root) of block `number`.
+    pub fn envelope_root(&self, number: u64) -> Result<Option<Cid>> {
+        self.get_raw(t::ENVELOPES, &num_key(number))?
+            .map(|b| Cid::try_from(b.as_slice()).map_err(|_| StoreError::Corrupt(t::ENVELOPES)))
+            .transpose()
+    }
+
     /// Whether state as of block `number` can be reconstructed.
     pub fn history_covers(&self, number: u64) -> Result<bool> {
         let head = self.head()?.unwrap_or(0);
@@ -450,6 +467,19 @@ impl<'e> Tx<'e, RW> {
         }
         self.put_raw(t::META, META_HEAD, &num_key(number))?;
         Ok(hash)
+    }
+
+    /// Stores IPFS blocks and records `root` as the envelope of block `number`.
+    pub fn put_ipld_bundle(
+        &self,
+        number: u64,
+        root: &Cid,
+        blocks: &[(Cid, Vec<u8>)],
+    ) -> Result<()> {
+        for (cid, data) in blocks {
+            self.put_raw(t::IPLD, &cid.to_bytes(), data)?;
+        }
+        self.put_raw(t::ENVELOPES, &num_key(number), &root.to_bytes())
     }
 
     /// Commits the transaction.

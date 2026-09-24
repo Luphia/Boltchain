@@ -1,6 +1,6 @@
 //! Boltchain node binary.
 
-use boltchain::{bench, devnet};
+use boltchain::{bench, devnet, follow};
 
 use anyhow::{Context, Result};
 use bolt_primitives::Genesis;
@@ -21,8 +21,16 @@ enum Command {
     Genesis(GenesisCmd),
     /// Print the protocol constants this binary was built with.
     Params,
-    /// Run a single-producer development network with JSON-RPC.
+    /// Run a single-producer development network with JSON-RPC, announcing blocks over IPFS.
     Devnet(devnet::DevnetArgs),
+    /// Follow a producer: sync blocks over IPFS, serve JSON-RPC, forward transactions.
+    Follow(follow::FollowArgs),
+    /// Print the peer id of a node key (creating the key if missing).
+    NodeId {
+        /// Node key file.
+        #[arg(long)]
+        node_key: PathBuf,
+    },
     /// Benchmark block execution (transfers and the worst-case pairing block).
     Bench(bench::BenchArgs),
 }
@@ -51,6 +59,16 @@ fn main() -> Result<()> {
                 .block_on(devnet::run(args))?;
         }
         Command::Bench(args) => bench::run(args)?,
+        Command::Follow(args) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(follow::run(args))?;
+        }
+        Command::NodeId { node_key } => {
+            let key = bolt_net::load_or_create_key(&node_key)?;
+            println!("{}", key.public().to_peer_id());
+        }
         Command::Genesis(GenesisCmd::Inspect { path }) => {
             let json = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;

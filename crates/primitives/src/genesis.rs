@@ -440,6 +440,22 @@ mod tests {
         );
     }
 
+    /// The mainnet template carries the real validator and multisig addresses but no BLS keys
+    /// yet: it must fail validation on the missing keys and pass once they are filled in.
+    #[test]
+    fn mainnet_template_only_lacks_bls_keys() {
+        let mut g: Genesis =
+            serde_json::from_str(include_str!("../../../genesis/mainnet.template.json")).unwrap();
+        assert!(matches!(g.validate(), Err(GenesisError::BadValidatorKey(k)) if k.is_zero()));
+        for (i, v) in g.bootstrap_validators.iter_mut().enumerate() {
+            v.bls_pubkey = BlsPublicKey::repeat_byte(i as u8 + 1);
+        }
+        g.validate().unwrap();
+        assert_eq!(g.governance.owners.len(), 9);
+        assert_eq!(g.governance.threshold, 5);
+        assert_eq!(g.bootstrap_validators.len(), 7);
+    }
+
     #[test]
     fn storage_affects_state_root() {
         let mut g = sample();

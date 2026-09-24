@@ -1,4 +1,6 @@
-//! Boltchain node library: devnet runner and benchmarks, used by the `boltchain` binary.
+//! Boltchain node library: devnet producer, follower, benchmarks, used by the `boltchain` binary.
 
 pub mod bench;
 pub mod devnet;
+pub mod follow;
+pub mod p2p;
