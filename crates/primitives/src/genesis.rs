@@ -2,6 +2,10 @@
 //!
 //! Boltchain has no genesis token allocation: every account in `alloc` must have a zero balance.
 //! `alloc` exists only to predeploy contract code (system contracts, the governance multisig).
+//!
+//! Local development chains (`"dev": true`) are the one exception: they may fund accounts, and to
+//! keep their transactions from being replayable on Boltchain they must use a chain id other
+//! than 8017.
 
 use crate::params::*;
 use alloy_consensus::{
@@ -31,6 +35,9 @@ const DAY: u64 = 86_400;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Genesis {
+    /// Local development chain: allows funded accounts, forbids chain id 8017.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dev: bool,
     /// Chain parameters fixed at genesis.
     pub config: ChainConfig,
     /// Genesis timestamp (unix seconds). Slot 0 starts here.
@@ -144,6 +151,8 @@ impl GenesisAccount {
 pub enum GenesisError {
     #[error("chain id must be {CHAIN_ID}, got {0}")]
     ChainId(u64),
+    #[error("dev chains must not use chain id {CHAIN_ID}")]
+    DevChainId,
     #[error("slot/epoch length must be {SLOT_SECONDS}s/{EPOCH_SLOTS} slots")]
     SlotTiming,
     #[error("committee size {0} is below the floor of {MIN_COMMITTEE_SIZE}")]
@@ -183,7 +192,10 @@ impl Genesis {
     /// Checks every protocol rule a genesis must satisfy.
     pub fn validate(&self) -> Result<(), GenesisError> {
         let c = &self.config;
-        if c.chain_id != CHAIN_ID {
+        if self.dev && c.chain_id == CHAIN_ID {
+            return Err(GenesisError::DevChainId);
+        }
+        if !self.dev && c.chain_id != CHAIN_ID {
             return Err(GenesisError::ChainId(c.chain_id));
         }
         if c.slot_seconds != SLOT_SECONDS || c.epoch_slots != EPOCH_SLOTS {
@@ -229,7 +241,7 @@ impl Genesis {
         }
 
         for (addr, acc) in &self.alloc {
-            if !acc.balance.is_zero() {
+            if !self.dev && !acc.balance.is_zero() {
                 return Err(GenesisError::NonZeroBalance(*addr));
             }
             if protocol_predeploys().contains_key(addr) {
@@ -322,6 +334,7 @@ mod tests {
 
     fn sample() -> Genesis {
         Genesis {
+            dev: false,
             config: ChainConfig::default(),
             timestamp: 1_800_000_000,
             extra_data: Bytes::from_static(b"Boltchain"),
@@ -365,6 +378,19 @@ mod tests {
         let a = address!("00000000000000000000000000000000000000aa");
         g.alloc.insert(a, GenesisAccount { balance: U256::from(1), ..Default::default() });
         assert_eq!(g.validate(), Err(GenesisError::NonZeroBalance(a)));
+    }
+
+    #[test]
+    fn dev_chains_may_fund_accounts_but_not_use_8017() {
+        let mut g = sample();
+        g.dev = true;
+        g.alloc.insert(
+            Address::repeat_byte(0xaa),
+            GenesisAccount { balance: U256::from(1), ..Default::default() },
+        );
+        assert_eq!(g.validate(), Err(GenesisError::DevChainId));
+        g.config.chain_id = 1337;
+        g.validate().unwrap();
     }
 
     #[test]

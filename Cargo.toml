@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.91"
-license = "Apache-2.0"
+license = "MIT"
 repository = "https://github.com/cafeca/boltchain"
 authors = ["CAFECA"]
 
@@ -22,13 +22,14 @@ bolt-sync = { path = "crates/sync" }
 bolt-txpool = { path = "crates/txpool" }
 bolt-rpc = { path = "crates/rpc" }
 bolt-sim = { path = "crates/sim" }
+bolt-chain = { path = "crates/chain" }
 
 # ethereum
-revm = { version = "43", default-features = false, features = ["std", "secp256k1", "c-kzg", "blst", "bn"] }
+revm = { version = "43", default-features = false, features = ["std", "secp256k1", "c-kzg", "blst"] }
 alloy-primitives = { version = "1.7", features = ["serde", "rlp"] }
 alloy-rlp = "0.3"
 alloy-trie = { version = "0.9", features = ["ethereum"] }
-alloy-consensus = { version = "2.5", default-features = false, features = ["std", "serde", "k256"] }
+alloy-consensus = { version = "2.5", default-features = false, features = ["std", "serde", "k256", "secp256k1"] }
 alloy-eips = { version = "2.5", default-features = false, features = ["std", "serde"] }
 
 # general
@@ -38,6 +39,15 @@ thiserror = "2"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 hex = "0.4"
+libmdbx = "0.9"
+proptest = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"] }
+jsonrpsee = { version = "0.24", features = ["server", "http-client"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+rayon = "1"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

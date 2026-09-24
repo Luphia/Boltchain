@@ -1,4 +1,5 @@
 use super::*;
+use bolt_primitives::params::CHAIN_ID;
 use revm::{
     bytecode::{Bytecode, opcode},
     context::result::{ExecutionResult, InvalidTransaction, Output},
@@ -14,6 +15,7 @@ const CONTRACT: Address = address!("00000000000000000000000000000000000c0002");
 
 fn block() -> BlockInput {
     BlockInput {
+        chain_id: CHAIN_ID,
         number: 1,
         timestamp: 1_800_000_006,
         beneficiary: Address::repeat_byte(0xbe),

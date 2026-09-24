@@ -7,6 +7,24 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bolt-chain.workspace = true
+bolt-exec.workspace = true
+bolt-store.workspace = true
+bolt-txpool.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-rlp.workspace = true
+alloy-rpc-types-eth = { version = "2.5", features = ["serde"] }
+revm.workspace = true
+jsonrpsee.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+parking_lot.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

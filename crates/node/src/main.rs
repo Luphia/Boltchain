@@ -1,5 +1,7 @@
 //! Boltchain node binary.
 
+use boltchain::{bench, devnet};
+
 use anyhow::{Context, Result};
 use bolt_primitives::Genesis;
 use clap::{Parser, Subcommand};
@@ -19,6 +21,10 @@ enum Command {
     Genesis(GenesisCmd),
     /// Print the protocol constants this binary was built with.
     Params,
+    /// Run a single-producer development network with JSON-RPC.
+    Devnet(devnet::DevnetArgs),
+    /// Benchmark block execution (transfers and the worst-case pairing block).
+    Bench(bench::BenchArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -31,7 +37,20 @@ enum GenesisCmd {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,libmdbx=warn".into()),
+        )
+        .init();
     match Cli::parse().command {
+        Command::Devnet(args) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(devnet::run(args))?;
+        }
+        Command::Bench(args) => bench::run(args)?,
         Command::Genesis(GenesisCmd::Inspect { path }) => {
             let json = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;

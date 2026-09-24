@@ -1,21 +1,27 @@
 [package]
-name = "bolt-txpool"
-description = "Transaction pool with Boltchain admission rules"
+name = "bolt-chain"
+description = "Chain state machine: genesis initialisation, block production and import on top of the store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bolt-primitives.workspace = true
+bolt-exec.workspace = true
+bolt-store.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-parking_lot.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
+rayon.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 alloy-signer-local = "2.5"
 alloy-network = "2.5"
+alloy-trie.workspace = true
 
 [lints]
 workspace = true

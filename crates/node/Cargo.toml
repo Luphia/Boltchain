@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "boltchain"
 path = "src/main.rs"
@@ -13,9 +16,28 @@ path = "src/main.rs"
 [dependencies]
 bolt-primitives.workspace = true
 bolt-exec.workspace = true
+bolt-chain.workspace = true
+bolt-store.workspace = true
+bolt-txpool.workspace = true
+bolt-rpc.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-signer-local = "2.5"
+alloy-network = "2.5"
 clap.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+alloy-provider = { version = "2.5", default-features = false, features = ["reqwest"] }
+alloy-rpc-types-eth = "2.5"
+alloy-sol-types = "1.7"
+revm.workspace = true
 
 [lints]
 workspace = true

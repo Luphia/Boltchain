@@ -4,7 +4,10 @@
 //! Blob transactions (EIP-4844, type 3) are rejected before they reach the EVM, and the blob
 //! header fields stay at zero, so no KZG setup or PeerDAS is needed.
 
-use bolt_primitives::params::CHAIN_ID;
+pub mod block;
+
+pub use block::{BlockExecutor, BlockParams, ExecutedBlock, TxRejection, next_base_fee, tx_env};
+
 use revm::{
     Context, Database, ExecuteEvm, MainBuilder, MainContext,
     context::{
@@ -20,16 +23,20 @@ pub const SPEC: SpecId = SpecId::OSAKA;
 /// EIP-2718 type byte of blob transactions.
 pub const BLOB_TX_TYPE: u8 = 3;
 
-/// EVM configuration: Osaka with mainnet gas schedule and chain id 8017.
-pub fn cfg_env() -> CfgEnv {
+/// EVM configuration: Osaka with the mainnet gas schedule.
+///
+/// `chain_id` is [`bolt_primitives::params::CHAIN_ID`] (8017) on Boltchain itself; local dev chains use their own id.
+pub fn cfg_env(chain_id: u64) -> CfgEnv {
     let mut cfg = CfgEnv::new_with_spec(SPEC);
-    cfg.chain_id = CHAIN_ID;
+    cfg.chain_id = chain_id;
     cfg
 }
 
 /// Per-block inputs to the EVM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockInput {
+    /// EIP-155 chain id.
+    pub chain_id: u64,
     /// Block height.
     pub number: u64,
     /// Unix timestamp.
@@ -57,7 +64,7 @@ impl BlockInput {
             prevrandao: Some(self.prevrandao),
             ..Default::default()
         };
-        let fraction = cfg_env().blob_base_fee_update_fraction();
+        let fraction = cfg_env(self.chain_id).blob_base_fee_update_fraction();
         env.set_blob_excess_gas_and_price(0, fraction);
         env
     }
@@ -88,11 +95,13 @@ pub fn transact<DB: Database>(
     }
     let mut evm = Context::mainnet()
         .with_db(db)
-        .with_cfg(cfg_env())
+        .with_cfg(cfg_env(block.chain_id))
         .with_block(block.block_env())
         .build_mainnet();
     Ok(evm.transact(tx)?)
 }
 
+#[cfg(test)]
+mod block_tests;
 #[cfg(test)]
 mod tests;

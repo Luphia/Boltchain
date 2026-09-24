@@ -26,6 +26,9 @@ pub const DEFAULT_GAS_LIMIT: u64 = 30_000_000;
 /// Allowed range for governance adjustments of the block gas limit.
 pub const GAS_LIMIT_RANGE: (u64, u64) = (15_000_000, 60_000_000);
 
+/// EIP-7934: maximum RLP-encoded block size (10 MiB minus a 2 MiB safety margin).
+pub const MAX_RLP_BLOCK_SIZE: usize = 10 * 1024 * 1024 - 2 * 1024 * 1024;
+
 /// Minimum base fee: 0.01 gwei.
 pub const MIN_BASE_FEE_WEI: u64 = 10_000_000;
 

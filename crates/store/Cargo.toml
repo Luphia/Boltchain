@@ -1,12 +1,24 @@
 [package]
 name = "bolt-store"
-description = "Local storage on libmdbx: flat state, MPT intermediate nodes, 128-block changesets, headers/QCs, the IPFS blockstore and the slashing-protection database"
+description = "Local storage on libmdbx: flat state, path-based MPT, blocks, receipts and recent state history"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+alloy-primitives.workspace = true
+alloy-rlp.workspace = true
+alloy-trie.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+revm.workspace = true
+libmdbx.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
