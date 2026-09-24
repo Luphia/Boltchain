@@ -2,8 +2,8 @@
 
 | 里程碑 | 內容 | 驗收標準 | 狀態 |
 | --- | --- | --- | --- |
-| M0 骨架 | workspace、CI、genesis 格式、資料庫選型 | Osaka statetest 全數通過；CI 在 ARM64 上跑測試 | 程式完成，等 CI 首次執行 |
-| M1 單節點鏈 | revm 執行、MPT、MDBX、RPC，暫用單一簽名者出塊 | Foundry 部署合約、MetaMask 轉帳；30M gas / 6 s；樹莓派執行最壞情況區塊 < 2 s | 程式完成；ARM 數據等 CI，實機 MetaMask/Foundry 待手動驗證 |
+| M0 骨架 | workspace、CI、genesis 格式、資料庫選型 | Osaka statetest 全數通過；CI 在 ARM64 上跑測試 | 完成（CI run 36045139504：statetest、x86 與 ARM64 全數通過） |
+| M1 單節點鏈 | revm 執行、MPT、MDBX、RPC，暫用單一簽名者出塊 | Foundry 部署合約、MetaMask 轉帳；30M gas / 6 s；樹莓派執行最壞情況區塊 < 2 s | 程式完成，CI（x86 與 ARM64）通過；樹莓派實測與實機 MetaMask/Foundry 待驗證 |
 | M2 IPFS 同步 | IPLD 格式、內嵌 bitswap、gossipsub 公告 | 5 個跟隨節點只靠 IPFS 同步；公告到資料取完 p95 < 1 s | 程式完成，驗收測試通過（本機） |
 | M3 BFT 共識 | HotStuff-2、模擬器、DA 投票規則，固定 7 人驗證者集 | 10,000 個故障情境無安全違規；關掉 2 個節點仍持續出塊 | 未開始 |
 | M4 PoS | 系統合約、BLS-VRF、512 席抽籤、獎勵、罰沒、啟動期 | 100 個驗證者完成 epoch 輪替；鏈上驗證雙重簽名證據 | 未開始 |
@@ -40,8 +40,9 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 
 ### 尚未完成
 
-- [ ] Osaka state tests 實際執行（等 CI）
-- [ ] ARM64 基準數據（等 CI），以及樹莓派實機測試
+- [x] Osaka state tests 在 CI 上全數通過（GitHub Actions run 36045139504）
+- [x] ARM64 上的測試與基準跑完（數據在該次 CI 的 `block execution benchmark` 步驟日誌）
+- [ ] 樹莓派實機測試
 - [ ] 以真正的 MetaMask 與 Foundry 手動驗證一次（自動化測試已涵蓋同樣的 RPC 流程）
 
 ## M2 結果（2026-09-25）
