@@ -1,0 +1,12 @@
+[package]
+name = "bolt-txpool"
+description = "Transaction pool that forwards transactions to the next leaders instead of flooding the network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "bolt-sync"
+description = "Follow, checkpoint, backfill and light-client sync over IPFS, plus epoch state snapshots"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

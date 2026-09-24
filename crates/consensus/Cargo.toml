@@ -1,0 +1,12 @@
+[package]
+name = "bolt-consensus"
+description = "HotStuff-2 state machine, BLS-VRF committee sampling (512 seats per epoch) and QC aggregation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

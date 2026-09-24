@@ -1,0 +1,12 @@
+[package]
+name = "bolt-net"
+description = "libp2p networking: QUIC transport, Kademlia on a Boltchain protocol id, gossipsub topics (announce/vote/checkpoint), bitswap and request-response"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

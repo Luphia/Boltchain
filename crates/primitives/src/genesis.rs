@@ -1,0 +1,427 @@
+//! Genesis file format, validation and genesis header construction.
+//!
+//! Boltchain has no genesis token allocation: every account in `alloc` must have a zero balance.
+//! `alloc` exists only to predeploy contract code (system contracts, the governance multisig).
+
+use crate::params::*;
+use alloy_consensus::{
+    Header,
+    constants::{EMPTY_OMMER_ROOT_HASH, EMPTY_ROOT_HASH, KECCAK_EMPTY},
+};
+use alloy_eips::{
+    eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE},
+    eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
+    eip7685::EMPTY_REQUESTS_HASH,
+};
+use alloy_primitives::{Address, B64, B256, Bloom, Bytes, FixedBytes, U256, keccak256};
+use alloy_trie::{
+    TrieAccount,
+    root::{state_root_unhashed, storage_root_unhashed},
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A compressed BLS12-381 G1 public key.
+pub type BlsPublicKey = FixedBytes<48>;
+
+/// Seconds in one day, used for timelock bounds.
+const DAY: u64 = 86_400;
+
+/// Genesis file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Genesis {
+    /// Chain parameters fixed at genesis.
+    pub config: ChainConfig,
+    /// Genesis timestamp (unix seconds). Slot 0 starts here.
+    pub timestamp: u64,
+    /// Header extra data, at most 32 bytes.
+    #[serde(default)]
+    pub extra_data: Bytes,
+    /// Bootstrap-phase validators. They hold no tokens; they only sign blocks until the
+    /// bootstrap exit thresholds are met.
+    pub bootstrap_validators: Vec<BootstrapValidator>,
+    /// Initial governance: multisig owners and timelock delays.
+    pub governance: Governance,
+    /// Predeployed contracts. Balances must be zero.
+    #[serde(default)]
+    pub alloc: BTreeMap<Address, GenesisAccount>,
+}
+
+/// Chain parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChainConfig {
+    /// EIP-155 chain id.
+    pub chain_id: u64,
+    /// Slot length in seconds.
+    pub slot_seconds: u64,
+    /// Slots per epoch.
+    pub epoch_slots: u64,
+    /// Committee seats per epoch.
+    pub committee_size: u32,
+    /// Initial block gas limit.
+    pub gas_limit: u64,
+    /// Minimum base fee in wei.
+    pub min_base_fee_wei: u64,
+}
+
+impl Default for ChainConfig {
+    fn default() -> Self {
+        Self {
+            chain_id: CHAIN_ID,
+            slot_seconds: SLOT_SECONDS,
+            epoch_slots: EPOCH_SLOTS,
+            committee_size: MIN_COMMITTEE_SIZE,
+            gas_limit: DEFAULT_GAS_LIMIT,
+            min_base_fee_wei: MIN_BASE_FEE_WEI,
+        }
+    }
+}
+
+/// A bootstrap-phase validator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BootstrapValidator {
+    /// Operator name, for humans.
+    pub name: String,
+    /// BLS12-381 public key used for votes and the BLS-VRF.
+    pub bls_pubkey: BlsPublicKey,
+    /// Address that receives this validator's (discounted, locked) rewards.
+    pub fee_recipient: Address,
+}
+
+/// Initial governance configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Governance {
+    /// Multisig owners.
+    pub owners: Vec<Address>,
+    /// Signatures required.
+    pub threshold: u32,
+    /// Timelock for system-contract upgrades and security parameters, in seconds.
+    pub upgrade_delay_seconds: u64,
+    /// Timelock for bounded parameter tweaks, in seconds.
+    pub param_delay_seconds: u64,
+}
+
+/// A predeployed account.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GenesisAccount {
+    /// Account nonce.
+    #[serde(default)]
+    pub nonce: u64,
+    /// Balance. Must be zero: Boltchain has no genesis allocation.
+    #[serde(default)]
+    pub balance: U256,
+    /// Contract code.
+    #[serde(default)]
+    pub code: Bytes,
+    /// Initial storage.
+    #[serde(default)]
+    pub storage: BTreeMap<B256, B256>,
+}
+
+impl GenesisAccount {
+    fn trie_account(&self) -> TrieAccount {
+        let storage = self
+            .storage
+            .iter()
+            .filter(|(_, v)| !v.is_zero())
+            .map(|(k, v)| (*k, U256::from_be_bytes(v.0)));
+        TrieAccount {
+            nonce: self.nonce,
+            balance: self.balance,
+            storage_root: storage_root_unhashed(storage),
+            code_hash: if self.code.is_empty() { KECCAK_EMPTY } else { keccak256(&self.code) },
+        }
+    }
+}
+
+/// Reasons a genesis file is rejected.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum GenesisError {
+    #[error("chain id must be {CHAIN_ID}, got {0}")]
+    ChainId(u64),
+    #[error("slot/epoch length must be {SLOT_SECONDS}s/{EPOCH_SLOTS} slots")]
+    SlotTiming,
+    #[error("committee size {0} is below the floor of {MIN_COMMITTEE_SIZE}")]
+    CommitteeTooSmall(u32),
+    #[error("gas limit {0} outside allowed range")]
+    GasLimit(u64),
+    #[error("min base fee {0} below protocol floor {MIN_BASE_FEE_WEI}")]
+    BaseFee(u64),
+    #[error("extra data is {0} bytes, max 32")]
+    ExtraData(usize),
+    #[error("need at least {MIN_BOOTSTRAP_VALIDATORS} bootstrap validators, got {0}")]
+    TooFewValidators(usize),
+    #[error("duplicate or zero BLS public key: {0}")]
+    BadValidatorKey(BlsPublicKey),
+    #[error("multisig owners must be unique and non-zero")]
+    BadOwners,
+    #[error("threshold {threshold} invalid for {owners} owners (needs a strict majority)")]
+    Threshold { threshold: u32, owners: usize },
+    #[error("upgrade timelock must be at least the unbonding period plus 2 days")]
+    UpgradeDelay,
+    #[error("param timelock must be at least 2 days and not exceed the upgrade timelock")]
+    ParamDelay,
+    #[error("no genesis allocation: account {0} has a non-zero balance")]
+    NonZeroBalance(Address),
+    #[error("account {0} is a protocol predeploy and cannot be overridden")]
+    ReservedAddress(Address),
+}
+
+impl Genesis {
+    /// Parses and validates a genesis JSON document.
+    pub fn from_json(json: &str) -> Result<Self, GenesisLoadError> {
+        let genesis: Self = serde_json::from_str(json)?;
+        genesis.validate()?;
+        Ok(genesis)
+    }
+
+    /// Checks every protocol rule a genesis must satisfy.
+    pub fn validate(&self) -> Result<(), GenesisError> {
+        let c = &self.config;
+        if c.chain_id != CHAIN_ID {
+            return Err(GenesisError::ChainId(c.chain_id));
+        }
+        if c.slot_seconds != SLOT_SECONDS || c.epoch_slots != EPOCH_SLOTS {
+            return Err(GenesisError::SlotTiming);
+        }
+        if c.committee_size < MIN_COMMITTEE_SIZE {
+            return Err(GenesisError::CommitteeTooSmall(c.committee_size));
+        }
+        if c.gas_limit < GAS_LIMIT_RANGE.0 || c.gas_limit > GAS_LIMIT_RANGE.1 {
+            return Err(GenesisError::GasLimit(c.gas_limit));
+        }
+        if c.min_base_fee_wei < MIN_BASE_FEE_WEI {
+            return Err(GenesisError::BaseFee(c.min_base_fee_wei));
+        }
+        if self.extra_data.len() > 32 {
+            return Err(GenesisError::ExtraData(self.extra_data.len()));
+        }
+
+        if self.bootstrap_validators.len() < MIN_BOOTSTRAP_VALIDATORS {
+            return Err(GenesisError::TooFewValidators(self.bootstrap_validators.len()));
+        }
+        let mut keys = BTreeSet::new();
+        for v in &self.bootstrap_validators {
+            if v.bls_pubkey.is_zero() || !keys.insert(v.bls_pubkey) {
+                return Err(GenesisError::BadValidatorKey(v.bls_pubkey));
+            }
+        }
+
+        let g = &self.governance;
+        let owners: BTreeSet<_> = g.owners.iter().collect();
+        if owners.len() != g.owners.len() || owners.iter().any(|o| o.is_zero()) {
+            return Err(GenesisError::BadOwners);
+        }
+        let n = g.owners.len();
+        if n == 0 || (g.threshold as usize) * 2 <= n || g.threshold as usize > n {
+            return Err(GenesisError::Threshold { threshold: g.threshold, owners: n });
+        }
+        if g.upgrade_delay_seconds < (UNBONDING_EPOCHS + 2) * DAY {
+            return Err(GenesisError::UpgradeDelay);
+        }
+        if g.param_delay_seconds < 2 * DAY || g.param_delay_seconds > g.upgrade_delay_seconds {
+            return Err(GenesisError::ParamDelay);
+        }
+
+        for (addr, acc) in &self.alloc {
+            if !acc.balance.is_zero() {
+                return Err(GenesisError::NonZeroBalance(*addr));
+            }
+            if protocol_predeploys().contains_key(addr) {
+                return Err(GenesisError::ReservedAddress(*addr));
+            }
+        }
+        Ok(())
+    }
+
+    /// `alloc` plus the protocol predeploys every Osaka chain needs (EIP-4788, EIP-2935).
+    pub fn effective_alloc(&self) -> BTreeMap<Address, GenesisAccount> {
+        let mut all = self.alloc.clone();
+        all.extend(protocol_predeploys());
+        all
+    }
+
+    /// Genesis state root.
+    pub fn state_root(&self) -> B256 {
+        state_root_unhashed(self.effective_alloc().iter().map(|(a, acc)| (*a, acc.trie_account())))
+    }
+
+    /// Initial randomness seed: keccak of the concatenated bootstrap BLS keys, in genesis order.
+    pub fn initial_seed(&self) -> B256 {
+        let mut buf = Vec::with_capacity(48 * self.bootstrap_validators.len());
+        for v in &self.bootstrap_validators {
+            buf.extend_from_slice(v.bls_pubkey.as_slice());
+        }
+        keccak256(buf)
+    }
+
+    /// The genesis block header, with every Osaka-era field populated.
+    pub fn header(&self) -> Header {
+        Header {
+            parent_hash: B256::ZERO,
+            ommers_hash: EMPTY_OMMER_ROOT_HASH,
+            beneficiary: Address::ZERO,
+            state_root: self.state_root(),
+            transactions_root: EMPTY_ROOT_HASH,
+            receipts_root: EMPTY_ROOT_HASH,
+            logs_bloom: Bloom::ZERO,
+            difficulty: U256::ZERO,
+            number: 0,
+            gas_limit: self.config.gas_limit,
+            gas_used: 0,
+            timestamp: self.timestamp,
+            extra_data: self.extra_data.clone(),
+            mix_hash: self.initial_seed(),
+            nonce: B64::ZERO,
+            base_fee_per_gas: Some(self.config.min_base_fee_wei),
+            withdrawals_root: Some(EMPTY_ROOT_HASH),
+            blob_gas_used: Some(0),
+            excess_blob_gas: Some(0),
+            // Carries the parent QC hash on later blocks; genesis has no parent.
+            parent_beacon_block_root: Some(B256::ZERO),
+            requests_hash: Some(EMPTY_REQUESTS_HASH),
+            // Amsterdam fields: not part of Osaka.
+            block_access_list_hash: None,
+            slot_number: None,
+        }
+    }
+
+    /// Genesis block hash (equal to the header's IPFS CID digest).
+    pub fn hash(&self) -> B256 {
+        self.header().hash_slow()
+    }
+}
+
+/// Protocol-level predeploys, identical to Ethereum mainnet deployments.
+pub fn protocol_predeploys() -> BTreeMap<Address, GenesisAccount> {
+    let acc = |code: &Bytes| GenesisAccount { nonce: 1, code: code.clone(), ..Default::default() };
+    BTreeMap::from([
+        (BEACON_ROOTS_ADDRESS, acc(&BEACON_ROOTS_CODE)),
+        (HISTORY_STORAGE_ADDRESS, acc(&HISTORY_STORAGE_CODE)),
+    ])
+}
+
+/// Error loading a genesis file.
+#[derive(Debug, thiserror::Error)]
+pub enum GenesisLoadError {
+    #[error("invalid genesis JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("invalid genesis: {0}")]
+    Invalid(#[from] GenesisError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::address;
+
+    fn sample() -> Genesis {
+        Genesis {
+            config: ChainConfig::default(),
+            timestamp: 1_800_000_000,
+            extra_data: Bytes::from_static(b"Boltchain"),
+            bootstrap_validators: (1..=7u8)
+                .map(|i| BootstrapValidator {
+                    name: format!("v{i}"),
+                    bls_pubkey: BlsPublicKey::repeat_byte(i),
+                    fee_recipient: Address::repeat_byte(i),
+                })
+                .collect(),
+            governance: Governance {
+                owners: (1..=9u8).map(|i| Address::repeat_byte(0x10 + i)).collect(),
+                threshold: 5,
+                upgrade_delay_seconds: 16 * DAY,
+                param_delay_seconds: 2 * DAY,
+            },
+            alloc: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn sample_is_valid_and_hash_is_stable() {
+        let g = sample();
+        g.validate().unwrap();
+        assert_eq!(g.hash(), g.clone().hash());
+        let h = g.header();
+        assert_eq!(h.requests_hash, Some(EMPTY_REQUESTS_HASH));
+        assert_ne!(h.state_root, EMPTY_ROOT_HASH, "predeploys must be in state");
+    }
+
+    #[test]
+    fn json_roundtrip() {
+        let g = sample();
+        let json = serde_json::to_string_pretty(&g).unwrap();
+        assert_eq!(Genesis::from_json(&json).unwrap(), g);
+    }
+
+    #[test]
+    fn rejects_genesis_allocation() {
+        let mut g = sample();
+        let a = address!("00000000000000000000000000000000000000aa");
+        g.alloc.insert(a, GenesisAccount { balance: U256::from(1), ..Default::default() });
+        assert_eq!(g.validate(), Err(GenesisError::NonZeroBalance(a)));
+    }
+
+    #[test]
+    fn rejects_rule_violations() {
+        let mut g = sample();
+        g.config.chain_id = 1;
+        assert_eq!(g.validate(), Err(GenesisError::ChainId(1)));
+
+        let mut g = sample();
+        g.config.committee_size = 511;
+        assert!(matches!(g.validate(), Err(GenesisError::CommitteeTooSmall(511))));
+
+        let mut g = sample();
+        g.bootstrap_validators.pop();
+        assert!(matches!(g.validate(), Err(GenesisError::TooFewValidators(6))));
+
+        let mut g = sample();
+        g.bootstrap_validators[1].bls_pubkey = g.bootstrap_validators[0].bls_pubkey;
+        assert!(matches!(g.validate(), Err(GenesisError::BadValidatorKey(_))));
+
+        let mut g = sample();
+        g.governance.threshold = 4;
+        assert!(matches!(g.validate(), Err(GenesisError::Threshold { .. })));
+
+        let mut g = sample();
+        g.governance.upgrade_delay_seconds = 14 * DAY;
+        assert_eq!(g.validate(), Err(GenesisError::UpgradeDelay));
+
+        let mut g = sample();
+        g.alloc.insert(BEACON_ROOTS_ADDRESS, GenesisAccount::default());
+        assert_eq!(g.validate(), Err(GenesisError::ReservedAddress(BEACON_ROOTS_ADDRESS)));
+    }
+
+    /// Pinned against an independent Python implementation (py-trie + pyrlp), so any change to
+    /// header layout or state-root encoding shows up here.
+    #[test]
+    fn devnet_genesis_hash_is_pinned() {
+        let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
+        let expect = |s: &str| s.parse::<B256>().unwrap();
+        assert_eq!(
+            g.state_root(),
+            expect("0x9f42bd8694bb51cea140f07dae2ee2a6a9af552101474651939d3ecdcc895863")
+        );
+        assert_eq!(
+            g.hash(),
+            expect("0x887070d0ccef49544dc4a4e1d0aec05d77d5c4aad3be9e9ceaf71cd10825be9f")
+        );
+    }
+
+    #[test]
+    fn storage_affects_state_root() {
+        let mut g = sample();
+        let before = g.state_root();
+        let a = address!("0000000000000000000000000000000000000b01");
+        let mut acc = GenesisAccount { code: Bytes::from_static(&[0x00]), ..Default::default() };
+        acc.storage.insert(B256::ZERO, B256::with_last_byte(1));
+        g.alloc.insert(a, acc);
+        assert_ne!(g.state_root(), before);
+    }
+}

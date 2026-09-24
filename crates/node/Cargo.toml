@@ -1,0 +1,21 @@
+[package]
+name = "boltchain"
+description = "Boltchain node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "boltchain"
+path = "src/main.rs"
+
+[dependencies]
+bolt-primitives.workspace = true
+bolt-exec.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
