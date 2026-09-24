@@ -17,7 +17,7 @@ use alloy_eips::{
     eip4788::{BEACON_ROOTS_ADDRESS, BEACON_ROOTS_CODE},
     eip7685::EMPTY_REQUESTS_HASH,
 };
-use alloy_primitives::{Address, B64, B256, Bloom, Bytes, FixedBytes, U256, keccak256};
+use alloy_primitives::{Address, B64, B256, Bloom, Bytes, U256, keccak256};
 use alloy_trie::{
     TrieAccount,
     root::{state_root_unhashed, storage_root_unhashed},
@@ -25,8 +25,7 @@ use alloy_trie::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A compressed BLS12-381 G1 public key.
-pub type BlsPublicKey = FixedBytes<48>;
+pub use crate::bls::{BlsPublicKey, BlsSignature};
 
 /// Seconds in one day, used for timelock bounds.
 const DAY: u64 = 86_400;
@@ -94,8 +93,14 @@ pub struct BootstrapValidator {
     pub name: String,
     /// BLS12-381 public key used for votes and the BLS-VRF.
     pub bls_pubkey: BlsPublicKey,
+    /// Proof of possession of the BLS key (rules out rogue-key attacks on aggregate signatures).
+    pub proof_of_possession: BlsSignature,
     /// Address that receives this validator's (discounted, locked) rewards.
     pub fee_recipient: Address,
+    /// EIP-191 signature by `fee_recipient` over [`crate::bls::binding_message`], proving the
+    /// address holder claims this BLS key. Required outside dev chains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_signature: Option<Bytes>,
 }
 
 /// Initial governance configuration.
@@ -165,8 +170,14 @@ pub enum GenesisError {
     ExtraData(usize),
     #[error("need at least {MIN_BOOTSTRAP_VALIDATORS} bootstrap validators, got {0}")]
     TooFewValidators(usize),
-    #[error("duplicate or zero BLS public key: {0}")]
+    #[error("duplicate or invalid BLS public key: {0}")]
     BadValidatorKey(BlsPublicKey),
+    #[error("invalid proof of possession for BLS key {0}")]
+    BadPossession(BlsPublicKey),
+    #[error("missing fee-recipient binding signature for BLS key {0}")]
+    MissingBinding(BlsPublicKey),
+    #[error("binding signature for BLS key {0} was not made by its fee recipient")]
+    BadBinding(BlsPublicKey),
     #[error("multisig owners must be unique and non-zero")]
     BadOwners,
     #[error("threshold {threshold} invalid for {owners} owners (needs a strict majority)")]
@@ -219,8 +230,26 @@ impl Genesis {
         }
         let mut keys = BTreeSet::new();
         for v in &self.bootstrap_validators {
-            if v.bls_pubkey.is_zero() || !keys.insert(v.bls_pubkey) {
+            if !crate::bls::is_valid_public_key(&v.bls_pubkey) || !keys.insert(v.bls_pubkey) {
                 return Err(GenesisError::BadValidatorKey(v.bls_pubkey));
+            }
+            if !crate::bls::verify_possession(&v.bls_pubkey, &v.proof_of_possession) {
+                return Err(GenesisError::BadPossession(v.bls_pubkey));
+            }
+            match &v.binding_signature {
+                Some(sig)
+                    if !crate::bls::verify_binding(
+                        c.chain_id,
+                        &v.bls_pubkey,
+                        &v.fee_recipient,
+                        sig,
+                    ) =>
+                {
+                    return Err(GenesisError::BadBinding(v.bls_pubkey));
+                }
+                Some(_) => {}
+                None if !self.dev => return Err(GenesisError::MissingBinding(v.bls_pubkey)),
+                None => {}
             }
         }
 
@@ -338,13 +367,7 @@ mod tests {
             config: ChainConfig::default(),
             timestamp: 1_800_000_000,
             extra_data: Bytes::from_static(b"Boltchain"),
-            bootstrap_validators: (1..=7u8)
-                .map(|i| BootstrapValidator {
-                    name: format!("v{i}"),
-                    bls_pubkey: BlsPublicKey::repeat_byte(i),
-                    fee_recipient: Address::repeat_byte(i),
-                })
-                .collect(),
+            bootstrap_validators: (0..7u32).map(|i| dev_validator(i, CHAIN_ID)).collect(),
             governance: Governance {
                 owners: (1..=9u8).map(|i| Address::repeat_byte(0x10 + i)).collect(),
                 threshold: 5,
@@ -353,6 +376,48 @@ mod tests {
             },
             alloc: BTreeMap::new(),
         }
+    }
+
+    fn dev_validator(i: u32, chain_id: u64) -> BootstrapValidator {
+        let k = crate::bls::dev_key(i);
+        let pk = k.public_key();
+        let (fee_recipient, sig) =
+            crate::bls::sign_binding(&crate::bls::dev_eth_key(i), chain_id, &pk).unwrap();
+        BootstrapValidator {
+            name: format!("v{i}"),
+            bls_pubkey: pk,
+            proof_of_possession: k.proof_of_possession(),
+            fee_recipient,
+            binding_signature: Some(sig),
+        }
+    }
+
+    #[test]
+    fn validator_keys_are_checked() {
+        let mut g = sample();
+        g.bootstrap_validators[2].proof_of_possession =
+            g.bootstrap_validators[3].proof_of_possession;
+        assert!(matches!(g.validate(), Err(GenesisError::BadPossession(_))));
+
+        let mut g = sample();
+        g.bootstrap_validators[2].binding_signature =
+            g.bootstrap_validators[3].binding_signature.clone();
+        assert!(matches!(g.validate(), Err(GenesisError::BadBinding(_))));
+
+        let mut g = sample();
+        g.bootstrap_validators[2].binding_signature = None;
+        assert!(matches!(g.validate(), Err(GenesisError::MissingBinding(_))));
+        // Dev chains may omit bindings.
+        g.dev = true;
+        g.config.chain_id = 1337;
+        for v in &mut g.bootstrap_validators {
+            v.binding_signature = None;
+        }
+        g.validate().unwrap();
+
+        let mut g = sample();
+        g.bootstrap_validators[0].bls_pubkey = BlsPublicKey::repeat_byte(1);
+        assert!(matches!(g.validate(), Err(GenesisError::BadValidatorKey(_))));
     }
 
     #[test]
@@ -390,6 +455,12 @@ mod tests {
         );
         assert_eq!(g.validate(), Err(GenesisError::DevChainId));
         g.config.chain_id = 1337;
+        // Bindings name the chain id, so the 8017 ones no longer verify...
+        assert!(matches!(g.validate(), Err(GenesisError::BadBinding(_))));
+        // ...and dev chains may simply omit them.
+        for v in &mut g.bootstrap_validators {
+            v.binding_signature = None;
+        }
         g.validate().unwrap();
     }
 
@@ -424,8 +495,9 @@ mod tests {
         assert_eq!(g.validate(), Err(GenesisError::ReservedAddress(BEACON_ROOTS_ADDRESS)));
     }
 
-    /// Pinned against an independent Python implementation (py-trie + pyrlp), so any change to
-    /// header layout or state-root encoding shows up here.
+    /// Pinned against independent Python implementations (py-trie + pyrlp for the header and
+    /// state root; py_ecc and eth_account for the PoPs and bindings), so any change to header
+    /// layout, state-root encoding or key handling shows up here.
     #[test]
     fn devnet_genesis_hash_is_pinned() {
         let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
@@ -436,7 +508,7 @@ mod tests {
         );
         assert_eq!(
             g.hash(),
-            expect("0x887070d0ccef49544dc4a4e1d0aec05d77d5c4aad3be9e9ceaf71cd10825be9f")
+            expect("0xbf1c712896002f51051519f4df32e94cd9294a38036479587ecce630aff32275")
         );
     }
 
@@ -448,9 +520,13 @@ mod tests {
             serde_json::from_str(include_str!("../../../genesis/mainnet.template.json")).unwrap();
         assert!(matches!(g.validate(), Err(GenesisError::BadValidatorKey(k)) if k.is_zero()));
         for (i, v) in g.bootstrap_validators.iter_mut().enumerate() {
-            v.bls_pubkey = BlsPublicKey::repeat_byte(i as u8 + 1);
+            let k = crate::bls::dev_key(100 + i as u32);
+            v.bls_pubkey = k.public_key();
+            v.proof_of_possession = k.proof_of_possession();
         }
-        g.validate().unwrap();
+        // With keys in place, the only thing still missing is each operator's binding signature,
+        // which only the holders of the CAFECA fee-recipient addresses can produce.
+        assert!(matches!(g.validate(), Err(GenesisError::MissingBinding(_))));
         assert_eq!(g.governance.owners.len(), 9);
         assert_eq!(g.governance.threshold, 5);
         assert_eq!(g.bootstrap_validators.len(), 7);

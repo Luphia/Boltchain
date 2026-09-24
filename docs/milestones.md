@@ -75,11 +75,39 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 - [ ] 公開 IPFS 網路的橋接與 epoch 索引（M5）
 - [ ] NAT 穿透（AutoNAT、Circuit Relay v2、DCUtR）與連線數上限（M6）
 
-## M3 待辦（下一步）
+## M3 結果（2026-09-25）
 
-- [ ] `boltchain keys`：BLS12-381 金鑰產生、持有證明、以 `feeRecipient` 地址簽署的綁定聲明
-- [ ] `consensus`：HotStuff-2 狀態機（純函式、無 I/O）、QC/TC、BLS 聚合
-- [ ] `sim`：決定性模擬器（延遲、分區、拜占庭行為）
-- [ ] DA 投票規則：投票前必須抓到並 pin 住完整區塊、重新執行通過
-- [ ] 固定 7 人驗證者集跑 devnet
-- [ ] 驗收：模擬 10,000 個故障情境無安全違規；關掉 2 個節點仍持續出塊
+完成項目：
+
+- [x] `boltchain keys`：用 BLS12-381（blst，min_pk，以太坊 DST）產生金鑰和持有證明（PoP）。`feeRecipient` 地址以 EIP-191 personal_sign 簽署綁定聲明。`genesis-entry` 會先驗證 PoP 和綁定，再印出 genesis 條目
+- [x] `consensus`：兩鏈 HotStuff 加上 Jolteon 的投票與逾時規則（見 ADR 0005）。狀態機是純函式，含 QC/TC、BLS 聚合簽章、最終性證明 `CommitProof`、安全狀態的持久化與恢復
+- [x] `sim`：決定性模擬器，涵蓋延遲、丟包、GST、崩潰重啟和 5 種拜占庭行為（包括串通的連續惡意 leader）。CI 每次跑 10,000 個情境
+- [x] `chain`：尚未最終的區塊透過 overlay 疊在已提交狀態上推測執行。同一個 parent 可以有多個候選，提交後其餘的自動丟棄
+- [x] DA 投票規則：投票前必須以 Bitswap 取得區塊的全部 chunk、寫入 blockstore、在 parent 上重新執行，且 header 相符
+- [x] `boltchain validator`：共識、出塊、提交，並在提交後發出帶最終性證明的公告。跟隨節點只匯入帶有效證明的區塊
+- [x] `net`：新增共識 gossipsub topic `/bolt/<chain id>/consensus`
+
+### 驗收
+
+| 項目 | 結果 |
+| --- | --- |
+| 模擬 10,000 個故障情境，無安全違規 | 情境 0–9,999 與 10,000–19,999：0 安全違規、0 活性失敗（release 各約 65 秒） |
+| 故意改壞程式，確認模擬器抓得到錯 | 移除鎖定規則：3,000 個情境中抓到 65 次違規。同輪兩票：沒抓到（見 ADR 0005） |
+| 關掉 2 個節點仍持續出塊（`crates/node/tests/m3_consensus.rs`） | 7 個驗證者到高度 5 後關掉 2 個，其餘 5 個再推進 5 塊以上且 head 一致；只信任最終性證明的跟隨節點同步到同一條鏈。連跑 4 次都通過，每次約 30 秒 |
+
+### 尚未完成（移到後續里程碑）
+
+- [ ] leader 依質押權重做 VRF 抽樣，委員會由系統合約決定（M4）
+- [ ] 投票直送下一任 leader，不走 gossip 廣播（M4/M6）
+- [ ] 模擬器加入能精準分割誠實節點的對手，用來抓「同輪兩票」這類變異（M4）
+- [ ] 加密 keystore（EIP-2335）（M6）
+- [ ] 主網 genesis 填入 7 位驗證者的 BLS 公鑰、PoP 和綁定簽章（由各驗證者用 `boltchain keys` 產生）
+
+## M4 待辦（下一步）
+
+- [ ] 系統合約（Foundry）：質押（最低 64 BOLT）、解除質押等待期、罰沒、委員會快照
+- [ ] 每個 epoch 用 BLS-VRF 依權重抽樣委員會（目標 512 席），在 epoch 邊界交接
+- [ ] 增發：每個 epoch 依 `epoch_emission` 發放；EIP-1559 base fee 銷毀；總量上限 2^32 BOLT
+- [ ] 多簽 + timelock 治理合約（9 位簽署者）
+- [ ] 雙重投票與雙重提案的證據提交與罰沒
+- [ ] 驗收：多 epoch devnet 上委員會輪替、質押變動生效、罰沒正確

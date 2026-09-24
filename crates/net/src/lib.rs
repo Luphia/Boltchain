@@ -71,6 +71,9 @@ pub struct Announce {
     pub header: Vec<u8>,
     /// Body chunks, when the body is small enough to inline.
     pub inline: Vec<InlineBlock>,
+    /// Finality proof (consensus networks): encoded `CommitProof` for this block.
+    #[serde(default, with = "serde_bytes")]
+    pub proof: Vec<u8>,
 }
 
 impl Announce {
@@ -126,6 +129,13 @@ pub enum NetEvent {
         /// Reply channel.
         reply: oneshot::Sender<Result<B256, String>>,
     },
+    /// A consensus message (proposal, vote or timeout), still encoded.
+    Consensus {
+        /// Peer that relayed it.
+        via: PeerId,
+        /// dag-cbor bytes.
+        data: Vec<u8>,
+    },
     /// A connection was established.
     Connected(PeerId),
 }
@@ -142,11 +152,13 @@ struct Behaviour {
 
 enum Command {
     Publish(Announce),
+    PublishConsensus(Vec<u8>),
     ForwardTx(PeerId, Vec<u8>, oneshot::Sender<Result<B256, String>>),
     RespondTx(u64, Result<B256, String>),
     Peers(oneshot::Sender<Vec<PeerId>>),
     ListenAddrs(oneshot::Sender<Vec<Multiaddr>>),
     Dial(Multiaddr),
+    Shutdown,
 }
 
 /// Network errors.
@@ -175,11 +187,13 @@ impl std::fmt::Debug for Command {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Command::Publish(_) => "Publish",
+            Command::PublishConsensus(_) => "PublishConsensus",
             Command::ForwardTx(..) => "ForwardTx",
             Command::RespondTx(..) => "RespondTx",
             Command::Peers(_) => "Peers",
             Command::ListenAddrs(_) => "ListenAddrs",
             Command::Dial(_) => "Dial",
+            Command::Shutdown => "Shutdown",
         })
     }
 }
@@ -193,6 +207,11 @@ impl NetHandle {
     /// Publishes an announcement.
     pub async fn publish(&self, a: Announce) -> Result<(), NetError> {
         self.cmd.send(Command::Publish(a)).await.map_err(|_| NetError::Stopped)
+    }
+
+    /// Publishes an encoded consensus message.
+    pub async fn publish_consensus(&self, data: Vec<u8>) -> Result<(), NetError> {
+        self.cmd.send(Command::PublishConsensus(data)).await.map_err(|_| NetError::Stopped)
     }
 
     /// Fetches blocks over bitswap: `peers[0]` first, the others on its DONT_HAVE or after
@@ -236,6 +255,11 @@ impl NetHandle {
         rx.await.unwrap_or_default()
     }
 
+    /// Stops the network (closes all connections).
+    pub async fn shutdown(&self) {
+        let _ = self.cmd.send(Command::Shutdown).await;
+    }
+
     /// Dials an address.
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), NetError> {
         self.cmd.send(Command::Dial(addr)).await.map_err(|_| NetError::Stopped)
@@ -244,6 +268,10 @@ impl NetHandle {
 
 fn topic(chain_id: u64) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(format!("/bolt/{chain_id}/announce"))
+}
+
+fn consensus_topic(chain_id: u64) -> gossipsub::IdentTopic {
+    gossipsub::IdentTopic::new(format!("/bolt/{chain_id}/consensus"))
 }
 
 fn peer_of(addr: &Multiaddr) -> Option<PeerId> {
@@ -322,6 +350,7 @@ pub async fn start(
         swarm.listen_on(addr.clone()).map_err(|e| setup(&e))?;
     }
     swarm.behaviour_mut().gossipsub.subscribe(&topic(chain_id)).map_err(|e| setup(&e))?;
+    swarm.behaviour_mut().gossipsub.subscribe(&consensus_topic(chain_id)).map_err(|e| setup(&e))?;
     for addr in &cfg.bootnodes {
         if let Some(peer) = peer_of(addr) {
             swarm.behaviour_mut().kad.add_address(&peer, addr.clone());
@@ -348,6 +377,7 @@ async fn run(
     ev_tx: mpsc::Sender<NetEvent>,
 ) {
     let topic = topic(cfg.chain_id);
+    let ctopic = consensus_topic(cfg.chain_id);
     let mut pending_fwd: HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<Result<B256, String>>,
@@ -370,6 +400,11 @@ async fn run(
                             tracing::debug!("publish: {e}");
                         }
                     }
+                    Command::PublishConsensus(data) => {
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ctopic.clone(), data) {
+                            tracing::debug!("publish consensus: {e}");
+                        }
+                    }
                     Command::ForwardTx(peer, raw, reply) => {
                         let id = swarm.behaviour_mut().tx.send_request(&peer, TxRequest(raw));
                         pending_fwd.insert(id, reply);
@@ -386,6 +421,7 @@ async fn run(
                         let me = *swarm.local_peer_id();
                         let _ = reply.send(swarm.listeners().map(|a| a.clone().with(Protocol::P2p(me))).collect());
                     }
+                    Command::Shutdown => break,
                     Command::Dial(addr) => {
                         if let Some(peer) = peer_of(&addr) {
                             swarm.behaviour_mut().kad.add_address(&peer, addr.clone());
@@ -407,6 +443,15 @@ async fn run(
                     for addr in info.listen_addrs {
                         swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                     }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                    propagation_source, message_id, message,
+                })) if message.topic == ctopic.hash() => {
+                    // Signatures are checked by the consensus engine; relay promptly.
+                    let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                        &message_id, &propagation_source, gossipsub::MessageAcceptance::Accept,
+                    );
+                    let _ = ev_tx.send(NetEvent::Consensus { via: propagation_source, data: message.data }).await;
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source, message_id, message,

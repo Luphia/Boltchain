@@ -33,6 +33,9 @@ pub enum SyncError {
     /// Background task failed.
     #[error("task: {0}")]
     Task(String),
+    /// The announcement carried no valid finality proof.
+    #[error("announcement lacks a valid finality proof")]
+    NotFinal,
 }
 
 /// Result alias.
@@ -54,6 +57,7 @@ pub fn announce_for(bundle: &BlockBundle) -> Announce {
         envelope: find(&bundle.root),
         header: find(&bundle.envelope.header),
         inline,
+        proof: Vec::new(),
     }
 }
 
@@ -78,17 +82,30 @@ pub enum Outcome {
     Known,
 }
 
+/// Checks finality proofs carried by announcements (consensus networks).
+pub trait FinalityCheck: Send + Sync + std::fmt::Debug + 'static {
+    /// Whether `proof` shows that the block with hash `block` is final.
+    fn is_final(&self, block: &alloy_primitives::B256, proof: &[u8]) -> bool;
+}
+
 /// Follows announcements and keeps the local chain in sync.
 #[derive(Debug, Clone)]
 pub struct Follower {
     chain: Arc<Chain>,
     net: NetHandle,
+    finality: Option<Arc<dyn FinalityCheck>>,
 }
 
 impl Follower {
-    /// Creates a follower.
+    /// Creates a follower that trusts announcements from the configured producer (single-producer
+    /// devnet; the network layer drops announcements from anyone else).
     pub fn new(chain: Arc<Chain>, net: NetHandle) -> Self {
-        Self { chain, net }
+        Self { chain, net, finality: None }
+    }
+
+    /// Creates a follower that only imports blocks with a valid finality proof.
+    pub fn with_finality(chain: Arc<Chain>, net: NetHandle, check: Arc<dyn FinalityCheck>) -> Self {
+        Self { chain, net, finality: Some(check) }
     }
 
     async fn head(&self) -> Result<u64> {
@@ -120,6 +137,12 @@ impl Follower {
         let envelope = Envelope::decode(&a.envelope)?;
         if envelope.height != a.height {
             return Err(IpldError::Malformed("announce height").into());
+        }
+        if let Some(check) = &self.finality {
+            let hash = envelope.block_hash().ok_or(IpldError::Malformed("header cid"))?;
+            if !check.is_final(&hash, &a.proof) {
+                return Err(SyncError::NotFinal);
+            }
         }
         let mut have: HashMap<Cid, Vec<u8>> = HashMap::new();
         have.insert(envelope.header, a.header.clone());
@@ -171,11 +194,12 @@ impl Follower {
         let count = chain_of.len() as u64;
         let mut height = head;
         for (root, env) in chain_of.into_iter().rev() {
+            let qc = env.qc.clone();
             let block = decode_block(env, |c| have.get(c).cloned())?;
             let chain = self.chain.clone();
             height = block.header.number;
             tokio::task::spawn_blocking(move || {
-                chain.import_block_with_root(&block.header, block.transactions, Some(root))
+                chain.import_final(&block.header, block.transactions, Some(root), qc)
             })
             .await
             .map_err(|e| SyncError::Task(e.to_string()))??;
@@ -217,6 +241,7 @@ pub async fn run_follower(
                 let _ = reply.send(Err("this node is not a block producer".into()));
             }
             NetEvent::Connected(peer) => tracing::debug!(%peer, "peer connected"),
+            NetEvent::Consensus { .. } => {}
         }
     }
 }

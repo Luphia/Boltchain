@@ -7,7 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-alloy-primitives.workspace = true
+alloy-primitives = { workspace = true, features = ["k256"] }
+blst.workspace = true
+k256 = { version = "0.13", features = ["ecdsa"] }
 alloy-rlp.workspace = true
 alloy-trie.workspace = true
 alloy-consensus.workspace = true
@@ -18,3 +20,4 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
+

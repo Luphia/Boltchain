@@ -36,6 +36,9 @@ jobs:
           ./target/release/boltchain genesis inspect genesis/devnet.json
       - name: block execution benchmark (worst-case pairing blocks)
         run: ./target/release/boltchain bench --blocks 5
+      - name: consensus simulation (10,000 fault scenarios)
+        if: matrix.os == 'ubuntu-24.04'
+        run: cargo run --release -p bolt-sim -- --scenarios 10000
 
   statetest:
     name: osaka state tests

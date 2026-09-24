@@ -59,7 +59,14 @@ async fn announce_fetch_and_forward() {
     a_mem.0.write().insert(c2, big.clone());
 
     // Wait until the gossipsub mesh has B subscribed, then announce.
-    let ann = Announce { height: 1, root: c1, envelope: vec![1], header: vec![2], inline: vec![] };
+    let ann = Announce {
+        height: 1,
+        root: c1,
+        envelope: vec![1],
+        header: vec![2],
+        inline: vec![],
+        proof: vec![],
+    };
     let got = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             a.publish(ann.clone()).await.unwrap();
@@ -131,6 +138,7 @@ async fn announcements_from_other_authors_are_dropped() {
         envelope: vec![],
         header: vec![],
         inline: vec![],
+        proof: vec![],
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
     while tokio::time::Instant::now() < deadline {

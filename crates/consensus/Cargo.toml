@@ -1,12 +1,19 @@
 [package]
 name = "bolt-consensus"
-description = "HotStuff-2 state machine, BLS-VRF committee sampling (512 seats per epoch) and QC aggregation"
+description = "Two-chain HotStuff consensus (Jolteon rules): pure state machine, QC/TC, BLS aggregation"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bolt-primitives.workspace = true
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+serde_ipld_dagcbor.workspace = true
 
 [lints]
 workspace = true

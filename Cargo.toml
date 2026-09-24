@@ -59,6 +59,8 @@ prost = "0.14"
 libp2p = { version = "0.57", features = ["tokio", "quic", "tcp", "noise", "yamux", "gossipsub", "kad", "identify", "ping", "macros", "dns", "request-response", "cbor", "ed25519"] }
 libp2p-stream = "0.5.0-alpha"
 futures = "0.3"
+blst = "0.3"
+rand = "0.9"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -72,3 +74,9 @@ lto = "thin"
 codegen-units = 1
 panic = "abort"
 strip = "symbols"
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false

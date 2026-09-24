@@ -177,3 +177,94 @@ fn blocks_are_published_to_the_blockstore_and_linked() {
     follower.import_block_with_root(&built.header, vec![t], Some(built.bundle.root)).unwrap();
     assert!(follower.store().reader().unwrap().ipld(&built.bundle.root).unwrap().is_some());
 }
+
+#[test]
+fn pending_blocks_execute_on_pending_parents() {
+    let g = dev_genesis();
+    let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = Chain::open(d1.path(), &g).unwrap();
+    let b = Chain::open(d2.path(), &g).unwrap();
+    let key = dev_key();
+    let cid = g.config.chain_id;
+    let bob = Address::repeat_byte(0xb0);
+    let head = a.head().unwrap().hash_slow();
+
+    // Two blocks built before either is final; the second spends state the first created.
+    let t0 = tx(&key, cid, 0, TxKind::Call(bob), Bytes::new(), 21_000);
+    let t1 = tx(&key, cid, 1, TxKind::Call(bob), Bytes::new(), 21_000);
+    let qc0 = vec![0xaa; 10];
+    let b1 = a
+        .build_on(
+            &head,
+            vec![(t0.clone(), key.address())],
+            10,
+            Address::ZERO,
+            1u64.to_be_bytes().to_vec().into(),
+            qc0.clone(),
+        )
+        .unwrap();
+    let qc1 = vec![0xbb; 10];
+    let b2 = a
+        .build_on(
+            &b1.hash,
+            vec![(t1.clone(), key.address())],
+            16,
+            Address::ZERO,
+            2u64.to_be_bytes().to_vec().into(),
+            qc1.clone(),
+        )
+        .unwrap();
+    assert!(
+        b1.rejected.is_empty() && b2.rejected.is_empty(),
+        "{:?} {:?}",
+        b1.rejected,
+        b2.rejected
+    );
+    assert_eq!(b2.header.parent_hash, b1.hash);
+    assert_eq!(b2.bundle.envelope.parent, Some(b1.bundle.root));
+    assert_eq!(b2.header.parent_beacon_block_root, Some(keccak256(&qc1)));
+    // Nothing is final yet.
+    assert_eq!(a.head().unwrap().number, 0);
+    assert_eq!(a.store().reader().unwrap().account(&bob).unwrap(), None);
+
+    // Another node verifies both while pending (as a validator would before voting).
+    b.verify_block(&b1.header, vec![t0], qc0).unwrap();
+    b.verify_block(&b2.header, vec![t1], qc1.clone()).unwrap();
+    // Tampering with the certificate is caught.
+    let mut bad = b2.header.clone();
+    bad.parent_beacon_block_root = Some(B256::ZERO);
+    assert!(b.verify_block(&bad, vec![], qc1).is_err());
+
+    for c in [&a, &b] {
+        c.commit_pending(&b1.hash).unwrap();
+        c.commit_pending(&b2.hash).unwrap();
+        let r = c.store().reader().unwrap();
+        assert_eq!(r.head().unwrap(), Some(2));
+        assert_eq!(r.account(&bob).unwrap().unwrap().balance, U256::from(2_000u64));
+        assert_eq!(bolt_store::full_state_root(&r).unwrap(), b2.header.state_root);
+        assert_eq!(r.envelope_root(2).unwrap(), Some(b2.bundle.root));
+    }
+}
+
+#[test]
+fn competing_pending_blocks_resolve_on_commit() {
+    let g = dev_genesis();
+    let d = tempfile::tempdir().unwrap();
+    let c = Chain::open(d.path(), &g).unwrap();
+    let key = dev_key();
+    let head = c.head().unwrap().hash_slow();
+    let t = |to: u8| {
+        tx(&key, g.config.chain_id, 0, TxKind::Call(Address::repeat_byte(to)), Bytes::new(), 21_000)
+    };
+    let x = c
+        .build_on(&head, vec![(t(1), key.address())], 10, Address::ZERO, Bytes::new(), vec![])
+        .unwrap();
+    let y = c
+        .build_on(&head, vec![(t(2), key.address())], 10, Address::ZERO, Bytes::new(), vec![])
+        .unwrap();
+    assert_ne!(x.hash, y.hash);
+    c.commit_pending(&y.hash).unwrap();
+    assert!(c.pending(&x.hash).is_none(), "the losing sibling is dropped");
+    assert!(c.commit_pending(&x.hash).is_err());
+    assert_eq!(c.head().unwrap().hash_slow(), y.hash);
+}

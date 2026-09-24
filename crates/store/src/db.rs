@@ -469,6 +469,11 @@ impl<'e> Tx<'e, RW> {
         Ok(hash)
     }
 
+    /// Stores one IPFS block.
+    pub fn put_ipld(&self, cid: &Cid, data: &[u8]) -> Result<()> {
+        self.put_raw(t::IPLD, &cid.to_bytes(), data)
+    }
+
     /// Stores IPFS blocks and records `root` as the envelope of block `number`.
     pub fn put_ipld_bundle(
         &self,

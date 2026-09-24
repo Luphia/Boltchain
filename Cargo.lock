@@ -1410,7 +1410,9 @@ dependencies = [
  "bolt-ipld",
  "bolt-primitives",
  "bolt-store",
+ "parking_lot",
  "rayon",
+ "revm",
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
@@ -1419,6 +1421,15 @@ dependencies = [
 [[package]]
 name = "bolt-consensus"
 version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "bolt-primitives",
+ "serde",
+ "serde_bytes",
+ "serde_ipld_dagcbor",
+]
 
 [[package]]
 name = "bolt-exec"
@@ -1493,6 +1504,8 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-trie",
+ "blst",
+ "k256",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -1525,6 +1538,12 @@ dependencies = [
 [[package]]
 name = "bolt-sim"
 version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "bolt-consensus",
+ "rand 0.9.5",
+ "rayon",
+]
 
 [[package]]
 name = "bolt-store"
@@ -1582,11 +1601,13 @@ dependencies = [
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
+ "alloy-rlp",
  "alloy-rpc-types-eth",
  "alloy-signer-local",
  "alloy-sol-types",
  "anyhow",
  "bolt-chain",
+ "bolt-consensus",
  "bolt-exec",
  "bolt-ipld",
  "bolt-net",
@@ -1596,9 +1617,12 @@ dependencies = [
  "bolt-sync",
  "bolt-txpool",
  "clap",
+ "k256",
  "libp2p",
  "parking_lot",
  "revm",
+ "serde",
+ "serde_ipld_dagcbor",
  "serde_json",
  "tempfile",
  "tokio",
@@ -3793,6 +3817,7 @@ dependencies = [
  "once_cell",
  "serdect",
  "sha2 0.10.9",
+ "signature 2.2.0",
 ]
 
 [[package]]

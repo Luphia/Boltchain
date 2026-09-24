@@ -6,13 +6,18 @@
 use alloy_consensus::{Header, Transaction as _, TxEnvelope, transaction::SignerRecoverable};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+mod overlay;
+
 use bolt_exec::{
     BlockExecutor, BlockInput, BlockParams, ExecutedBlock, TxRejection, next_base_fee,
 };
 use bolt_ipld::{BlockBundle, Cid};
 use bolt_primitives::{Genesis, genesis::ChainConfig};
 use bolt_store::{InitAccount, StateView, Store, StoreError, StoredBlock};
+use parking_lot::Mutex;
+use revm::database::{OriginalValuesKnown, states::StateChangeset};
 use std::{collections::BTreeMap, path::Path};
+use std::{collections::HashMap, sync::Arc};
 
 /// Chain error.
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +39,9 @@ pub enum ChainError {
     /// A block failed validation.
     #[error("invalid block: {0}")]
     InvalidBlock(String),
+    /// The parent is neither the committed head nor a known pending block.
+    #[error("unknown parent {0}")]
+    UnknownParent(B256),
 }
 
 /// Result alias.
@@ -61,7 +69,11 @@ pub struct Chain {
     store: Store,
     config: ChainConfig,
     genesis_hash: B256,
+    pending: Mutex<HashMap<B256, Arc<PendingBlock>>>,
 }
+
+/// A pending block, the included transaction hashes and the skipped ones (hash, reason, drop).
+type Executed = (Arc<PendingBlock>, Vec<B256>, Vec<(B256, String, bool)>);
 
 impl Chain {
     /// Opens the datadir, writing genesis on first start.
@@ -114,7 +126,12 @@ impl Chain {
                 }
             }
         }
-        Ok(Self { store, config: genesis.config.clone(), genesis_hash: expected })
+        Ok(Self {
+            store,
+            config: genesis.config.clone(),
+            genesis_hash: expected,
+            pending: Mutex::new(HashMap::new()),
+        })
     }
 
     /// The underlying store (for RPC reads).
@@ -164,31 +181,84 @@ impl Chain {
         }
     }
 
-    /// Produces the next block from candidate transactions (already sender-recovered), skipping
-    /// any that do not fit or fail validation.
-    pub fn build_block(
+    /// Header of `hash`, whether committed or pending.
+    pub fn header_of(&self, hash: &B256) -> Result<Option<Header>> {
+        if let Some(p) = self.pending.lock().get(hash) {
+            return Ok(Some(p.header.clone()));
+        }
+        let r = self.store.reader()?;
+        match r.block_number(hash)? {
+            Some(n) => Ok(r.header(n)?),
+            None => Ok(None),
+        }
+    }
+
+    /// A pending (executed, not yet final) block.
+    pub fn pending(&self, hash: &B256) -> Option<Arc<PendingBlock>> {
+        self.pending.lock().get(hash).cloned()
+    }
+
+    /// Pending blocks from the committed head up to `parent` (oldest first). Empty when `parent`
+    /// is the head itself.
+    fn pending_chain(&self, head: &Header, parent: &B256) -> Result<Vec<Arc<PendingBlock>>> {
+        let head_hash = head.hash_slow();
+        let pending = self.pending.lock();
+        let mut chain = Vec::new();
+        let mut cur = *parent;
+        while cur != head_hash {
+            let p = pending.get(&cur).ok_or_else(|| ChainError::UnknownParent(cur))?.clone();
+            if p.header.number <= head.number {
+                return Err(ChainError::UnknownParent(cur));
+            }
+            cur = p.header.parent_hash;
+            chain.push(p);
+        }
+        chain.reverse();
+        Ok(chain)
+    }
+
+    /// Executes a block on `parent` (the committed head or a pending block) without committing.
+    /// With `expected`, the transactions must all execute and the header must match exactly;
+    /// otherwise candidates that do not fit are skipped.
+    fn execute_on(
         &self,
-        candidates: impl IntoIterator<Item = (TxEnvelope, Address)>,
-        timestamp: u64,
-        beneficiary: Address,
-    ) -> Result<BuiltBlock> {
-        let parent = self.head()?;
-        let timestamp = timestamp.max(parent.timestamp + 1);
-        let params = self.params_for(&parent, timestamp, beneficiary);
+        parent_hash: &B256,
+        mut params_fn: impl FnMut(&Header) -> BlockParams,
+        txs: Vec<(TxEnvelope, Address)>,
+        expected: Option<&Header>,
+        qc: Vec<u8>,
+    ) -> Result<Executed> {
+        let head = self.head()?;
+        let ancestors = self.pending_chain(&head, parent_hash)?;
+        let parent_header = match ancestors.last() {
+            Some(p) => p.header.clone(),
+            None => head.clone(),
+        };
+        let params = params_fn(&parent_header);
+        let number = params.input.number;
+        let mut changes = overlay::Changes::default();
+        for a in &ancestors {
+            changes.push(a.header.number, a.hash, &a.changes);
+        }
+
         let mut included = Vec::new();
         let mut rejected = Vec::new();
         let executed = {
             let reader = self.store.reader()?;
             let view = StateView::latest(&reader);
+            let db = overlay::Overlay { base: &view, changes: &changes };
             let mut ex =
-                BlockExecutor::new(&view, params).map_err(|e| ChainError::Exec(e.to_string()))?;
-            for (tx, sender) in candidates {
-                if ex.gas_remaining() < 21_000 {
+                BlockExecutor::new(&db, params).map_err(|e| ChainError::Exec(e.to_string()))?;
+            for (tx, sender) in txs {
+                if expected.is_none() && ex.gas_remaining() < 21_000 {
                     break;
                 }
                 let hash = *tx.tx_hash();
                 match ex.add(tx, sender).map_err(|e| ChainError::Exec(e.to_string()))? {
                     Ok(_) => included.push(hash),
+                    Err(e) if expected.is_some() => {
+                        return Err(ChainError::InvalidBlock(format!("tx {hash}: {e}")));
+                    }
                     Err(e) => {
                         let permanent = matches!(e, TxRejection::Invalid(_) | TxRejection::Blob);
                         rejected.push((hash, e.to_string(), permanent));
@@ -197,44 +267,112 @@ impl Chain {
             }
             ex.finish()
         };
-        let (header, bundle) = self.commit(executed, None, None)?;
+
+        // State root: apply ancestors and this block in a write transaction that is then dropped
+        // (aborted). Nothing reaches the database until the block is committed.
+        let root = {
+            let w = self.store.writer()?;
+            for a in &ancestors {
+                w.apply_bundle(a.header.number, a.executed.bundle.clone())?;
+            }
+            w.apply_bundle(number, executed.bundle.clone())?
+        };
+        let header = executed.header(root);
+        if let Some(exp) = expected
+            && exp != &header
+        {
+            return Err(ChainError::InvalidBlock(format!(
+                "header mismatch (state root {} vs {})",
+                header.state_root, exp.state_root
+            )));
+        }
+        let parent_root = match ancestors.last() {
+            Some(p) => Some(p.bundle.root),
+            None => self.store.reader()?.envelope_root(head.number)?,
+        };
+        let bundle = bolt_ipld::bundle(&header, &executed.transactions, parent_root, qc);
+        // Publish the IPFS blocks right away so peers can fetch them before the block is final
+        // (validators must hold the data to vote).
+        {
+            let w = self.store.writer()?;
+            for (cid, data) in &bundle.blocks {
+                w.put_ipld(cid, data)?;
+            }
+            w.commit()?;
+        }
+        let (changes_plain, _) =
+            executed.bundle.to_plain_state_and_reverts(OriginalValuesKnown::Yes);
         let hash = header.hash_slow();
-        Ok(BuiltBlock { header, hash, included, rejected, bundle })
+        let pending =
+            Arc::new(PendingBlock { hash, header, executed, changes: changes_plain, bundle });
+        self.pending.lock().insert(hash, pending.clone());
+        Ok((pending, included, rejected))
     }
 
-    /// Validates and imports a block produced elsewhere. Every transaction must execute.
-    pub fn import_block(&self, header: &Header, transactions: Vec<TxEnvelope>) -> Result<B256> {
-        self.import_block_with_root(header, transactions, None)
+    /// Builds a block on `parent` from candidate transactions, without committing it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_on(
+        &self,
+        parent: &B256,
+        candidates: impl IntoIterator<Item = (TxEnvelope, Address)>,
+        timestamp: u64,
+        beneficiary: Address,
+        extra_data: Bytes,
+        qc: Vec<u8>,
+    ) -> Result<BuiltBlock> {
+        let beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
+        let (pending, included, rejected) = self.execute_on(
+            parent,
+            |ph| {
+                let mut p = self.params_for(ph, timestamp.max(ph.timestamp + 1), beneficiary);
+                p.parent_beacon_root = beacon;
+                p.extra_data = extra_data.clone();
+                p
+            },
+            candidates.into_iter().collect(),
+            None,
+            qc.clone(),
+        )?;
+        Ok(BuiltBlock {
+            header: pending.header.clone(),
+            hash: pending.hash,
+            included,
+            rejected,
+            bundle: pending.bundle.clone(),
+        })
     }
 
-    /// Like [`Chain::import_block`], additionally requiring the block's IPFS envelope to hash to
-    /// `root` (the CID it was announced under).
-    pub fn import_block_with_root(
+    /// Verifies a block proposed by someone else on top of a committed or pending parent, without
+    /// committing it. `qc` must be the envelope's certificate for the parent.
+    pub fn verify_block(
         &self,
         header: &Header,
         transactions: Vec<TxEnvelope>,
-        root: Option<Cid>,
-    ) -> Result<B256> {
-        let parent = self.head()?;
-        let invalid = |m: String| ChainError::InvalidBlock(m);
-        if header.parent_hash != parent.hash_slow() || header.number != parent.number + 1 {
-            return Err(invalid(format!("does not extend head {}", parent.number)));
+        qc: Vec<u8>,
+    ) -> Result<Arc<PendingBlock>> {
+        if let Some(p) = self.pending(&header.hash_slow()) {
+            return Ok(p);
+        }
+        let parent = self
+            .header_of(&header.parent_hash)?
+            .ok_or(ChainError::UnknownParent(header.parent_hash))?;
+        let invalid = ChainError::InvalidBlock;
+        if header.number != parent.number + 1 {
+            return Err(invalid("wrong number".into()));
         }
         if header.timestamp <= parent.timestamp {
             return Err(invalid("timestamp not after parent".into()));
         }
-        let mut params = self.params_for(&parent, header.timestamp, header.beneficiary);
-        if header.base_fee_per_gas != Some(params.input.base_fee) {
+        if header.base_fee_per_gas != Some(next_base_fee(&parent, self.config.min_base_fee_wei)) {
             return Err(invalid("wrong base fee".into()));
         }
-        if header.gas_limit != params.input.gas_limit {
+        if header.gas_limit != self.config.gas_limit {
             return Err(invalid("wrong gas limit".into()));
         }
-        params.input.prevrandao = header.mix_hash;
-        params.parent_beacon_root = header.parent_beacon_block_root.unwrap_or_default();
-        params.extra_data = header.extra_data.clone();
-
-        // Signature recovery dominates import time for simple transactions: do it on all cores.
+        let expected_beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
+        if header.parent_beacon_block_root != Some(expected_beacon) {
+            return Err(invalid("parent certificate hash mismatch".into()));
+        }
         let senders: Vec<Address> = {
             use rayon::prelude::*;
             transactions
@@ -243,68 +381,129 @@ impl Chain {
                 .collect::<Result<_, _>>()
                 .map_err(|_| invalid("bad signature".into()))?
         };
-        let executed = {
-            let reader = self.store.reader()?;
-            let view = StateView::latest(&reader);
-            let mut ex =
-                BlockExecutor::new(&view, params).map_err(|e| ChainError::Exec(e.to_string()))?;
-            for (tx, sender) in transactions.into_iter().zip(senders) {
-                let hash = *tx.tx_hash();
-                ex.add(tx, sender)
-                    .map_err(|e| ChainError::Exec(e.to_string()))?
-                    .map_err(|e: TxRejection| invalid(format!("tx {hash}: {e}")))?;
-            }
-            ex.finish()
-        };
-        let (sealed, _) = self.commit(executed, Some(header), root)?;
-        Ok(sealed.hash_slow())
+        let (h, number) = (header.clone(), header.number);
+        let (pending, _, _) = self.execute_on(
+            &header.parent_hash,
+            |ph| {
+                let mut p = self.params_for(ph, h.timestamp, h.beneficiary);
+                p.input.prevrandao = h.mix_hash;
+                p.parent_beacon_root = expected_beacon;
+                p.extra_data = h.extra_data.clone();
+                p
+            },
+            transactions.into_iter().zip(senders).collect(),
+            Some(header),
+            qc,
+        )?;
+        debug_assert_eq!(pending.header.number, number);
+        Ok(pending)
     }
 
-    /// Applies an executed block. With `expected`, the resulting header must match exactly or
-    /// nothing is written.
-    fn commit(
-        &self,
-        executed: ExecutedBlock,
-        expected: Option<&Header>,
-        expected_root: Option<Cid>,
-    ) -> Result<(Header, BlockBundle)> {
-        let number = executed.params.input.number;
+    /// Makes a pending block final. It must extend the committed head.
+    pub fn commit_pending(&self, hash: &B256) -> Result<Header> {
+        let p = self.pending(hash).ok_or(ChainError::UnknownParent(*hash))?;
+        let head = self.head()?;
+        if p.header.parent_hash != head.hash_slow() {
+            return Err(ChainError::InvalidBlock(format!(
+                "block {} does not extend head {}",
+                p.header.number, head.number
+            )));
+        }
+        let number = p.header.number;
         let w = self.store.writer()?;
-        let root = w.apply_bundle(number, executed.bundle.clone())?;
-        let header = executed.header(root);
-        if let Some(exp) = expected
-            && exp != &header
-        {
-            // Dropping `w` aborts the write transaction.
-            return Err(ChainError::InvalidBlock(format!(
-                "header mismatch (state root {} vs {})",
-                header.state_root, exp.state_root
+        let root = w.apply_bundle(number, p.executed.bundle.clone())?;
+        if root != p.header.state_root {
+            return Err(ChainError::Exec(format!(
+                "state root changed between execution and commit at {number}"
             )));
         }
-        let parent_root = w.envelope_root(number - 1)?;
-        let bundle = bolt_ipld::bundle(&header, &executed.transactions, parent_root, vec![]);
-        if let Some(exp) = expected_root
-            && exp != bundle.root
-        {
-            return Err(ChainError::InvalidBlock(format!(
-                "envelope {} != announced {exp}",
-                bundle.root
-            )));
-        }
-        w.put_ipld_bundle(number, &bundle.root, &bundle.blocks)?;
+        w.put_ipld_bundle(number, &p.bundle.root, &p.bundle.blocks)?;
         w.put_block(
             &StoredBlock {
-                header: header.clone(),
-                transactions: executed.transactions,
-                senders: executed.senders,
+                header: p.header.clone(),
+                transactions: p.executed.transactions.clone(),
+                senders: p.executed.senders.clone(),
             },
-            &executed.receipts,
+            &p.executed.receipts,
         )?;
         w.prune_history(number)?;
         w.commit()?;
-        tracing::debug!(number, hash = %header.hash_slow(), root = %bundle.root, gas = header.gas_used, "committed block");
-        Ok((header, bundle))
+        // Drop pending blocks that can no longer be built upon.
+        self.pending.lock().retain(|_, b| b.header.number > number);
+        tracing::debug!(number, hash = %p.hash, root = %p.bundle.root, gas = p.header.gas_used, "committed block");
+        Ok(p.header.clone())
     }
+
+    /// Produces and immediately commits the next block (single-producer devnet).
+    pub fn build_block(
+        &self,
+        candidates: impl IntoIterator<Item = (TxEnvelope, Address)>,
+        timestamp: u64,
+        beneficiary: Address,
+    ) -> Result<BuiltBlock> {
+        let head = self.head()?.hash_slow();
+        let built =
+            self.build_on(&head, candidates, timestamp, beneficiary, Bytes::new(), vec![])?;
+        self.commit_pending(&built.hash)?;
+        Ok(built)
+    }
+
+    /// Validates and imports a final block produced elsewhere. Every transaction must execute.
+    pub fn import_block(&self, header: &Header, transactions: Vec<TxEnvelope>) -> Result<B256> {
+        self.import_block_with_root(header, transactions, None)
+    }
+
+    /// Like [`Chain::import_block`], additionally requiring the block's IPFS envelope to hash to
+    /// `root` (the CID it was announced under). The envelope's QC is taken from `qc`.
+    pub fn import_block_with_root(
+        &self,
+        header: &Header,
+        transactions: Vec<TxEnvelope>,
+        root: Option<Cid>,
+    ) -> Result<B256> {
+        self.import_final(header, transactions, root, vec![])
+    }
+
+    /// Imports a final block whose envelope carries `qc`.
+    pub fn import_final(
+        &self,
+        header: &Header,
+        transactions: Vec<TxEnvelope>,
+        root: Option<Cid>,
+        qc: Vec<u8>,
+    ) -> Result<B256> {
+        let head = self.head()?;
+        if header.parent_hash != head.hash_slow() {
+            return Err(ChainError::InvalidBlock(format!("does not extend head {}", head.number)));
+        }
+        let pending = self.verify_block(header, transactions, qc)?;
+        if let Some(exp) = root
+            && exp != pending.bundle.root
+        {
+            self.pending.lock().remove(&pending.hash);
+            return Err(ChainError::InvalidBlock(format!(
+                "envelope {} != announced {exp}",
+                pending.bundle.root
+            )));
+        }
+        self.commit_pending(&pending.hash)?;
+        Ok(pending.hash)
+    }
+}
+
+/// A block that was executed and verified but is not final yet.
+#[derive(Debug)]
+pub struct PendingBlock {
+    /// Block hash.
+    pub hash: B256,
+    /// Header.
+    pub header: Header,
+    /// Execution output (transactions, receipts, state changes with reverts).
+    pub executed: ExecutedBlock,
+    /// Plain state changes, used to execute children before this block is final.
+    pub changes: StateChangeset,
+    /// IPFS representation (already in the blockstore).
+    pub bundle: BlockBundle,
 }
 
 /// Serialized size of a transaction (for pool accounting).

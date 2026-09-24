@@ -1,6 +1,6 @@
 //! Boltchain node binary.
 
-use boltchain::{bench, devnet, follow};
+use boltchain::{bench, devnet, follow, keys, validator};
 
 use anyhow::{Context, Result};
 use bolt_primitives::Genesis;
@@ -21,10 +21,15 @@ enum Command {
     Genesis(GenesisCmd),
     /// Print the protocol constants this binary was built with.
     Params,
+    /// Validator key tools.
+    #[command(subcommand)]
+    Keys(keys::KeysCmd),
     /// Run a single-producer development network with JSON-RPC, announcing blocks over IPFS.
     Devnet(devnet::DevnetArgs),
     /// Follow a producer: sync blocks over IPFS, serve JSON-RPC, forward transactions.
     Follow(follow::FollowArgs),
+    /// Run a validator: take part in consensus, produce and finalize blocks.
+    Validator(validator::ValidatorArgs),
     /// Print the peer id of a node key (creating the key if missing).
     NodeId {
         /// Node key file.
@@ -41,6 +46,24 @@ enum GenesisCmd {
     Inspect {
         /// Path to genesis.json.
         path: PathBuf,
+    },
+    /// Write a genesis whose validators use the insecure deterministic dev keys.
+    MakeDev {
+        /// Output file.
+        #[arg(long)]
+        out: PathBuf,
+        /// Chain id (8017 produces a mainnet-shaped test genesis without funded accounts).
+        #[arg(long, default_value_t = 1337)]
+        chain_id: u64,
+        /// Number of validators.
+        #[arg(long, default_value_t = 7)]
+        validators: u32,
+        /// Accounts to fund with 10,000 BOLT each (dev chains only).
+        #[arg(long)]
+        fund: Vec<alloy_primitives::Address>,
+        /// Header extra data.
+        #[arg(long, default_value = "Boltchain dev")]
+        extra: String,
     },
 }
 
@@ -59,15 +82,27 @@ fn main() -> Result<()> {
                 .block_on(devnet::run(args))?;
         }
         Command::Bench(args) => bench::run(args)?,
+        Command::Keys(cmd) => keys::run(cmd)?,
         Command::Follow(args) => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?
                 .block_on(follow::run(args))?;
         }
+        Command::Validator(args) => {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(validator::run(args))?;
+        }
         Command::NodeId { node_key } => {
             let key = bolt_net::load_or_create_key(&node_key)?;
             println!("{}", key.public().to_peer_id());
+        }
+        Command::Genesis(GenesisCmd::MakeDev { out, chain_id, validators, fund, extra }) => {
+            let g = make_dev_genesis(chain_id, validators, &fund, &extra)?;
+            std::fs::write(&out, serde_json::to_string_pretty(&g)? + "\n")?;
+            println!("wrote {} (genesis hash {})", out.display(), g.hash());
         }
         Command::Genesis(GenesisCmd::Inspect { path }) => {
             let json = std::fs::read_to_string(&path)
@@ -99,4 +134,66 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Genesis with deterministic dev validator keys (BLS keys, PoPs and fee-recipient bindings).
+fn make_dev_genesis(
+    chain_id: u64,
+    validators: u32,
+    fund: &[alloy_primitives::Address],
+    extra: &str,
+) -> Result<Genesis> {
+    use bolt_primitives::{bls, genesis::*, params::*};
+    let dev = chain_id != CHAIN_ID;
+    if !dev && !fund.is_empty() {
+        anyhow::bail!("chain id {CHAIN_ID} genesis cannot fund accounts");
+    }
+    let bootstrap_validators = (0..validators)
+        .map(|i| {
+            let k = bls::dev_key(i);
+            let pk = k.public_key();
+            let (fee_recipient, sig) =
+                bls::sign_binding(&bls::dev_eth_key(i), chain_id, &pk).expect("valid dev key");
+            BootstrapValidator {
+                name: format!("dev-{i}"),
+                bls_pubkey: pk,
+                proof_of_possession: k.proof_of_possession(),
+                fee_recipient,
+                binding_signature: Some(sig),
+            }
+        })
+        .collect();
+    let owner = |i: u32| {
+        let sk =
+            k256::ecdsa::SigningKey::from_slice(&bls::dev_eth_key(1000 + i)).expect("valid key");
+        alloy_primitives::Address::from_public_key(sk.verifying_key())
+    };
+    let alloc = fund
+        .iter()
+        .map(|a| {
+            (
+                *a,
+                GenesisAccount {
+                    balance: alloy_primitives::U256::from(10_000u128 * WEI_PER_BOLT),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    let g = Genesis {
+        dev,
+        config: ChainConfig { chain_id, ..ChainConfig::default() },
+        timestamp: 0,
+        extra_data: extra.as_bytes().to_vec().into(),
+        bootstrap_validators,
+        governance: Governance {
+            owners: (0..9).map(owner).collect(),
+            threshold: 5,
+            upgrade_delay_seconds: 16 * 86_400,
+            param_delay_seconds: 2 * 86_400,
+        },
+        alloc,
+    };
+    g.validate()?;
+    Ok(g)
 }
