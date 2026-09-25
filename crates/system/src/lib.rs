@@ -12,7 +12,7 @@ pub mod queries;
 
 pub use committee::Committee;
 pub use genesis::{genesis_alloc, genesis_hash, genesis_header, genesis_state_root};
-pub use hooks::{CertVotes, EpochRules, Phase, pre_block};
+pub use hooks::{CertVotes, EpochRules, Phase, Producer, pre_block};
 
 #[cfg(test)]
 mod tests;

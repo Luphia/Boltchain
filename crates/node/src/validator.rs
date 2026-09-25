@@ -11,11 +11,16 @@
 //! engine. When the epoch's last block is final the engine reports it with its proof; the node
 //! stores the proof (the next epoch's first block carries it) and starts the next epoch's engine.
 //!
-//! Mining phase (ADR 0007): until PoS starts the node follows the mined chain (and may mine
-//! itself). The first PoS epoch starts from the last mined block (the terminal block) as its
-//! anchor, like epoch 0 starts from genesis: its first block carries no certificate. If a heavier
-//! mined branch replaces the terminal block before the committee certified anything, the engine
-//! restarts on the new anchor without ever signing again in a round it already used.
+//! Mining phase (ADR 0007): until a committee exists the node follows the mined chain (and may
+//! mine itself). In phase B each epoch's committee runs the same engine over the mined chain and
+//! finalizes checkpoints (see [`crate::checkpoint`]); mining goes on. Under PoS the committee
+//! produces the blocks.
+//!
+//! The first committee epoch starts from a block nobody certified as its anchor, like epoch 0
+//! starts from genesis: the last block before phase B (or before PoS, if phase B never ran). If a
+//! heavier mined branch replaces it before the committee certified anything, the engine restarts
+//! on the new anchor without ever signing again in a round it already used. When phase B ran, it
+//! finalizes the terminal block, and the first PoS block carries that proof.
 
 use crate::keys;
 use alloy_consensus::Header;
@@ -70,8 +75,9 @@ pub fn epoch_anchor(chain: &Chain, epoch: u64) -> Result<Option<BlockInfo>> {
     }))
 }
 
-/// Whether `qc` is the anchor certificate of a chain start: genesis (epoch 0), or the terminal
-/// mined block for the first PoS epoch. The block after it carries no certificate.
+/// Whether `qc` is the anchor certificate of a chain start: genesis (epoch 0), or the uncertified
+/// last block before the first committee epoch (phase B, or PoS if phase B never ran). The block
+/// after it carries no certificate.
 pub fn is_start_anchor(chain: &Chain, qc: &Qc<BlsScheme>) -> bool {
     if qc.is_genesis() {
         return true;
@@ -80,13 +86,55 @@ pub fn is_start_anchor(chain: &Chain, qc: &Qc<BlsScheme>) -> bool {
         return false;
     }
     let Ok(phase) = chain.phase() else { return false };
-    phase.pos_epoch == Some(qc.epoch) && phase.terminal_height(chain.rules()) == Some(qc.height)
+    match phase.checkpoint_epoch {
+        Some(b) if b > 0 => qc.epoch == b && qc.height == chain.rules().epoch_end(b - 1),
+        _ => false,
+    }
 }
 
-/// Whether PoS runs from the block after the local head.
-pub fn pos_ready(chain: &Chain) -> Result<bool> {
+/// What the committee of an epoch does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// Finalizes mined blocks (phase B).
+    Checkpoints,
+    /// Produces the blocks (PoS).
+    Blocks,
+}
+
+/// What the committee of `epoch` does, if there is one.
+pub fn mode_of(chain: &Chain, epoch: u64) -> Result<Option<Mode>> {
+    let phase = chain.phase()?;
+    if phase.pos_epoch.is_some_and(|p| epoch >= p) {
+        return Ok(Some(Mode::Blocks));
+    }
+    Ok(phase.is_checkpoint_epoch(epoch).then_some(Mode::Checkpoints))
+}
+
+/// The committee epoch this node should run now, if any: under PoS the one after the head; in
+/// phase B the one after the last finalized checkpoint (the first one once its uncertified anchor
+/// is buried deep enough).
+pub fn next_consensus_epoch(chain: &Chain) -> Result<Option<u64>> {
+    let phase = chain.phase()?;
+    let rules = chain.rules();
     let head = chain.head()?.number;
-    Ok(chain.phase()?.is_pos(chain.rules(), head + 1))
+    let fin = chain.finalized()?.map(|(n, _)| n).unwrap_or(0);
+    if phase.is_pos(rules, head + 1) {
+        let terminal = phase.terminal_height(rules).unwrap_or(0);
+        // With phase B the PoS epoch starts from the finalized terminal block.
+        if !phase.terminal_is_checkpointed() || head > terminal || fin >= terminal {
+            return Ok(Some(rules.epoch_of(head + 1)));
+        }
+    }
+    let Some(b) = phase.checkpoint_epoch else { return Ok(None) };
+    if b == 0 {
+        return Ok(Some(rules.epoch_of(head + 1)));
+    }
+    let start = rules.epoch_end(b - 1);
+    if fin >= start {
+        return Ok(Some(rules.epoch_of(fin + 1)));
+    }
+    let buried = head >= start + crate::checkpoint::required_depth(chain, start);
+    Ok(buried.then_some(b))
 }
 
 /// The committee of `epoch` from local state, if known yet.
@@ -173,6 +221,7 @@ struct EpochCtx {
     engine: Engine<BlsScheme>,
     committee: EpochCommittee,
     end: u64,
+    mode: Mode,
 }
 
 fn now_ms() -> u64 {
@@ -245,11 +294,19 @@ impl Validator {
     }
 
     fn enter_epoch(&self, epoch: u64) -> Result<EpochCtx> {
+        let mode = mode_of(&self.chain, epoch)?.context("no committee for this epoch")?;
         let anchor = epoch_anchor(&self.chain, epoch)?.context("epoch anchor not final yet")?;
         let committee = committee_of(&self.chain, epoch)?.context("committee not in state yet")?;
         let scheme = BlsScheme::new(committee.pubkeys.clone(), &self.keys);
         let me = scheme.signers();
         let end = self.chain.rules().epoch_end(epoch);
+        // Checkpoint rounds wait for mined blocks: give them a few block intervals.
+        let base_timeout_ms = match mode {
+            Mode::Blocks => self.cfg.base_timeout_ms,
+            Mode::Checkpoints => {
+                self.cfg.base_timeout_ms.max(3_000 * self.chain.config().pow.block_seconds)
+            }
+        };
         let cfg = Config {
             chain_id: self.chain.config().chain_id,
             epoch,
@@ -257,7 +314,7 @@ impl Validator {
             me: me.clone(),
             anchor: anchor.clone(),
             end_height: end,
-            base_timeout_ms: self.cfg.base_timeout_ms,
+            base_timeout_ms,
         };
         let engine = match std::fs::read(self.state_path())
             .ok()
@@ -296,15 +353,19 @@ impl Validator {
             local = me.len(),
             start = anchor.height + 1,
             end,
+            ?mode,
             "epoch starting"
         );
-        Ok(EpochCtx { epoch, engine, committee, end })
+        Ok(EpochCtx { epoch, engine, committee, end, mode })
     }
 
-    /// Epoch to run given the local head: the one after the last fully final epoch.
-    fn current_epoch(&self) -> Result<u64> {
-        let head = self.chain.head()?.number;
-        Ok(self.chain.rules().epoch_of(head + 1))
+    /// Height up to which the current epoch's work is final: the head under PoS, the last
+    /// finalized checkpoint in phase B.
+    fn progress(&self, mode: Mode) -> u64 {
+        match mode {
+            Mode::Blocks => self.chain.head().map(|h| h.number).unwrap_or(0),
+            Mode::Checkpoints => self.chain.finalized().ok().flatten().map(|(n, _)| n).unwrap_or(0),
+        }
     }
 
     /// Runs until the network event stream ends.
@@ -313,17 +374,38 @@ impl Validator {
         let (itx, mut irx) = mpsc::unbounded_channel::<Internal>();
         let catch_up = self.spawn_catch_up(itx.clone());
         let mut sources: HashMap<B256, PeerId> = HashMap::new();
+        let mut rounds: HashMap<B256, u64> = HashMap::new();
         let mut future: VecDeque<Message<BlsScheme>> = VecDeque::new();
-        if !self.mining_phase(&mut events, &mut irx, &catch_up, &mut future).await? {
+        let cert_slot: crate::miner::CertSlot = Default::default();
+        // Mines until PoS starts (it stops by itself then).
+        let miner = self.miner.clone().map(|cfg| {
+            tokio::spawn(crate::miner::run(
+                self.chain.clone(),
+                self.pool.clone(),
+                self.net.clone(),
+                cfg,
+                cert_slot.clone(),
+            ))
+        });
+        let _abort_miner = AbortOnDrop(miner);
+        let Some(first) = self.mining_phase(&mut events, &mut irx, &catch_up, &mut future).await?
+        else {
             return Ok(());
-        }
-        let mut ctx = self.enter_epoch(self.current_epoch()?)?;
+        };
+        let mut ctx = self.enter_epoch(first)?;
         let mut seen: SeenVotes = HashMap::new();
         let mut actions = ctx.engine.start();
         actions.extend(self.replay(&mut ctx, &mut future));
         let mut reannounce = tokio::time::interval(REANNOUNCE);
         loop {
-            self.handle(&mut ctx, actions, &itx, &sources, &mut future).await;
+            self.handle(&mut ctx, actions, &itx, &sources, &rounds, &mut future).await;
+            if ctx.mode == Mode::Checkpoints {
+                // Mined blocks carry the latest checkpoint QC: it pays its signers.
+                let qc = ctx.engine.high_qc();
+                if !qc.is_anchor() {
+                    *cert_slot.lock() = Some((qc.epoch, encode_cert(&Cert::Qc(qc.clone()))));
+                }
+            }
             actions = tokio::select! {
                 _ = reannounce.tick() => {
                     // Until the committee certified a block, keep the terminal block visible.
@@ -337,8 +419,10 @@ impl Validator {
                             self.watch_equivocation(&ctx, &msg, &mut seen);
                             if let Message::Proposal(p) = &msg {
                                 sources.insert(p.block.hash, via);
+                                rounds.insert(p.block.hash, p.block.round);
                                 if sources.len() > 256 {
                                     sources.clear();
+                                    rounds.clear();
                                 }
                             }
                             if msg.epoch() == ctx.epoch {
@@ -358,8 +442,9 @@ impl Validator {
                     Some(NetEvent::Announce { via, announce }) => {
                         // Catch-up path for blocks finalized while we were behind, off the main
                         // loop so consensus keeps up while importing.
+                        // In phase B every mined block matters (side branches, finality proofs).
                         let head = self.chain.head().map(|h| h.number).unwrap_or(0);
-                        if announce.height > head {
+                        if announce.height > head || ctx.mode == Mode::Checkpoints {
                             let _ = catch_up.try_send((via, announce));
                         }
                         vec![]
@@ -396,27 +481,20 @@ impl Validator {
         Ok(())
     }
 
-    /// Until PoS starts: follow (and optionally mine) the mined chain, keep transactions, buffer
-    /// early consensus messages. Returns `false` if the network stopped.
+    /// Until a committee epoch can run: follow (and optionally mine) the mined chain, keep
+    /// transactions, buffer early consensus messages. Returns the epoch to run, or `None` if the
+    /// network stopped.
     async fn mining_phase(
         &self,
         events: &mut mpsc::Receiver<NetEvent>,
         irx: &mut mpsc::UnboundedReceiver<Internal>,
         catch_up: &mpsc::Sender<(PeerId, Announce)>,
         future: &mut VecDeque<Message<BlsScheme>>,
-    ) -> Result<bool> {
-        if pos_ready(&self.chain)? {
-            return Ok(true);
+    ) -> Result<Option<u64>> {
+        if let Some(e) = next_consensus_epoch(&self.chain)? {
+            return Ok(Some(e));
         }
         tracing::info!(head = self.chain.head()?.number, "mining phase: following mined blocks");
-        let miner = self.miner.clone().map(|cfg| {
-            tokio::spawn(crate::miner::run(
-                self.chain.clone(),
-                self.pool.clone(),
-                self.net.clone(),
-                cfg,
-            ))
-        });
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         let mut last_announce = std::time::Instant::now();
         let ready = loop {
@@ -424,12 +502,12 @@ impl Validator {
                 self.reannounce_mined_head().await;
                 last_announce = std::time::Instant::now();
             }
-            if pos_ready(&self.chain)? {
-                break true;
+            if let Some(e) = next_consensus_epoch(&self.chain)? {
+                break Some(e);
             }
             tokio::select! {
                 ev = events.recv() => match ev {
-                    None => break false,
+                    None => break None,
                     Some(NetEvent::Consensus { data, .. }) => {
                         if let Some(msg) = bolt_consensus::decode::<BlsScheme>(&data) {
                             if future.len() >= 4096 {
@@ -459,15 +537,14 @@ impl Validator {
                 _ = tick.tick() => {}
             }
         };
-        if let Some(m) = miner {
-            m.abort();
-        }
-        if ready {
+        if let Some(e) = ready {
             let phase = self.chain.phase()?;
             tracing::info!(
-                epoch = ?phase.pos_epoch,
+                epoch = e,
+                checkpoints_from = ?phase.checkpoint_epoch,
+                pos_from = ?phase.pos_epoch,
                 terminal = ?phase.terminal_height(self.chain.rules()),
-                "PoS starts: the committee takes over from the last mined block"
+                "a committee takes over"
             );
         }
         Ok(ready)
@@ -562,8 +639,7 @@ impl Validator {
     ) -> Vec<Action<BlsScheme>> {
         let mut out = Vec::new();
         loop {
-            let head = self.chain.head().map(|h| h.number).unwrap_or(0);
-            if head < ctx.end {
+            if self.progress(ctx.mode) < ctx.end {
                 return out;
             }
             match self.enter_epoch(ctx.epoch + 1) {
@@ -665,6 +741,7 @@ impl Validator {
         actions: Vec<Action<BlsScheme>>,
         itx: &mpsc::UnboundedSender<Internal>,
         sources: &HashMap<B256, PeerId>,
+        rounds: &HashMap<B256, u64>,
         future: &mut VecDeque<Message<BlsScheme>>,
     ) {
         let mut queue: VecDeque<Action<BlsScheme>> = actions.into();
@@ -698,9 +775,14 @@ impl Validator {
                         let (chain, net, itx) = (self.chain.clone(), self.net.clone(), itx.clone());
                         let via = sources.get(&p.block.hash).copied();
                         let (epoch, keys) = (ctx.epoch, ctx.committee.pubkeys.clone());
+                        let mode = ctx.mode;
                         tokio::spawn(async move {
                             let hash = p.block.hash;
-                            let ok = match validate(&chain, &net, &p, via, &keys).await {
+                            let res = match mode {
+                                Mode::Blocks => validate(&chain, &net, &p, via, &keys).await,
+                                Mode::Checkpoints => crate::checkpoint::validate(&chain, &p).await,
+                            };
+                            let ok = match res {
                                 Ok(()) => true,
                                 Err(e) => {
                                     tracing::warn!(
@@ -712,6 +794,19 @@ impl Validator {
                                 }
                             };
                             let _ = itx.send(Internal::Validated(epoch, hash, ok));
+                        });
+                    }
+                    Action::Propose { round, qc, tc } if ctx.mode == Mode::Checkpoints => {
+                        let (chain, itx, epoch) = (self.chain.clone(), itx.clone(), ctx.epoch);
+                        let deadline = ctx.engine.config().base_timeout_ms * 3 / 4;
+                        tokio::spawn(async move {
+                            match crate::checkpoint::propose(&chain, round, &qc, deadline).await {
+                                Ok(block) => {
+                                    let b = Built { block, qc, tc, payload: Vec::new(), epoch };
+                                    let _ = itx.send(Internal::Built(Box::new(b)));
+                                }
+                                Err(e) => tracing::debug!(round, "no checkpoint to propose: {e:#}"),
+                            }
                         });
                     }
                     Action::Propose { round, qc, tc } => {
@@ -749,6 +844,9 @@ impl Validator {
                             }
                         });
                     }
+                    Action::Commit { blocks, proof } if ctx.mode == Mode::Checkpoints => {
+                        self.commit_checkpoint(blocks, proof).await
+                    }
                     Action::Commit { blocks, proof } => self.commit(blocks, proof).await,
                     Action::EpochEnd { block, proof } => {
                         tracing::info!(epoch = ctx.epoch, height = block.height, "epoch final");
@@ -758,8 +856,13 @@ impl Validator {
                     Action::FetchBlock(hash) => {
                         // Blocks are content-addressed: if we have the header (pending or final) we
                         // can describe it; otherwise the catch-up path brings it with a proof.
-                        if let Ok(Some(h)) = self.chain.header_of(&hash)
-                            && let Some(round) = round_of(&h.extra_data)
+                        // Checkpoint rounds are not in mined headers: use the proposal we saw.
+                        let round_for = |h: &Header| match ctx.mode {
+                            Mode::Blocks => round_of(&h.extra_data),
+                            Mode::Checkpoints => rounds.get(&hash).copied(),
+                        };
+                        if let Ok(Some(h)) = self.chain.header_any(&hash)
+                            && let Some(round) = round_for(&h)
                         {
                             let b =
                                 BlockInfo { hash, parent: h.parent_hash, round, height: h.number };
@@ -768,6 +871,37 @@ impl Validator {
                     }
                 }
             }
+        }
+    }
+
+    /// Phase B: the committed checkpoint (and its ancestors) is final. Publishes it with its
+    /// proof so every node stops following branches below it.
+    async fn commit_checkpoint(&self, blocks: Vec<BlockInfo>, mut proof: CommitProof<BlsScheme>) {
+        let Some(last) = blocks.last().cloned() else { return };
+        let chain = self.chain.clone();
+        let res =
+            tokio::task::spawn_blocking(move || chain.finalize(&last.hash, last.height)).await;
+        match res {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(height = last.height, "cannot finalize checkpoint: {e}");
+                return;
+            }
+            Err(e) => {
+                tracing::error!("finalize task failed: {e}");
+                return;
+            }
+        }
+        if proof.nil_rounds.is_empty() {
+            match self.chain.header_any(&proof.child_qc.block) {
+                Ok(Some(h)) => proof.child_header = alloy_rlp::encode(&h),
+                _ => return,
+            }
+        }
+        tracing::info!(height = last.height, hash = %last.hash, "checkpoint final");
+        let bytes = serde_ipld_dagcbor::to_vec(&proof).expect("proof serializes");
+        if let Some(a) = bolt_sync::announce_stored(&self.chain, last.height, bytes) {
+            let _ = self.net.publish(a).await;
         }
     }
 
@@ -1019,4 +1153,15 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
     task.abort();
     handle.stop()?;
     Ok(())
+}
+
+/// Aborts a task when dropped.
+struct AbortOnDrop(Option<tokio::task::JoinHandle<Result<()>>>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() {
+            t.abort();
+        }
+    }
 }

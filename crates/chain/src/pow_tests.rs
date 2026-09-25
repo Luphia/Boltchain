@@ -28,6 +28,11 @@ fn genesis() -> Genesis {
     g.config.pow.half_life_seconds = 120;
     g.config.epoch_slots = L;
     g.config.committee_size = 4;
+    // T1 = T2: phase B never runs here (phase B has its own tests).
+    g.config.checkpoint_min_stakers = Some(2);
+    g.config.checkpoint_min_stake_bolt = Some(128);
+    g.config.pos_min_stakers = Some(2);
+    g.config.pos_min_stake_bolt = Some(128);
     g.validate().unwrap();
     g
 }
@@ -90,7 +95,13 @@ fn mine(
     let cands: Vec<_> = txs.into_iter().map(|t| (t.clone(), t.recover_signer().unwrap())).collect();
     let n = cands.len();
     let t = chain
-        .build_template(cands, head.timestamp + spacing, miner, Bytes::from_static(b"test miner"))
+        .build_template(
+            cands,
+            head.timestamp + spacing,
+            miner,
+            Bytes::from_static(b"test miner"),
+            vec![],
+        )
         .unwrap();
     assert_eq!(t.included.len(), n, "{:?}", t.rejected);
     let key = chain.seal_key(&head.hash_slow(), head.number + 1).unwrap();
@@ -201,9 +212,9 @@ fn heavier_branch_wins_and_state_is_rewound() {
     let td_a = a.head_total_difficulty().unwrap();
     // Feed B's branch to A: the first two stay on the side, the third tips the balance.
     assert_eq!(a.import_mined(&b_blocks[0], vec![], None).unwrap(), MinedOutcome::Side);
+    let a_tip = a.head().unwrap().hash_slow();
     let second = a.import_mined(&b_blocks[1], vec![], None).unwrap();
     // Equal work: the lower hash wins (the same choice on every node).
-    let a_tip = a.store().reader().unwrap().header(4).unwrap().unwrap().hash_slow();
     if b_blocks[1].hash_slow() < a_tip {
         assert_eq!(second, MinedOutcome::Reorged { depth: 2 });
         assert_eq!(a.import_mined(&b_blocks[2], vec![], None).unwrap(), MinedOutcome::Extended);
@@ -300,7 +311,7 @@ fn stake_thresholds_switch_the_chain_to_pos() {
     // Block 17 must come from the PoS committee: mining it fails...
     let head = chain.head().unwrap();
     assert!(matches!(
-        chain.build_template(vec![], head.timestamp + 12, miner, Bytes::new()),
+        chain.build_template(vec![], head.timestamp + 12, miner, Bytes::new(), vec![]),
         Err(ChainError::InvalidBlock(_))
     ));
     // ...a PoS block is accepted (certificates are the node's business)...
@@ -368,4 +379,196 @@ fn gas_limit_moves_by_less_than_1_1024() {
     greedy.gas_limit = 31_000_000;
     let (_x, other) = open(&gs);
     assert!(matches!(other.import_mined(&greedy, vec![], None), Err(ChainError::InvalidBlock(_))));
+}
+
+/// Phase B genesis: T1 = 2 stakers / 128 BOLT, T2 = 3 stakers / 192 BOLT (pow-dev defaults).
+fn genesis_b() -> Genesis {
+    let mut g = genesis();
+    g.config.pos_min_stakers = Some(3);
+    g.config.pos_min_stake_bolt = Some(192);
+    g.validate().unwrap();
+    g
+}
+
+/// A QC by every member of `epoch`'s committee over `block` (validator ids 1, 2 hold dev keys
+/// 20, 21).
+fn checkpoint_qc(chain: &Chain, epoch: u64, round: u64, block: &Header) -> Vec<u8> {
+    use bolt_consensus::{BlsScheme, Cert, Qc, Scheme, bitmap, vote_msg};
+    let r = chain.store().reader().unwrap();
+    let c = queries::committee_at(&StateView::latest(&r), 1338, epoch).unwrap().unwrap();
+    let keys: Vec<_> = c.committee.members.iter().map(|id| dev_key(19 + id)).collect();
+    let scheme = BlsScheme::new(c.pubkeys.clone(), &keys);
+    let n = c.committee.members.len();
+    let msg = vote_msg(1338, epoch, round, &block.hash_slow());
+    let sigs: Vec<_> = (0..n as u16).map(|i| scheme.sign(i, &msg)).collect();
+    let qc = Qc::<BlsScheme> {
+        epoch,
+        round,
+        block: block.hash_slow(),
+        height: block.number,
+        signers: bitmap::encode(&(0..n as u16).collect::<Vec<_>>(), n),
+        sig: scheme.aggregate(&sigs),
+    };
+    bolt_consensus::encode_cert(&Cert::Qc(qc))
+}
+
+/// Mines on the head with a certificate in the envelope.
+fn mine_with_cert(chain: &Chain, cert: Vec<u8>, miner: Address) -> Result<(Header, MinedOutcome)> {
+    let head = chain.head().unwrap();
+    let t = chain.build_template(vec![], head.timestamp + 12, miner, Bytes::new(), cert)?;
+    let key = chain.seal_key(&head.hash_slow(), head.number + 1).unwrap();
+    let stop = AtomicBool::new(false);
+    let (nonce, _) = chain
+        .pow()
+        .search(&key, &bolt_pow::seal_hash(&t.header), t.header.difficulty, 0, 1, u64::MAX, &stop)
+        .unwrap()
+        .unwrap();
+    chain.seal_and_import(&t, nonce)
+}
+
+#[test]
+fn phase_b_splits_rewards_and_pays_checkpoint_voters() {
+    let g = genesis_b();
+    let (_d, chain) = open(&g);
+    let (_f, follower) = open(&g);
+    let miner = Address::repeat_byte(0x33);
+    mine(&chain, vec![register_tx(0, 20), register_tx(1, 21)], miner, 12);
+    while chain.head().unwrap().number < 12 {
+        mine(&chain, vec![], miner, 12);
+    }
+    // T1 held at blocks 5 and 9: phase B from epoch 4 (blocks 17..); T2 (3 stakers) never.
+    let phase = chain.phase().unwrap();
+    assert_eq!(phase.checkpoint_epoch, Some(4));
+    assert_eq!(phase.pos_epoch, None);
+    mine(&chain, vec![], miner, 12); // block 13 draws the epoch-4 committee
+    // A certificate in a phase-A block (14, epoch 3) is invalid, even a well-signed one.
+    let h13 = chain.head().unwrap();
+    assert!(matches!(
+        mine_with_cert(&chain, checkpoint_qc(&chain, 4, 1, &h13), miner),
+        Err(ChainError::InvalidBlock(_))
+    ));
+    while chain.head().unwrap().number < 16 {
+        mine(&chain, vec![], miner, 12);
+    }
+    let c4 = view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: 4 });
+    assert_eq!(c4.weights.iter().map(|w| *w as u32).sum::<u32>(), 4);
+
+    // Epoch 4: the miner gets 60% of the block reward.
+    let supply = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
+    let before = balance(&chain, miner);
+    let (h17, _) = mine(&chain, vec![], miner, 12);
+    let full = bolt_pow::block_reward(SUPPLY_CAP_WEI - supply, 8_000);
+    assert_eq!(balance(&chain, miner) - before, full * U256::from(6) / U256::from(10));
+
+    // Blocks carrying checkpoint QCs of epoch 4 record the votes, once per round.
+    let qc1 = checkpoint_qc(&chain, 4, 1, &h17);
+    mine_with_cert(&chain, qc1.clone(), miner).unwrap();
+    mine_with_cert(&chain, qc1, miner).unwrap(); // same round again: not counted twice
+    let h19 = chain.head().unwrap();
+    mine_with_cert(&chain, checkpoint_qc(&chain, 4, 2, &h19), miner).unwrap();
+    assert_eq!(
+        view(&chain, REWARDS, IRewardDistributor::votesOfCall { epoch: 4, index: U256::ZERO }),
+        U256::from(2)
+    );
+    // A forged QC (wrong epoch's committee keys) is invalid.
+    let mut forged = checkpoint_qc(&chain, 4, 3, &h19);
+    let last = forged.len() - 3;
+    forged[last] ^= 1;
+    assert!(mine_with_cert(&chain, forged, miner).is_err());
+
+    // Block 25 settles epoch 4: the voters share 40% of the epoch's consensus emission.
+    while chain.head().unwrap().number < 24 {
+        mine(&chain, vec![], miner, 12);
+    }
+    let supply = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
+    mine(&chain, vec![], miner, 12);
+    let emission = bolt_primitives::params::epoch_emission(SUPPLY_CAP_WEI - supply)
+        * U256::from(8_000)
+        / U256::from(10_000);
+    let paid: U256 = [1u32, 2]
+        .iter()
+        .map(|id| view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: *id }))
+        .sum();
+    // (the settling block's own reward and burn move the unissued pool slightly first)
+    let expected = emission * U256::from(4) / U256::from(10);
+    let diff = if paid > expected { paid - expected } else { expected - paid };
+    assert!(diff < expected / U256::from(1_000), "paid {paid}, expected about {expected}");
+
+    // A follower replays everything, certificates included.
+    for n in 1..=chain.head().unwrap().number {
+        let r = chain.store().reader().unwrap();
+        let h = r.header(n).unwrap().unwrap();
+        let root = r.envelope_root(n).unwrap().unwrap();
+        let env = bolt_ipld::Envelope::decode(&r.ipld(&root).unwrap().unwrap()).unwrap();
+        let txs = r.block(n).unwrap().unwrap().transactions;
+        drop(r);
+        follower.import_mined_with_cert(&h, txs, Some(root), env.qc).unwrap();
+    }
+    assert_eq!(follower.head().unwrap(), chain.head().unwrap());
+}
+
+#[test]
+fn finalized_checkpoints_stop_reorganisations() {
+    let g = genesis();
+    let (_da, a) = open(&g);
+    let (_db, b) = open(&g);
+    for _ in 0..3 {
+        let (h, _) = mine(&a, vec![], Address::repeat_byte(0xaa), 12);
+        b.import_mined(&h, vec![], None).unwrap();
+    }
+    // A mines 3 more; B mines a heavier branch of 5 from block 3.
+    for _ in 0..3 {
+        mine(&a, vec![], Address::repeat_byte(0xaa), 12);
+    }
+    let mut branch = Vec::new();
+    for _ in 0..5 {
+        branch.push(mine(&b, vec![], Address::repeat_byte(0xbb), 10).0);
+    }
+    // Block 5 of A's chain is finalized: B's branch forks at 3, below it: refused.
+    let a5 = a.store().reader().unwrap().header(5).unwrap().unwrap();
+    assert!(a.finalize(&a5.hash_slow(), 5).unwrap());
+    let first = a.import_mined(&branch[0], vec![], None);
+    assert!(matches!(first, Err(ChainError::DeepReorg(_))), "{first:?}");
+    assert_eq!(a.head().unwrap().number, 6);
+    assert!(!a.finalize(&a5.hash_slow(), 5).unwrap(), "already final");
+
+    // The other way round: B learns that A's block 4 is final. Even though B's own branch has
+    // more work, B switches to A's chain (stake finality overrides work).
+    let (_dc, c) = open(&g);
+    for n in 1..=3 {
+        let h = b.store().reader().unwrap().header(n).unwrap().unwrap();
+        c.import_mined(&h, vec![], None).unwrap();
+    }
+    for h in &branch {
+        c.import_mined(h, vec![], None).unwrap();
+    }
+    let a4 = a.store().reader().unwrap().header(4).unwrap().unwrap();
+    c.import_mined(&a4, vec![], None).unwrap(); // side block
+    assert_eq!(c.head().unwrap().number, 8);
+    assert!(c.finalize(&a4.hash_slow(), 4).unwrap());
+    assert_eq!(c.head().unwrap(), a4);
+    assert_eq!(c.finalized().unwrap(), Some((4, a4.hash_slow())));
+}
+
+#[test]
+fn one_rich_staker_cannot_start_a_committee() {
+    // T1 needs 2 stakers: a single one with 50x the stake never gets a committee to capture.
+    let g = genesis_b();
+    let (_d, chain) = open(&g);
+    let miner = Address::repeat_byte(0x33);
+    mine(&chain, vec![register_tx_with(0, 20, bolt(5_000))], miner, 12);
+    while chain.head().unwrap().number < 6 * L {
+        mine(&chain, vec![], miner, 12);
+    }
+    let phase = chain.phase().unwrap();
+    assert_eq!(phase.checkpoint_epoch, None);
+    assert_eq!(phase.pos_epoch, None);
+    assert_eq!(phase.checkpoint_streak, 0);
+    for e in 0..8 {
+        assert!(
+            view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: e }).ids.is_empty()
+        );
+    }
+    // The miner kept the whole block reward (phase A).
+    assert!(balance(&chain, miner) > U256::ZERO);
 }

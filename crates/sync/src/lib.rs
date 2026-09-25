@@ -276,11 +276,17 @@ impl Follower {
                 .is_some_and(|h| !h.difficulty.is_zero());
             if header_mined && self.finality.is_some() {
                 // Mined ancestors of a PoS block: checked by their seals.
+                let cert = env.qc.clone();
                 let block = decode_block(env, |c| have.get(c).cloned())?;
                 let chain = self.chain.clone();
                 height = block.header.number;
                 tokio::task::spawn_blocking(move || {
-                    chain.import_mined(&block.header, block.transactions, Some(root))
+                    chain.import_mined_with_cert(
+                        &block.header,
+                        block.transactions,
+                        Some(root),
+                        cert,
+                    )
                 })
                 .await
                 .map_err(|e| SyncError::Task(e.to_string()))??;
@@ -339,7 +345,9 @@ impl Follower {
         let tip_hash = envelope.block_hash().ok_or(IpldError::Malformed("header cid"))?;
         let chain = self.chain.clone();
         let known = move |h: alloy_primitives::B256| chain.knows(&h).unwrap_or(false);
+        let (height, proof) = (a.height, a.proof.clone());
         if known(tip_hash) {
+            self.apply_finality(height, tip_hash, &proof).await?;
             return Ok(Outcome::Known);
         }
         let head = self.head().await?;
@@ -393,16 +401,41 @@ impl Follower {
         let count = branch.len() as u64;
         let mut height = head;
         for (root, env) in branch.into_iter().rev() {
+            let cert = env.qc.clone();
             let block = decode_block(env, |c| have.get(c).cloned())?;
             let chain = self.chain.clone();
             height = block.header.number;
             tokio::task::spawn_blocking(move || {
-                chain.import_mined(&block.header, block.transactions, Some(root))
+                chain.import_mined_with_cert(&block.header, block.transactions, Some(root), cert)
             })
             .await
             .map_err(|e| SyncError::Task(e.to_string()))??;
         }
+        self.apply_finality(a.height, tip_hash, &proof).await?;
         Ok(Outcome::Imported { height, count, fetch_ms })
+    }
+
+    /// A mined block announced with a finality proof (a phase-B checkpoint): make it final here.
+    async fn apply_finality(
+        &self,
+        height: u64,
+        hash: alloy_primitives::B256,
+        proof: &[u8],
+    ) -> Result<()> {
+        let Some(check) = &self.finality else { return Ok(()) };
+        if proof.is_empty() {
+            return Ok(());
+        }
+        match check.check(height, &hash, proof) {
+            Verdict::Final => {}
+            Verdict::NotFinal => return Err(SyncError::NotFinal),
+            Verdict::Unknown => return Ok(()),
+        }
+        let chain = self.chain.clone();
+        tokio::task::spawn_blocking(move || chain.finalize(&hash, height))
+            .await
+            .map_err(|e| SyncError::Task(e.to_string()))??;
+        Ok(())
     }
 }
 

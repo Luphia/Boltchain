@@ -135,9 +135,9 @@ fn commit_proofs_real_and_nil_children() {
     let cert = Cert::Epoch(direct.clone());
     let bytes = encode_cert(&cert);
     assert_eq!(decode_cert::<BlsScheme>(&bytes).map(|c| encode_cert(&c)), Some(bytes.clone()));
-    assert_eq!(cert_votes(&bytes), (1, direct.qc.signers.clone()));
+    assert_eq!(cert_votes(&bytes), (1, 10, direct.qc.signers.clone()));
     assert!(encode_cert(&Cert::Qc(Qc::<BlsScheme>::genesis(anchor))).is_empty());
-    assert_eq!(cert_votes(&[]), (0, vec![]));
+    assert_eq!(cert_votes(&[]), (0, 0, vec![]));
 }
 
 #[test]

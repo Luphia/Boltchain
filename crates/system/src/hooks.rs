@@ -5,7 +5,9 @@ use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
 use bolt_exec::{BlockExecutor, block::BlockError};
-use bolt_primitives::params::{CONSENSUS_REWARD_BPS, SUPPLY_CAP_WEI, WEI_PER_BOLT, epoch_emission};
+use bolt_primitives::params::{
+    CHECKPOINT_MINER_BPS, CONSENSUS_REWARD_BPS, SUPPLY_CAP_WEI, WEI_PER_BOLT, epoch_emission,
+};
 use revm::DatabaseRef;
 
 /// Epoch and phase rules for the hooks.
@@ -15,6 +17,12 @@ pub struct EpochRules {
     pub epoch_slots: u64,
     /// Committee seats.
     pub committee_size: u32,
+    /// Stake-finality threshold: minimum number of stakers.
+    pub checkpoint_min_stakers: u64,
+    /// Stake-finality threshold: minimum total stake, in wei.
+    pub checkpoint_min_stake: U256,
+    /// Blocks that must bury a mined block before it is proposed as a checkpoint.
+    pub checkpoint_depth: u64,
     /// PoS threshold: minimum number of stakers.
     pub pos_min_stakers: u64,
     /// PoS threshold: minimum total stake, in wei.
@@ -27,9 +35,13 @@ impl EpochRules {
     /// Rules of a chain configuration (dev chains may lower the PoS thresholds).
     pub fn from_config(c: &bolt_primitives::genesis::ChainConfig) -> Self {
         let (stakers, stake, streak) = c.pos_thresholds();
+        let (cp_stakers, cp_stake) = c.checkpoint_thresholds();
         Self {
             epoch_slots: c.epoch_slots,
             committee_size: c.committee_size,
+            checkpoint_min_stakers: cp_stakers as u64,
+            checkpoint_min_stake: U256::from(cp_stake) * U256::from(WEI_PER_BOLT),
+            checkpoint_depth: c.checkpoint_depth(),
             pos_min_stakers: stakers as u64,
             pos_min_stake: U256::from(stake) * U256::from(WEI_PER_BOLT),
             pos_streak: streak,
@@ -55,13 +67,38 @@ impl EpochRules {
 /// Consensus phase recorded in `ConsensusRegistry` (ADR 0007).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Phase {
+    /// First epoch whose committee finalizes mined blocks (phase B), once scheduled.
+    pub checkpoint_epoch: Option<u64>,
     /// First PoS epoch, once scheduled.
     pub pos_epoch: Option<u64>,
+    /// Consecutive epochs the stake-finality thresholds have held.
+    pub checkpoint_streak: u64,
     /// Consecutive epochs the PoS thresholds have held.
     pub streak: u64,
 }
 
 impl Phase {
+    /// Whether mined block `height` belongs to an epoch whose committee finalizes checkpoints.
+    pub fn is_checkpointing(&self, rules: &EpochRules, height: u64) -> bool {
+        self.checkpoint_epoch.is_some_and(|e| rules.epoch_of(height) >= e)
+            && !self.is_pos(rules, height)
+    }
+
+    /// Whether epoch `epoch` is a phase-B epoch (committee finalizes mined blocks).
+    pub fn is_checkpoint_epoch(&self, epoch: u64) -> bool {
+        self.checkpoint_epoch.is_some_and(|e| epoch >= e)
+            && self.pos_epoch.is_none_or(|p| epoch < p)
+    }
+
+    /// Whether the first PoS epoch's anchor (the terminal block) was finalized by phase B, so the
+    /// first PoS block carries its proof rather than nothing.
+    pub fn terminal_is_checkpointed(&self) -> bool {
+        match (self.checkpoint_epoch, self.pos_epoch) {
+            (Some(c), Some(p)) => c < p,
+            _ => false,
+        }
+    }
+
     /// Whether block `height` is produced by the PoS committee (otherwise it is mined).
     pub fn is_pos(&self, rules: &EpochRules, height: u64) -> bool {
         self.pos_epoch.is_some_and(|e| rules.epoch_of(height) >= e)
@@ -76,11 +113,13 @@ impl Phase {
     }
 }
 
-/// The votes certified by a block's parent certificate.
+/// The votes certified by a block's certificate.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CertVotes {
     /// Epoch whose committee signed.
     pub epoch: u64,
+    /// Round of the certificate (each round's votes are counted once).
+    pub round: u64,
     /// Signer bitmap over that committee's members.
     pub bitmap: Vec<u8>,
 }
@@ -109,14 +148,24 @@ where
     C::abi_decode_returns(&out).map_err(|e| BlockError::Evm(format!("decode {to}: {e}")))
 }
 
-/// Runs the Boltchain pre-block system calls for the block being built on `parent`. `mined`:
-/// whether the block is mined (the node credits its reward to the beneficiary).
+/// How the block being executed is produced (for rewards).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Producer {
+    /// Mined, phase A: the miner gets the whole block reward.
+    Miner,
+    /// Mined, phase B: the miner gets 60%; the committee earns the rest by participation.
+    MinerWithCheckpoints,
+    /// PoS committee.
+    Committee,
+}
+
+/// Runs the Boltchain pre-block system calls for the block being built on `parent`.
 pub fn pre_block<D: DatabaseRef>(
     exec: &mut BlockExecutor<D>,
     rules: &EpochRules,
     parent: &Header,
     votes: &CertVotes,
-    mined: bool,
+    producer: Producer,
 ) -> Result<(), BlockError<D::Error>>
 where
     D::Error: std::error::Error + Send + Sync + 'static,
@@ -125,10 +174,13 @@ where
     // 1. Burn accounting, block reward, participation.
     let burned = U256::from(parent.base_fee_per_gas.unwrap_or(0)) * U256::from(parent.gas_used);
     let mut minted = U256::ZERO;
-    if mined {
+    if producer != Producer::Committee {
         let supply = view(exec, REWARDS, IRewardDistributor::supplyCall {})?;
         let unissued = SUPPLY_CAP_WEI.saturating_sub(supply);
         minted = bolt_pow::block_reward(unissued, CONSENSUS_REWARD_BPS);
+        if producer == Producer::MinerWithCheckpoints {
+            minted = minted * U256::from(CHECKPOINT_MINER_BPS) / U256::from(10_000);
+        }
         if !minted.is_zero() {
             let beneficiary = exec.params().input.beneficiary;
             exec.credit(beneficiary, minted.to::<u128>())?;
@@ -141,6 +193,7 @@ where
             burned,
             minted,
             certEpoch: votes.epoch,
+            certRound: votes.round,
             bitmap: Bytes::copy_from_slice(&votes.bitmap),
         },
     )?;
@@ -149,12 +202,17 @@ where
     }
     let epoch = rules.epoch_of(number);
 
-    // 2. Rewards for the previous epoch's committee (none while mining).
+    // 2. Rewards for the previous epoch's committee: none in phase A, the voters' 40% in phase B
+    // (miners were paid per block), the whole consensus share under PoS.
+    let before = crate::queries::phase_in(exec)?;
     if epoch >= 1 {
         let supply = view(exec, REWARDS, IRewardDistributor::supplyCall {})?;
         let unissued = SUPPLY_CAP_WEI.saturating_sub(supply);
-        let emission =
+        let mut emission =
             epoch_emission(unissued) * U256::from(CONSENSUS_REWARD_BPS) / U256::from(10_000);
+        if before.is_checkpoint_epoch(epoch - 1) {
+            emission = emission * U256::from(10_000 - CHECKPOINT_MINER_BPS) / U256::from(10_000);
+        }
         let payout =
             view(exec, REWARDS, IRewardDistributor::previewCall { epoch: epoch - 1, emission })?;
         if !payout.is_zero() {
@@ -167,27 +225,33 @@ where
         }
     }
 
-    // 3. Phase: count the epochs the PoS thresholds have held.
+    // 3. Phase: count the epochs the thresholds have held (T1: checkpoints, T2: PoS).
     let stats = view(exec, STAKING, IStakingManager::stakerStatsCall {})?;
-    let met =
+    let t1 = stats.stakers >= U256::from(rules.checkpoint_min_stakers)
+        && stats.total >= rules.checkpoint_min_stake;
+    let t2 =
         stats.stakers >= U256::from(rules.pos_min_stakers) && stats.total >= rules.pos_min_stake;
     let phase = sys(
         exec,
         CONSENSUS,
         IConsensusRegistry::beginEpochCall {
             epoch,
-            thresholdMet: met,
+            checkpointMet: t1,
+            posMet: t2,
             streakRequired: rules.pos_streak,
         },
     )?;
 
-    // 4. Committee of the next epoch, once it is a PoS epoch. The first PoS committee is drawn
-    // only from stake at least `pos_streak` epochs old (ADR 0007 §5).
+    // 4. Committee of the next epoch, from the first checkpoint epoch on. The first committee of
+    // each phase (B and C) is drawn only from stake at least `pos_streak` epochs old (ADR 0007
+    // §5), so nobody can buy a seat right before a phase starts.
     let next = epoch + 1;
-    if !phase.scheduled || next < phase.firstPosEpoch {
+    if !phase.cpScheduled || next < phase.firstCheckpointEpoch {
         return Ok(());
     }
-    let min_age = if next == phase.firstPosEpoch { rules.pos_streak } else { 0 };
+    let first_of_phase =
+        next == phase.firstCheckpointEpoch || (phase.scheduled && next == phase.firstPosEpoch);
+    let min_age = if first_of_phase { rules.pos_streak } else { 0 };
     let mut committee = sample(exec, rules, parent, next, min_age)?;
     if committee.is_empty() && min_age > 0 {
         committee = sample(exec, rules, parent, next, 0)?;

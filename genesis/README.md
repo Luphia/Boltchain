@@ -5,7 +5,7 @@
 | `mainnet.template.json` | 主網範本：chain id 8017，沒有任何驗證者、多簽或分配，只差啟動時間 |
 | `devnet.json` | 主網格式的測試 genesis（chain id 8017，extra data 不同），CI 用來檢查 `genesis inspect` |
 | `dev.json` | 本地開發鏈（chain id 1337）：3 個注資帳戶、7 個在 genesis 質押的驗證者，從第 1 塊就跑 PoS |
-| `pow-dev.json` | 本地挖礦鏈（chain id 1338）：3 個注資帳戶，RandomBOLT 低難度、4 秒一塊、每 epoch 32 塊；2 位驗證者共質押 128 BOLT 並維持 2 個 epoch 就切換到 PoS |
+| `pow-dev.json` | 本地挖礦鏈（chain id 1338）：3 個注資帳戶，RandomBOLT 低難度、4 秒一塊、每 epoch 32 塊；2 位驗證者共 128 BOLT 維持 2 個 epoch 進入階段 B（檢查點深度 4），3 位共 192 BOLT 再維持 2 個 epoch 切換到 PoS |
 
 ```sh
 cargo run -p boltchain -- genesis inspect genesis/devnet.json
@@ -20,12 +20,13 @@ cargo run -p boltchain -- genesis inspect genesis/devnet.json
 - EIP-4788 與 EIP-2935 的系統合約會自動加入，不可覆寫；`0xB017…` 系統合約範圍也不可覆寫
 
 dev 鏈（`"dev": true`，chain id 不可為 8017）可以：注資帳戶、在 genesis 質押驗證者（`devValidators`）、
-調低 PoS 門檻（`posMinStakers`、`posMinStakeBolt`、`posStreakEpochs`）、縮短 epoch、改挖礦參數，
+調低門檻（階段 B：`checkpointMinStakers`、`checkpointMinStakeBolt`、`checkpointDepth`；PoS：`posMinStakers`、`posMinStakeBolt`、`posStreakEpochs`，階段 B 的門檻不可高於 PoS）、縮短 epoch、改挖礦參數，
 或把 `pow.algorithm` 設成 `keccak` 以加快測試。
 
 ## 主網範本 `mainnet.template.json`
 
-主網從挖礦開始，任何人都能用一般電腦參與；質押達到門檻（128 位驗證者、共 1,000 萬 BOLT，連續 14 個 epoch）後自動切換到 PoS。
+主網從挖礦開始，任何人都能用一般電腦參與。質押達到 32 位驗證者、共 100 萬 BOLT 並連續 14 個 epoch 後，委員會開始確認挖出來的區塊（階段 B）；
+達到 128 位、共 1,000 萬 BOLT 並連續 14 個 epoch 後自動切換到 PoS。
 發布前只需要填入 `timestamp`（主網啟動時間），執行 `boltchain genesis inspect genesis/mainnet.json` 確認通過，再公布 genesis hash。
 
 想成為驗證者的人不必出現在 genesis：用 `boltchain keys new` 產生金鑰，`boltchain keys register-tx` 印出

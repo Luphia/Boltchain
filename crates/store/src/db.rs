@@ -59,6 +59,7 @@ pub(crate) mod t {
 }
 
 const META_HEAD: &[u8] = b"head";
+const META_FINALIZED: &[u8] = b"finalized";
 
 /// Storage error.
 #[derive(Debug, thiserror::Error)]
@@ -390,6 +391,18 @@ impl<'e, K: TransactionKind> Tx<'e, K> {
             .transpose()
     }
 
+    /// Latest block known final by stake (a checkpoint certified in phase B): (number, hash).
+    pub fn finalized(&self) -> Result<Option<(u64, B256)>> {
+        Ok(self.get_raw(t::META, META_FINALIZED)?.and_then(|v| {
+            (v.len() == 40).then(|| {
+                (
+                    u64::from_be_bytes(v[..8].try_into().unwrap_or_default()),
+                    B256::from_slice(&v[8..]),
+                )
+            })
+        }))
+    }
+
     /// Total difficulty of the canonical chain up to block `number` (sum of mined blocks'
     /// difficulties; blocks produced under PoS add nothing).
     pub fn total_difficulty(&self, number: u64) -> Result<Option<U256>> {
@@ -503,6 +516,11 @@ impl<'e> Tx<'e, RW> {
             None => self.del_raw(t::META, META_HEAD)?,
         }
         Ok(block)
+    }
+
+    /// Records block `number` (`hash`) as final by stake.
+    pub fn set_finalized(&self, number: u64, hash: &B256) -> Result<()> {
+        self.put_raw(t::META, META_FINALIZED, &[&num_key(number)[..], hash.as_slice()].concat())
     }
 
     /// Stores one IPFS block.

@@ -33,10 +33,11 @@ sol! {
 
     interface IConsensusRegistry {
         function initialize(uint32[] memberIds, uint16[] weights, bytes seats) external;
-        function beginEpoch(uint64 epoch, bool thresholdMet, uint64 streakRequired)
-            external returns (bool scheduled, uint64 firstPosEpoch);
+        function beginEpoch(uint64 epoch, bool checkpointMet, bool posMet, uint64 streakRequired)
+            external returns (bool cpScheduled, uint64 firstCheckpointEpoch, bool scheduled, uint64 firstPosEpoch);
         function setCommittee(uint64 epoch, uint32[] memberIds, uint16[] weights, bytes seats) external;
-        function phase() external view returns (bool posScheduled, uint64 posEpoch, uint64 thresholdStreak);
+        function phase() external view returns (bool checkpointScheduled, uint64 checkpointEpoch,
+            bool posScheduled, uint64 posEpoch, uint64 checkpointStreak, uint64 thresholdStreak);
         function currentEpoch() external view returns (uint64);
         function committee(uint64 epoch) external view returns (uint32[] ids, uint16[] weights, bytes seats);
         function submitEvidence(uint32 id, bytes pubkeyPoint, bytes msgA, bytes sigA, bytes msgB, bytes sigB)
@@ -46,13 +47,15 @@ sol! {
 
     interface IRewardDistributor {
         function initialize(uint256 genesisSupply) external;
-        function onBlock(uint256 burned, uint256 minted, uint64 certEpoch, bytes bitmap) external;
+        function onBlock(uint256 burned, uint256 minted, uint64 certEpoch, uint64 certRound, bytes bitmap)
+            external;
         function settle(uint64 epoch, uint256 emission) external returns (uint256 paid);
         function preview(uint64 epoch, uint256 emission) external view returns (uint256 paid);
         function claim(uint32 id) external returns (uint256 amount);
         function supply() external view returns (uint256);
         function rewards(uint32 id) external view returns (uint256);
         function votesOf(uint64 epoch, uint256 index) external view returns (uint256);
+        function lastRecordedRound(uint64 epoch) external view returns (uint64);
     }
 
     interface IBLSHarness {

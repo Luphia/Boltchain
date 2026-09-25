@@ -265,7 +265,7 @@ impl Chain {
             BlockKind::Pos => mix_hash(parent, &extra_data),
         };
         let difficulty = match kind {
-            BlockKind::Mined { difficulty } => *difficulty,
+            BlockKind::Mined { difficulty, .. } => *difficulty,
             BlockKind::Pos => U256::ZERO,
         };
         BlockParams {
@@ -297,7 +297,49 @@ impl Chain {
         if phase.is_pos(&self.rules, parent.number + 1) {
             return Ok(BlockKind::Pos);
         }
-        Ok(BlockKind::Mined { difficulty: self.difficulty_after(parent)? })
+        Ok(BlockKind::Mined {
+            difficulty: self.difficulty_after(parent)?,
+            checkpointing: phase.is_checkpointing(&self.rules, parent.number + 1),
+        })
+    }
+
+    /// A certificate carried by a mined block in phase B: a QC of the current epoch's checkpoint
+    /// committee (it earns its signers their share of the block rewards), checked against the
+    /// committee in the parent state `db`.
+    fn check_checkpoint_cert<D: revm::DatabaseRef + Copy>(
+        &self,
+        db: D,
+        cert: &[u8],
+        number: u64,
+        checkpointing: bool,
+    ) -> Result<()>
+    where
+        D::Error: std::fmt::Debug,
+    {
+        let invalid = ChainError::InvalidBlock;
+        if !checkpointing {
+            return Err(invalid("mined blocks outside phase B carry no certificate".into()));
+        }
+        let Some(bolt_consensus::Cert::Qc(qc)) =
+            bolt_consensus::decode_cert::<bolt_consensus::BlsScheme>(cert)
+        else {
+            return Err(invalid("a mined block may only carry a checkpoint QC".into()));
+        };
+        if qc.is_anchor() || qc.epoch != self.rules.epoch_of(number) {
+            return Err(invalid(format!("checkpoint QC of epoch {} in block {number}", qc.epoch)));
+        }
+        let c = bolt_system::queries::committee_at(db, self.config.chain_id, qc.epoch)
+            .map_err(|e| ChainError::Exec(e.to_string()))?
+            .ok_or_else(|| invalid(format!("no committee for epoch {}", qc.epoch)))?;
+        let scheme = bolt_consensus::BlsScheme::new(c.pubkeys.clone(), &[]);
+        let set = bolt_consensus::ValidatorSet::from_seats(
+            c.committee.members.len(),
+            c.committee.seats.iter().map(|s| *s as bolt_consensus::ValidatorIndex).collect(),
+        );
+        if !qc.verify(&scheme, &set, self.config.chain_id, qc.epoch, &B256::ZERO) {
+            return Err(invalid("invalid checkpoint QC".into()));
+        }
+        Ok(())
     }
 
     /// ASERT difficulty of a mined child of `parent`.
@@ -383,8 +425,8 @@ impl Chain {
         for a in &ancestors {
             changes.push(a.header.number, a.hash, &a.changes);
         }
-        let (cert_epoch, bitmap) = bolt_consensus::cert_votes(&qc);
-        let votes = CertVotes { epoch: cert_epoch, bitmap };
+        let (cert_epoch, cert_round, bitmap) = bolt_consensus::cert_votes(&qc);
+        let votes = CertVotes { epoch: cert_epoch, round: cert_round, bitmap };
 
         let mut included = Vec::new();
         let mut rejected = Vec::new();
@@ -394,11 +436,20 @@ impl Chain {
             let db = overlay::Overlay { base: &view, changes: &changes };
             let kind = self.kind_of(&db, &parent_header)?;
             let params = params_fn(&parent_header, &kind);
-            let mined = matches!(kind, BlockKind::Mined { .. });
+            let producer = match kind {
+                BlockKind::Pos => bolt_system::Producer::Committee,
+                BlockKind::Mined { checkpointing: true, .. } => {
+                    bolt_system::Producer::MinerWithCheckpoints
+                }
+                BlockKind::Mined { .. } => bolt_system::Producer::Miner,
+            };
             if let Some(exp) = expected {
-                self.check_kind(exp, &kind, &parent_header, &ancestors, &head, &qc)?;
-            } else if mined && !qc.is_empty() {
-                return Err(ChainError::InvalidBlock("mined blocks carry no certificate".into()));
+                self.check_kind(exp, &kind, &parent_header, &ancestors, &head)?;
+            }
+            if let BlockKind::Mined { checkpointing, .. } = kind
+                && !qc.is_empty()
+            {
+                self.check_checkpoint_cert(&db, &qc, parent_header.number + 1, checkpointing)?;
             }
             let number = params.input.number;
             let mut ex =
@@ -418,7 +469,7 @@ impl Chain {
                         .map_err(|e| ChainError::Exec(format!("fork {}: {e}", fork.name)))?;
                 }
             }
-            bolt_system::pre_block(&mut ex, &self.rules, &parent_header, &votes, mined)
+            bolt_system::pre_block(&mut ex, &self.rules, &parent_header, &votes, producer)
                 .map_err(|e| ChainError::Exec(format!("system calls: {e}")))?;
             for (tx, sender) in txs {
                 if expected.is_none() && ex.gas_remaining() < 21_000 {
@@ -497,7 +548,6 @@ impl Chain {
         parent: &Header,
         ancestors: &[Arc<PendingBlock>],
         head: &Header,
-        qc: &[u8],
     ) -> Result<()> {
         let invalid = ChainError::InvalidBlock;
         match kind {
@@ -509,10 +559,7 @@ impl Chain {
                     )));
                 }
             }
-            BlockKind::Mined { difficulty } => {
-                if !qc.is_empty() {
-                    return Err(invalid("mined blocks carry no certificate".into()));
-                }
+            BlockKind::Mined { difficulty, .. } => {
                 if exp.difficulty != *difficulty {
                     return Err(invalid(format!(
                         "difficulty {} != {difficulty} (ASERT)",
@@ -762,6 +809,8 @@ pub enum BlockKind {
     Mined {
         /// ASERT difficulty.
         difficulty: U256,
+        /// Phase B: a committee finalizes checkpoints (the miner gets 60% of the reward).
+        checkpointing: bool,
     },
     /// Produced and certified by the PoS committee.
     Pos,

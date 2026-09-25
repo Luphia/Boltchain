@@ -27,6 +27,8 @@ pub struct SideBlock {
     pub root: Option<Cid>,
     /// Total difficulty up to and including this block.
     pub td: U256,
+    /// Checkpoint QC its envelope carries (phase B), or empty.
+    pub cert: Vec<u8>,
 }
 
 /// What importing a mined block did.
@@ -123,6 +125,17 @@ impl Chain {
         transactions: Vec<TxEnvelope>,
         root: Option<Cid>,
     ) -> Result<MinedOutcome> {
+        self.import_mined_with_cert(header, transactions, root, Vec::new())
+    }
+
+    /// [`Chain::import_mined`] for a block whose envelope carries a checkpoint QC (phase B).
+    pub fn import_mined_with_cert(
+        &self,
+        header: &Header,
+        transactions: Vec<TxEnvelope>,
+        root: Option<Cid>,
+        cert: Vec<u8>,
+    ) -> Result<MinedOutcome> {
         let _guard = self.import_lock.lock();
         let hash = header.hash_slow();
         if self.locate(&hash)?.is_some() {
@@ -138,21 +151,32 @@ impl Chain {
                 header.timestamp
             )));
         }
-        let (parent, parent_td, _) = self
+        let (parent, parent_td, parent_canonical) = self
             .locate(&header.parent_hash)?
             .ok_or(ChainError::UnknownParent(header.parent_hash))?;
+        if let Some((fin, _)) = self.finalized()?
+            && parent_canonical
+            && parent.number < fin
+        {
+            return Err(ChainError::DeepReorg(format!(
+                "block {} forks below the finalized checkpoint {fin}",
+                header.number
+            )));
+        }
         let head = self.head()?;
         if header.parent_hash == head.hash_slow() {
             // Full verification (seal first, then execution).
             if header.difficulty.is_zero() {
                 return Err(ChainError::InvalidBlock("not a mined block".into()));
             }
-            self.import_final(header, transactions, root, vec![])?;
+            self.import_final(header, transactions, root, cert)?;
             return Ok(MinedOutcome::Extended);
         }
         self.check_mined_header(header, &parent)?;
         let td = parent_td + header.difficulty;
-        self.side.lock().insert(hash, SideBlock { header: header.clone(), transactions, root, td });
+        self.side
+            .lock()
+            .insert(hash, SideBlock { header: header.clone(), transactions, root, td, cert });
         // More work wins; equal work goes to the lower hash, so every node picks the same tip.
         let head_td = self.head_total_difficulty()?;
         if td < head_td || (td == head_td && hash >= head.hash_slow()) {
@@ -185,6 +209,13 @@ impl Chain {
         branch.reverse();
         let head = self.head()?;
         let depth = head.number - fork;
+        if let Some((fin, _)) = self.finalized()?
+            && fork < fin
+        {
+            return Err(ChainError::DeepReorg(format!(
+                "fork point {fork} is below the finalized checkpoint {fin}"
+            )));
+        }
         if depth > MAX_REORG_DEPTH {
             return Err(ChainError::DeepReorg(format!(
                 "fork point {fork} is {depth} blocks below head {}",
@@ -204,7 +235,7 @@ impl Chain {
         tracing::warn!(depth, fork, new_tip = %tip, "reorganising to a heavier mined branch");
         let undone = self.unwind_to(fork)?;
         for (i, b) in branch.iter().enumerate() {
-            let res = self.import_final(&b.header, b.transactions.clone(), b.root, vec![]);
+            let res = self.import_final(&b.header, b.transactions.clone(), b.root, b.cert.clone());
             if let Err(e) = res {
                 tracing::warn!(
                     number = b.header.number,
@@ -220,7 +251,7 @@ impl Chain {
                 self.unwind_to(fork)?;
                 for o in &undone {
                     self.side.lock().remove(&o.header.hash_slow());
-                    self.import_final(&o.header, o.transactions.clone(), o.root, vec![])?;
+                    self.import_final(&o.header, o.transactions.clone(), o.root, o.cert.clone())?;
                 }
                 return Err(e);
             }
@@ -246,6 +277,14 @@ impl Chain {
             }
             let root = w.envelope_root(head)?;
             let td = w.total_difficulty(head)?.unwrap_or_default();
+            let cert = match root {
+                Some(r) => w
+                    .ipld(&r)?
+                    .and_then(|b| bolt_ipld::Envelope::decode(&b).ok())
+                    .map(|e| e.qc)
+                    .unwrap_or_default(),
+                None => Vec::new(),
+            };
             let (block, state_root) = w.unwind_head()?;
             let parent_root = w.header(head - 1)?.map(|h| h.state_root);
             if parent_root != Some(state_root) {
@@ -258,6 +297,7 @@ impl Chain {
                 transactions: block.transactions,
                 root,
                 td,
+                cert,
             });
         }
         w.commit()?;
@@ -265,16 +305,52 @@ impl Chain {
         Ok(undone)
     }
 
-    /// Builds (without committing) the next mined block on the head for a miner to seal.
+    /// Latest block final by stake (phase B checkpoint): (number, hash).
+    pub fn finalized(&self) -> Result<Option<(u64, B256)>> {
+        Ok(self.store.reader()?.finalized()?)
+    }
+
+    /// Records block `hash` at `height` as final (a certified checkpoint, ADR 0007 §4). If it is
+    /// on a side branch, that branch becomes canonical whatever its total difficulty: stake
+    /// finality overrides work. Fork choice never goes below it again. Returns whether anything
+    /// changed.
+    pub fn finalize(&self, hash: &B256, height: u64) -> Result<bool> {
+        let _guard = self.import_lock.lock();
+        if self.finalized()?.is_some_and(|(n, _)| n >= height) {
+            return Ok(false);
+        }
+        let (header, _, canonical) = self.locate(hash)?.ok_or(ChainError::UnknownParent(*hash))?;
+        if header.number != height {
+            return Err(ChainError::InvalidBlock(format!(
+                "checkpoint {hash} is block {}, not {height}",
+                header.number
+            )));
+        }
+        if !canonical {
+            tracing::warn!(height, %hash, "finalized checkpoint is on another branch; switching");
+            self.reorg_to(hash)?;
+        }
+        let w = self.store.writer()?;
+        w.set_finalized(height, hash)?;
+        w.commit()?;
+        let horizon = height;
+        self.side.lock().retain(|_, b| b.header.number > horizon);
+        tracing::debug!(height, %hash, "checkpoint final");
+        Ok(true)
+    }
+
+    /// Builds (without committing) the next mined block on the head for a miner to seal. In
+    /// phase B it may carry the latest checkpoint QC (`cert`), which pays its signers.
     pub fn build_template(
         &self,
         candidates: impl IntoIterator<Item = (TxEnvelope, alloy_primitives::Address)>,
         timestamp: u64,
         beneficiary: alloy_primitives::Address,
         extra_data: alloy_primitives::Bytes,
+        cert: Vec<u8>,
     ) -> Result<BuiltBlock> {
         let head = self.head()?.hash_slow();
-        let built = self.build_on(&head, candidates, timestamp, beneficiary, extra_data, vec![])?;
+        let built = self.build_on(&head, candidates, timestamp, beneficiary, extra_data, cert)?;
         if built.header.difficulty.is_zero() {
             self.pending.lock().remove(&built.hash);
             return Err(ChainError::InvalidBlock("PoS has started: nothing to mine".into()));
@@ -293,12 +369,14 @@ impl Chain {
         template: &BuiltBlock,
         nonce: u64,
     ) -> Result<(Header, MinedOutcome)> {
-        let txs = self.pending(&template.hash).map(|p| p.executed.transactions.clone());
+        let p = self.pending(&template.hash);
         self.pending.lock().remove(&template.hash);
-        let txs = txs.ok_or(ChainError::UnknownParent(template.hash))?;
+        let p = p.ok_or(ChainError::UnknownParent(template.hash))?;
+        let txs = p.executed.transactions.clone();
+        let cert = p.bundle.envelope.qc.clone();
         let mut header = template.header.clone();
         header.nonce = B64::from(nonce);
-        let outcome = self.import_mined(&header, txs, None)?;
+        let outcome = self.import_mined_with_cert(&header, txs, None, cert)?;
         Ok((header, outcome))
     }
 

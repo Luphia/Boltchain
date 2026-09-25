@@ -132,6 +132,11 @@ fn main() -> Result<()> {
                     "  starts            mined ({:?}, difficulty {}, {}s blocks)",
                     p.algorithm, p.initial_difficulty, p.block_seconds
                 );
+                let (cp_stakers, cp_stake) = genesis.config.checkpoint_thresholds();
+                println!(
+                    "  checkpoints when  {cp_stakers} stakers and {cp_stake} BOLT staked for {streak} epochs (depth {})",
+                    genesis.config.checkpoint_depth()
+                );
                 println!(
                     "  PoS when          {stakers} stakers and {stake} BOLT staked for {streak} epochs"
                 );
@@ -155,6 +160,10 @@ fn main() -> Result<()> {
             println!("emission          half-life {EMISSION_HALF_LIFE_EPOCHS} epochs");
             println!(
                 "mining            RandomBOLT, {POW_BLOCK_SECONDS}s blocks, ASERT half-life {POW_HALF_LIFE_SECONDS}s, reorgs <= {MAX_REORG_DEPTH}"
+            );
+            println!(
+                "checkpoints       {CHECKPOINT_MIN_STAKERS} stakers, {CHECKPOINT_MIN_TOTAL_STAKE_BOLT} BOLT, held {POS_STREAK_EPOCHS} epochs; depth {CHECKPOINT_DEPTH}; miners {}%",
+                CHECKPOINT_MINER_BPS / 100
             );
             println!(
                 "PoS starts        {POS_MIN_STAKERS} stakers, {POS_MIN_TOTAL_STAKE_BOLT} BOLT, held {POS_STREAK_EPOCHS} epochs"

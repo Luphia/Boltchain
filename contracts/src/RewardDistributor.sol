@@ -23,6 +23,11 @@ contract RewardDistributor is SystemContract {
     mapping(uint64 => uint256[32]) internal votes;
     /// Claimable rewards per validator id.
     mapping(uint32 => uint256) public rewards;
+    /// Highest certificate round whose votes were recorded, per epoch (a certificate counts once,
+    /// however many blocks carry it).
+    mapping(uint64 => uint64) public lastRecordedRound;
+    /// Epochs below this one are settled; later certificates for them are ignored.
+    uint64 public settledUpTo;
 
     event Settled(uint64 indexed epoch, uint256 emission, uint256 paid);
     event Claimed(uint32 indexed id, address to, uint256 amount);
@@ -38,10 +43,16 @@ contract RewardDistributor is SystemContract {
     /// Every block, before its transactions: removes the parent's burned base fee from the supply,
     /// adds the block reward the node credited to a miner (`minted`, zero under PoS) and records
     /// the votes in the block's certificate (`bitmap` indexes the members of `certEpoch`'s
-    /// committee, bit i of byte i/8; empty for mined blocks).
-    function onBlock(uint256 burned, uint256 minted, uint64 certEpoch, bytes calldata bitmap) external onlySystem {
+    /// committee, bit i of byte i/8). Under PoS the certificate is the parent's; a mined block
+    /// may carry the latest checkpoint certificate (phase B). A round is only counted once.
+    function onBlock(uint256 burned, uint256 minted, uint64 certEpoch, uint64 certRound, bytes calldata bitmap)
+        external
+        onlySystem
+    {
         supply = burned > supply ? minted : supply - burned + minted;
         if (bitmap.length > 64) revert TooManyMembers();
+        if (bitmap.length == 0 || certEpoch < settledUpTo || certRound <= lastRecordedRound[certEpoch]) return;
+        lastRecordedRound[certEpoch] = certRound;
         uint256[32] storage v = votes[certEpoch];
         for (uint256 w = 0; w * 2 < bitmap.length; w++) {
             // members 16w .. 16w+15 are bits of bitmap bytes 2w and 2w+1
@@ -67,6 +78,8 @@ contract RewardDistributor is SystemContract {
         }
         paid = total;
         delete votes[epoch];
+        delete lastRecordedRound[epoch];
+        if (epoch + 1 > settledUpTo) settledUpTo = epoch + 1;
         supply += paid;
         emit Settled(epoch, emission, paid);
     }

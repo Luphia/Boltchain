@@ -70,6 +70,15 @@ pub struct ChainConfig {
     /// Mining phase.
     #[serde(default)]
     pub pow: PowConfig,
+    /// Dev chains only: stake-finality (phase B) threshold on the number of stakers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_min_stakers: Option<u32>,
+    /// Dev chains only: stake-finality threshold on total stake, in whole BOLT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_min_stake_bolt: Option<u64>,
+    /// Dev chains only: depth at which mined blocks become checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_depth: Option<u64>,
     /// Dev chains only: PoS threshold on the number of stakers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos_min_stakers: Option<u32>,
@@ -91,6 +100,9 @@ impl Default for ChainConfig {
             gas_limit: DEFAULT_GAS_LIMIT,
             min_base_fee_wei: MIN_BASE_FEE_WEI,
             pow: PowConfig::default(),
+            checkpoint_min_stakers: None,
+            checkpoint_min_stake_bolt: None,
+            checkpoint_depth: None,
             pos_min_stakers: None,
             pos_min_stake_bolt: None,
             pos_streak_epochs: None,
@@ -99,6 +111,19 @@ impl Default for ChainConfig {
 }
 
 impl ChainConfig {
+    /// Stake-finality thresholds: (stakers, total stake in whole BOLT).
+    pub fn checkpoint_thresholds(&self) -> (u32, u64) {
+        (
+            self.checkpoint_min_stakers.unwrap_or(CHECKPOINT_MIN_STAKERS),
+            self.checkpoint_min_stake_bolt.unwrap_or(CHECKPOINT_MIN_TOTAL_STAKE_BOLT),
+        )
+    }
+
+    /// Checkpoint depth.
+    pub fn checkpoint_depth(&self) -> u64 {
+        self.checkpoint_depth.unwrap_or(CHECKPOINT_DEPTH)
+    }
+
     /// PoS thresholds: (stakers, total stake in whole BOLT, streak in epochs).
     pub fn pos_thresholds(&self) -> (u32, u64, u64) {
         (
@@ -234,6 +259,8 @@ pub enum GenesisError {
     DevOnly,
     #[error("PoS streak must be between 1 and {POS_STREAK_EPOCHS} epochs")]
     Streak,
+    #[error("stake-finality thresholds must not exceed the PoS thresholds, depth at least 1")]
+    Checkpoints,
     #[error("account {0} is a protocol predeploy and cannot be overridden")]
     ReservedAddress(Address),
 }
@@ -279,6 +306,9 @@ impl Genesis {
             }
             if c.pos_min_stakers.is_some()
                 || c.pos_min_stake_bolt.is_some()
+                || c.checkpoint_min_stakers.is_some()
+                || c.checkpoint_min_stake_bolt.is_some()
+                || c.checkpoint_depth.is_some()
                 || c.pos_streak_epochs.is_some()
                 || !self.dev_validators.is_empty()
             {
@@ -293,6 +323,11 @@ impl Genesis {
         }
         if c.pow.initial_difficulty.is_zero() {
             return Err(GenesisError::Difficulty);
+        }
+        let (t1_stakers, t1_stake) = c.checkpoint_thresholds();
+        let (t2_stakers, t2_stake, _) = c.pos_thresholds();
+        if t1_stakers > t2_stakers || t1_stake > t2_stake || c.checkpoint_depth() == 0 {
+            return Err(GenesisError::Checkpoints);
         }
         if c.gas_limit < GAS_LIMIT_RANGE.0 || c.gas_limit > GAS_LIMIT_RANGE.1 {
             return Err(GenesisError::GasLimit(c.gas_limit));
@@ -543,6 +578,16 @@ mod tests {
         let mut g = dev();
         g.config.pos_streak_epochs = Some(15);
         assert_eq!(g.validate(), Err(GenesisError::Streak));
+
+        let mut g = dev();
+        g.config.pos_min_stakers = Some(4);
+        assert_eq!(g.validate(), Err(GenesisError::Checkpoints), "T1 above T2");
+        g.config.checkpoint_min_stakers = Some(2);
+        g.validate().unwrap();
+
+        let mut g = sample();
+        g.config.checkpoint_depth = Some(3);
+        assert_eq!(g.validate(), Err(GenesisError::DevOnly));
 
         let mut g = sample();
         g.alloc.insert(BEACON_ROOTS_ADDRESS, GenesisAccount::default());

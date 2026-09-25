@@ -112,5 +112,28 @@ where
     D::Error: std::fmt::Debug,
 {
     let p = call(db, chain_id, CONSENSUS, IConsensusRegistry::phaseCall {})?;
-    Ok(crate::Phase { pos_epoch: p.posScheduled.then_some(p.posEpoch), streak: p.thresholdStreak })
+    Ok(crate::Phase {
+        checkpoint_epoch: p.checkpointScheduled.then_some(p.checkpointEpoch),
+        pos_epoch: p.posScheduled.then_some(p.posEpoch),
+        checkpoint_streak: p.checkpointStreak,
+        streak: p.thresholdStreak,
+    })
+}
+
+/// Consensus phase in the state of a block being executed.
+pub(crate) fn phase_in<D: DatabaseRef>(
+    exec: &mut bolt_exec::BlockExecutor<D>,
+) -> Result<crate::Phase, bolt_exec::block::BlockError<D::Error>>
+where
+    D::Error: std::error::Error + Send + Sync + 'static,
+{
+    let out = exec.view_call(CONSENSUS, IConsensusRegistry::phaseCall {}.abi_encode().into())?;
+    let p = IConsensusRegistry::phaseCall::abi_decode_returns(&out)
+        .map_err(|e| bolt_exec::block::BlockError::Evm(format!("decode phase: {e}")))?;
+    Ok(crate::Phase {
+        checkpoint_epoch: p.checkpointScheduled.then_some(p.checkpointEpoch),
+        pos_epoch: p.posScheduled.then_some(p.posEpoch),
+        checkpoint_streak: p.checkpointStreak,
+        streak: p.thresholdStreak,
+    })
 }

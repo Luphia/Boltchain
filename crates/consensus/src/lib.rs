@@ -140,15 +140,19 @@ pub fn decode_cert<S: Scheme>(b: &[u8]) -> Option<Cert<S>> {
     serde_ipld_dagcbor::from_slice(b).ok()
 }
 
-/// (epoch, signer bitmap) recorded by a production (BLS) envelope certificate; empty for the
-/// genesis child or undecodable bytes. Used by execution for participation rewards.
-pub fn cert_votes(b: &[u8]) -> (u64, Vec<u8>) {
+/// (epoch, round, signer bitmap) recorded by a production (BLS) envelope certificate; empty for
+/// the genesis child or undecodable bytes. Used by execution for participation rewards.
+pub fn cert_votes(b: &[u8]) -> (u64, u64, Vec<u8>) {
     match decode_cert::<BlsScheme>(b) {
         Some(c) => {
             let (e, bm) = c.votes();
-            (e, bm.to_vec())
+            let round = match &c {
+                Cert::Qc(q) => q.round,
+                Cert::Epoch(p) => p.qc.round,
+            };
+            (e, round, bm.to_vec())
         }
-        None => (0, Vec::new()),
+        None => (0, 0, Vec::new()),
     }
 }
 

@@ -13,8 +13,11 @@
       "blockSeconds": 4,
       "halfLifeSeconds": 120
     },
-    "posMinStakers": 2,
-    "posMinStakeBolt": 128,
+    "checkpointMinStakers": 2,
+    "checkpointMinStakeBolt": 128,
+    "checkpointDepth": 4,
+    "posMinStakers": 3,
+    "posMinStakeBolt": 192,
     "posStreakEpochs": 2
   },
   "timestamp": 0,

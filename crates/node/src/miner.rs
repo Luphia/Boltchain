@@ -39,12 +39,17 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// Latest checkpoint QC known to this node (epoch, encoded certificate), put into mined blocks in
+/// phase B so its signers get paid.
+pub type CertSlot = Arc<parking_lot::Mutex<Option<(u64, Vec<u8>)>>>;
+
 /// Mines until PoS starts or the task is aborted. Publishes every block it finds.
 pub async fn run(
     chain: Arc<Chain>,
     pool: Arc<TxPool>,
     net: NetHandle,
     cfg: MinerConfig,
+    cert: CertSlot,
 ) -> Result<()> {
     let pow = Pow::with_mode(chain.pow().algorithm(), cfg.mode);
     let threads = cfg.threads.max(1);
@@ -60,8 +65,19 @@ pub async fn run(
         };
         let (c, beneficiary, extra) = (chain.clone(), cfg.beneficiary, cfg.extra_data.clone());
         let timestamp = now_secs().max(head.timestamp + 1);
+        // Phase B: carry the latest checkpoint QC of this block's epoch (it pays the signers).
+        let number = head.number + 1;
+        let block_cert = match cert.lock().clone() {
+            Some((epoch, bytes))
+                if epoch == chain.rules().epoch_of(number)
+                    && chain.phase()?.is_checkpointing(chain.rules(), number) =>
+            {
+                bytes
+            }
+            _ => Vec::new(),
+        };
         let template = match tokio::task::spawn_blocking(move || {
-            c.build_template(candidates, timestamp, beneficiary, extra)
+            c.build_template(candidates, timestamp, beneficiary, extra, block_cert)
         })
         .await?
         {

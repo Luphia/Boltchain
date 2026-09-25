@@ -51,6 +51,9 @@ pub struct PowScenario {
     pub delay_s: f64,
     /// Honest nodes split into two groups (first `split` miners vs the rest) during this window.
     pub partition: Option<(f64, f64, usize)>,
+    /// Phase B: a committee finalizes the block this deep on every honest node's chain; fork
+    /// choice never goes below it (finality is modelled as reaching everyone at once).
+    pub finality_depth: Option<u64>,
     /// Simulated time.
     pub duration_s: f64,
     /// Difficulty rule.
@@ -68,6 +71,7 @@ impl PowScenario {
             hashrate,
             delay_s: 1.0,
             partition: None,
+            finality_depth: None,
             duration_s: 6.0 * 3600.0,
             asert: AsertParams {
                 spacing: 12,
@@ -197,6 +201,7 @@ pub fn run_pow(sc: &PowScenario) -> PowReport {
                     blocks: &[Block],
                     i: usize,
                     b: usize,
+                    finalized: usize,
                     refused: &mut usize|
      -> Option<u64> {
         let head = nodes[i].head;
@@ -218,7 +223,7 @@ pub fn run_pow(sc: &PowScenario) -> PowReport {
             y = blocks[y].parent;
         }
         let depth = hb.height - blocks[x].height;
-        if depth > MAX_REORG_DEPTH {
+        if depth > MAX_REORG_DEPTH || blocks[x].height < blocks[finalized].height {
             *refused += 1;
             return None;
         }
@@ -226,9 +231,28 @@ pub fn run_pow(sc: &PowScenario) -> PowReport {
         Some(depth)
     };
 
+    let mut finalized = 0usize;
+    let ancestor_at = |blocks: &[Block], mut x: usize, h: u64| {
+        while blocks[x].height > h {
+            x = blocks[x].parent;
+        }
+        x
+    };
     while let Some(Reverse((now, ev))) = queue.pop() {
         if now > end {
             break;
+        }
+        if let Some(d) = sc.finality_depth {
+            let low = nodes.iter().map(|nd| blocks[nd.head].height).min().unwrap_or(0);
+            if low > d {
+                let h = low - d;
+                let cand = ancestor_at(&blocks, nodes[0].head, h);
+                if blocks[cand].height > blocks[finalized].height
+                    && nodes.iter().all(|nd| ancestor_at(&blocks, nd.head, h) == cand)
+                {
+                    finalized = cand;
+                }
+            }
         }
         match ev {
             Ev::Mine(i, g) if g == generation[i] => {
@@ -354,7 +378,9 @@ pub fn run_pow(sc: &PowScenario) -> PowReport {
                     nodes[i].known.insert(c);
                 }
                 let before = nodes[i].head;
-                if let Some(depth) = consider(&mut nodes, &blocks, i, b, &mut report.refused) {
+                if let Some(depth) =
+                    consider(&mut nodes, &blocks, i, b, finalized, &mut report.refused)
+                {
                     report.max_reorg = report.max_reorg.max(depth);
                     if nodes[i].head != before {
                         schedule(
@@ -475,6 +501,23 @@ mod tests {
         // Theory (γ ≈ 0): break-even at 1/3. Allow noise, but no large windfall.
         assert!(r.attacker_share < 0.45, "selfish share {}", r.attacker_share);
         assert!(r.agree);
+    }
+
+    #[test]
+    fn stake_finality_stops_the_majority_attack() {
+        // The same 60% private attack that rewrites history in phase A: with checkpoints at
+        // depth 32 finalized by the committee, the heavier branch forks below a checkpoint and
+        // every honest node refuses it.
+        let mut sc = PowScenario::mainnet(3, honest(10), 50_000.0);
+        sc.attacker = 30.0 / 0.4 * 0.6;
+        sc.attack = Attack::Private { start_s: 3600.0, min_len: 50 };
+        sc.finality_depth = Some(32);
+        let r = run_pow(&sc);
+        eprintln!("{r:?}");
+        assert!(r.refused > 0, "the private branch was refused");
+        assert!(r.max_reorg < 32, "no reorganisation reached a checkpoint: {}", r.max_reorg);
+        assert!(r.agree);
+        assert!(r.attacker_share < 0.2, "attacker share {}", r.attacker_share);
     }
 
     #[test]

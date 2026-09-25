@@ -26,11 +26,17 @@ contract ConsensusRegistry is SystemContract {
     uint256 public constant BASE_SLASH_BPS = 500; // 5%
 
     uint64 public currentEpoch;
+    /// Whether stake finality of mined blocks is decided (phase B from `checkpointEpoch` on).
+    bool public checkpointScheduled;
+    /// First epoch whose committee finalizes mined blocks (checkpoints), once scheduled.
+    uint64 public checkpointEpoch;
     /// Whether the switch to PoS is decided (phase C from `posEpoch` on, ADR 0007 §5).
     bool public posScheduled;
     /// First PoS epoch, once scheduled. Blocks of earlier epochs are mined (PoW).
     uint64 public posEpoch;
-    /// Consecutive epoch starts at which the PoS thresholds were met.
+    /// Consecutive epoch starts at which the checkpoint thresholds (T1) were met.
+    uint64 public checkpointStreak;
+    /// Consecutive epoch starts at which the PoS thresholds (T2) were met.
     uint64 public thresholdStreak;
     mapping(uint64 => Committee) internal committees;
     mapping(bytes32 => bool) public evidenceUsed;
@@ -38,7 +44,8 @@ contract ConsensusRegistry is SystemContract {
     uint256[16] internal slashedRing;
     uint64[16] internal slashedRingEpoch;
 
-    event EpochStarted(uint64 indexed epoch, uint64 thresholdStreak);
+    event EpochStarted(uint64 indexed epoch, uint64 checkpointStreak, uint64 thresholdStreak);
+    event CheckpointsScheduled(uint64 indexed checkpointEpoch);
     event PosScheduled(uint64 indexed posEpoch);
     event CommitteeSet(uint64 indexed epoch, bytes32 committeeHash);
     event Equivocation(uint32 indexed validator, uint64 epoch, uint64 round, uint256 slashed, address reporter);
@@ -60,32 +67,48 @@ contract ConsensusRegistry is SystemContract {
         external
         onlyGenesis
     {
+        checkpointScheduled = true;
         posScheduled = true;
         _store(0, memberIds, weights, seats);
     }
 
-    /// First block of epoch `epoch`. `thresholdMet`: whether stake met the PoS thresholds (T2)
-    /// in the parent state. After `streakRequired` consecutive epochs, PoS is scheduled to start two
-    /// epochs later, so its first committee can be drawn one epoch ahead like every other.
-    function beginEpoch(uint64 epoch, bool thresholdMet, uint64 streakRequired)
+    /// First block of epoch `epoch`. `checkpointMet` / `posMet`: whether stake met the phase B (T1)
+    /// and phase C (T2) thresholds in the parent state. After `streakRequired` consecutive epochs a
+    /// phase is scheduled to start two epochs later, so its first committee can be drawn one epoch
+    /// ahead like every other. PoS implies checkpoints: if T2 completes first (or together), phase
+    /// B starts with PoS, i.e. never runs.
+    function beginEpoch(uint64 epoch, bool checkpointMet, bool posMet, uint64 streakRequired)
         external
         onlySystem
-        returns (bool scheduled, uint64 firstPosEpoch)
+        returns (bool cpScheduled, uint64 firstCheckpointEpoch, bool scheduled, uint64 firstPosEpoch)
     {
         currentEpoch = epoch;
+        if (!checkpointScheduled) {
+            checkpointStreak = checkpointMet ? checkpointStreak + 1 : 0;
+            if (checkpointStreak >= streakRequired) {
+                checkpointScheduled = true;
+                checkpointEpoch = epoch + 2;
+                emit CheckpointsScheduled(epoch + 2);
+            }
+        }
         if (!posScheduled) {
-            thresholdStreak = thresholdMet ? thresholdStreak + 1 : 0;
+            thresholdStreak = posMet ? thresholdStreak + 1 : 0;
             if (thresholdStreak >= streakRequired) {
                 posScheduled = true;
                 posEpoch = epoch + 2;
                 emit PosScheduled(epoch + 2);
+                if (!checkpointScheduled) {
+                    checkpointScheduled = true;
+                    checkpointEpoch = epoch + 2;
+                    emit CheckpointsScheduled(epoch + 2);
+                }
             }
         }
         if (epoch + 1 >= KEEP_EPOCHS) {
             delete committees[epoch + 1 - KEEP_EPOCHS];
         }
-        emit EpochStarted(epoch, thresholdStreak);
-        return (posScheduled, posEpoch);
+        emit EpochStarted(epoch, checkpointStreak, thresholdStreak);
+        return (checkpointScheduled, checkpointEpoch, posScheduled, posEpoch);
     }
 
     /// Stores the committee of `epoch` (drawn by the node at the start of `epoch - 1`).
@@ -97,9 +120,10 @@ contract ConsensusRegistry is SystemContract {
         emit CommitteeSet(epoch, keccak256(abi.encode(memberIds, weights, seats)));
     }
 
-    /// (PoS scheduled, first PoS epoch, threshold streak).
-    function phase() external view returns (bool, uint64, uint64) {
-        return (posScheduled, posEpoch, thresholdStreak);
+    /// (checkpoints scheduled, first checkpoint epoch, PoS scheduled, first PoS epoch, T1 streak,
+    /// T2 streak).
+    function phase() external view returns (bool, uint64, bool, uint64, uint64, uint64) {
+        return (checkpointScheduled, checkpointEpoch, posScheduled, posEpoch, checkpointStreak, thresholdStreak);
     }
 
     function committee(uint64 epoch)

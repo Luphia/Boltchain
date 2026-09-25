@@ -291,7 +291,12 @@ fn bolt(n: u64) -> U256 {
 fn begin_epoch(evm: &mut Evm, epoch: u64) {
     evm.system(
         CONSENSUS,
-        IConsensusRegistry::beginEpochCall { epoch, thresholdMet: false, streakRequired: 14 },
+        IConsensusRegistry::beginEpochCall {
+            epoch,
+            checkpointMet: false,
+            posMet: false,
+            streakRequired: 14,
+        },
     );
 }
 
@@ -465,7 +470,12 @@ fn no_governance_only_the_node_can_call_admin_functions() {
         anyone,
         CONSENSUS,
         U256::ZERO,
-        IConsensusRegistry::beginEpochCall { epoch: 1, thresholdMet: true, streakRequired: 1 }
+        IConsensusRegistry::beginEpochCall {
+            epoch: 1,
+            checkpointMet: true,
+            posMet: true,
+            streakRequired: 1
+        }
     ));
     assert!(!evm.try_call(
         anyone,
@@ -486,6 +496,7 @@ fn no_governance_only_the_node_can_call_admin_functions() {
             burned: U256::ZERO,
             minted: bolt(1_000_000),
             certEpoch: 0,
+            certRound: 0,
             bitmap: Bytes::new(),
         }
     ));
@@ -498,40 +509,81 @@ fn no_governance_only_the_node_can_call_admin_functions() {
 }
 
 #[test]
-fn pos_is_scheduled_after_the_threshold_streak() {
+fn phases_are_scheduled_after_the_threshold_streaks() {
     let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     let mut evm = Evm::from_genesis(&g);
-    let begin = |evm: &mut Evm, epoch: u64, met: bool| {
+    let begin = |evm: &mut Evm, epoch: u64, t1: bool, t2: bool| {
         evm.system(
             CONSENSUS,
-            IConsensusRegistry::beginEpochCall { epoch, thresholdMet: met, streakRequired: 3 },
+            IConsensusRegistry::beginEpochCall {
+                epoch,
+                checkpointMet: t1,
+                posMet: t2,
+                streakRequired: 3,
+            },
         )
     };
-    assert!(!begin(&mut evm, 1, true).scheduled);
-    assert!(!begin(&mut evm, 2, true).scheduled);
+    assert!(!begin(&mut evm, 1, true, false).cpScheduled);
+    assert!(!begin(&mut evm, 2, true, false).cpScheduled);
     // A miss restarts the count.
-    assert!(!begin(&mut evm, 3, false).scheduled);
-    assert_eq!(evm.view(CONSENSUS, IConsensusRegistry::phaseCall {}).thresholdStreak, 0);
-    assert!(!begin(&mut evm, 4, true).scheduled);
-    assert!(!begin(&mut evm, 5, true).scheduled);
-    let r = begin(&mut evm, 6, true);
+    assert!(!begin(&mut evm, 3, false, false).cpScheduled);
+    assert_eq!(evm.view(CONSENSUS, IConsensusRegistry::phaseCall {}).checkpointStreak, 0);
+    assert!(!begin(&mut evm, 4, true, false).cpScheduled);
+    assert!(!begin(&mut evm, 5, true, true).cpScheduled);
+    let r = begin(&mut evm, 6, true, true);
+    assert!(r.cpScheduled && !r.scheduled);
+    assert_eq!(r.firstCheckpointEpoch, 8, "phase B two epochs later");
+    assert!(!begin(&mut evm, 7, true, false).scheduled);
+    let r = begin(&mut evm, 8, true, false);
+    assert!(!r.scheduled, "T2 streak broken");
+    for e in 9..11 {
+        assert!(!begin(&mut evm, e, true, true).scheduled);
+    }
+    let r = begin(&mut evm, 11, true, true);
     assert!(r.scheduled);
-    assert_eq!(r.firstPosEpoch, 8, "two epochs later");
+    assert_eq!(r.firstPosEpoch, 13);
+    assert_eq!(r.firstCheckpointEpoch, 8, "unchanged");
     // Final: later misses change nothing.
-    let r = begin(&mut evm, 7, false);
-    assert!(r.scheduled);
-    assert_eq!(r.firstPosEpoch, 8);
-    // Mined blocks add their reward to the supply.
+    let r = begin(&mut evm, 12, false, false);
+    assert!(r.scheduled && r.cpScheduled);
+
+    // Stake that jumps straight past T2 skips phase B.
+    let mut evm = Evm::from_genesis(&g);
+    for e in 1..3 {
+        begin(&mut evm, e, true, true);
+    }
+    let r = begin(&mut evm, 3, true, true);
+    assert_eq!((r.firstCheckpointEpoch, r.firstPosEpoch), (5, 5));
+
+    // Mined blocks add their reward to the supply; a certificate's votes count once.
     evm.system(
         REWARDS,
         IRewardDistributor::onBlockCall {
             burned: U256::ZERO,
             minted: bolt(5),
-            certEpoch: 0,
-            bitmap: Bytes::new(),
+            certEpoch: 4,
+            certRound: 7,
+            bitmap: bytes(&[0b11]),
         },
     );
     assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), bolt(5));
+    for round in [7, 6, 8] {
+        evm.system(
+            REWARDS,
+            IRewardDistributor::onBlockCall {
+                burned: U256::ZERO,
+                minted: U256::ZERO,
+                certEpoch: 4,
+                certRound: round,
+                bitmap: bytes(&[0b01]),
+            },
+        );
+    }
+    let votes = |evm: &mut Evm, i| {
+        evm.view(REWARDS, IRewardDistributor::votesOfCall { epoch: 4, index: U256::from(i) })
+    };
+    assert_eq!(votes(&mut evm, 0), U256::from(2), "rounds 7 and 8; the repeat and 6 are ignored");
+    assert_eq!(votes(&mut evm, 1), U256::from(1));
 }
 
 /// Genesis now includes the compiled system contracts: any change to them, to the deployment
@@ -542,7 +594,7 @@ fn devnet_genesis_hash_is_pinned() {
     let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&g).unwrap(),
-        "0x0e0704a9ae2132b04455e4640d0d9c535af8fadc958f2cd82ab6ae581d963552"
+        "0x4e29cb6595341388fcda2d70fd32142e264890df858492b383351807d5ab488e"
             .parse::<B256>()
             .unwrap()
     );

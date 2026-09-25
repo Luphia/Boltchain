@@ -9,7 +9,7 @@
 - 設計決策紀錄：[`docs/adr/`](docs/adr/)
 - 里程碑進度：[`docs/milestones.md`](docs/milestones.md)
 
-## 目前狀態：M4.5 PoW 啟動
+## 目前狀態：M4.6 質押最終性
 
 | 項目 | 狀態 |
 | --- | --- |
@@ -31,7 +31,7 @@
 | RandomBOLT 挖礦、ASERT、分叉選擇、重組上限 128 塊、PoW 同步（M4.5） | 已驗收：`crates/node/tests/m45_pow.rs` |
 | 質押達門檻後自動切換到 PoS；首個委員會只抽成熟質押 | 已驗收 |
 | gasLimit 由出塊者投票；硬分叉表與分叉 ID | 完成 |
-| 階段 B：質押委員會確認 PoW 檢查點（M4.6） | 下一步 |
+| 階段 B：質押委員會以 BFT 確認 PoW 檢查點、60/40 獎勵、完整 A → B → C（M4.6） | 已驗收：`crates/node/tests/m46_finality.rs` |
 | 儲存層：檢查點同步、快照、修剪、歷史分片（M5） | 之後 |
 | Osaka state tests、ARM 基準 | 在 CI 上執行 |
 
@@ -58,7 +58,8 @@ cargo run --release -p boltchain -- mine --genesis genesis/pow-dev.json --datadi
   --beneficiary 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
 ```
 
-`pow-dev.json` 只要 2 位驗證者共質押 128 BOLT 並維持 2 個 epoch（64 塊）就會切換到 PoS。
+`pow-dev.json` 有 2 位驗證者共質押 128 BOLT 並維持 2 個 epoch（64 塊）就進入階段 B（委員會確認挖出來的區塊），
+3 位共 192 BOLT 再維持 2 個 epoch 就切換到 PoS。
 驗證者用 `validator --genesis genesis/pow-dev.json --key <金鑰> [--mine --beneficiary <地址>]` 參與，
 註冊交易由 `keys register-tx` 產生。主網礦工可加 `--randomx-fast`（每把金鑰 2 GiB 記憶體，雜湊快約 8 倍）與 `--mining-threads`。
 

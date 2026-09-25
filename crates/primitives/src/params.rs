@@ -68,6 +68,19 @@ pub const EMISSION_RATE_E18: u128 = 474_645_662_939_840;
 /// Share of emission paid to consensus participation, in basis points. The rest goes to history storage.
 pub const CONSENSUS_REWARD_BPS: u32 = 8_000;
 
+/// Stake finality start (phase B, ADR 0007 §4): minimum number of stakers.
+pub const CHECKPOINT_MIN_STAKERS: u32 = 32;
+
+/// Stake finality start: minimum total stake, in whole BOLT.
+pub const CHECKPOINT_MIN_TOTAL_STAKE_BOLT: u64 = 1_000_000;
+
+/// Phase B: a mined block is proposed as a checkpoint once this many blocks bury it.
+pub const CHECKPOINT_DEPTH: u64 = 32;
+
+/// Phase B: miners' share of each block reward, in basis points; the rest pays the committee
+/// by participation.
+pub const CHECKPOINT_MINER_BPS: u32 = 6_000;
+
 /// PoS start (phase C, ADR 0007): minimum number of stakers with at least the minimum stake.
 pub const POS_MIN_STAKERS: u32 = 128;
 
