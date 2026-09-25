@@ -82,6 +82,10 @@ pub enum AddError {
     /// Gas limit exceeds the per-tx cap or block gas limit, or is below intrinsic 21000.
     #[error("gas limit {0} out of range")]
     GasLimit(u64),
+    /// Gas limit below what the transaction must pay before executing: intrinsic gas (calldata,
+    /// access list, authorizations, contract creation) or the EIP-7623 calldata floor.
+    #[error("intrinsic gas too low: needs at least {0}")]
+    IntrinsicGas(u64),
     /// Fee cap below the minimum base fee, or tip above fee cap.
     #[error("fee too low")]
     FeeTooLow,
@@ -180,6 +184,10 @@ impl TxPool {
         let gas = tx.gas_limit();
         if !(21_000..=TX_GAS_LIMIT_CAP.min(c.block_gas_limit)).contains(&gas) {
             return Err(AddError::GasLimit(gas));
+        }
+        let needed = intrinsic_gas(&tx);
+        if gas < needed {
+            return Err(AddError::IntrinsicGas(needed));
         }
         if tx.max_fee_per_gas() < u128::from(c.min_base_fee)
             || tx.max_priority_fee_per_gas().is_some_and(|p| p > tx.max_fee_per_gas())
@@ -329,3 +337,25 @@ impl Inner {
 
 #[cfg(test)]
 mod tests;
+
+/// Gas a transaction must provide before any execution under the chain's rules (Osaka): the
+/// intrinsic cost or the EIP-7623 calldata floor, whichever is higher. Execution rejects a
+/// transaction below it, so the pool must too (otherwise it would be accepted and silently
+/// dropped at block building).
+pub fn intrinsic_gas(tx: &TxEnvelope) -> u64 {
+    use alloy_consensus::Transaction as _;
+    let (accounts, storages) = tx.access_list().map_or((0, 0), |al| {
+        (al.len() as u64, al.iter().map(|i| i.storage_keys.len() as u64).sum())
+    });
+    let auths = tx.authorization_list().map_or(0, |a| a.len() as u64);
+    let g = revm::context_interface::cfg::gas::calculate_initial_tx_gas(
+        revm::primitives::hardfork::SpecId::OSAKA,
+        tx.input(),
+        tx.kind().is_create(),
+        accounts,
+        storages,
+        auths,
+        None,
+    );
+    (g.initial_regular_gas + g.initial_state_gas).max(g.floor_gas)
+}

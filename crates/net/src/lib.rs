@@ -507,7 +507,12 @@ async fn run(
                     let verdict = match (&cfg.fork_check, remote) {
                         (None, _) => PeerRules::Compatible,
                         (Some(check), Some(r)) => (check.0)(r),
-                        (Some(_), None) => PeerRules::Incompatible,
+                        // Not a Boltchain node (e.g. a stock IPFS client fetching blocks over
+                        // Bitswap): keep the connection, but it is not a chain peer.
+                        (Some(_), None) => {
+                            tracing::debug!(%peer_id, agent = %info.agent_version, "non-Boltchain peer (IPFS client)");
+                            continue;
+                        }
                     };
                     match verdict {
                         PeerRules::Incompatible => {

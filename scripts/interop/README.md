@@ -24,3 +24,27 @@ envelope {"v":1,"height":2,"header":"bagiacgza...","parent":"bafyrei...","chunks
 header bytes 609 cid digest 1951444406fd...
 matches block hash true
 ```
+
+## Whole chain over IPFS only (`helia-full-chain.mjs`)
+
+Starting from one envelope CID (any recent block's `root=` in the node log), follows `parent`
+links back to genesis and fetches every header and body chunk with Helia over Bitswap. Helia
+checks every block against its CID; the script decodes the transactions and, with an RPC URL,
+compares each block's hash and transaction list with the node's.
+
+```sh
+npm install ethers   # in addition to the packages above
+node helia-full-chain.mjs /ip4/127.0.0.1/tcp/18017/p2p/<peer_id> <root> http://127.0.0.1:18545
+```
+
+Verified 2026-09-25 on a devnet with 60 transfers (12 of them carrying 2 KB calldata):
+
+```
+{"blocks":157,"txs":60,"chunks":12,"ipfsBytes":146609,"mismatches":0,"seconds":6.627}
+```
+
+Boltchain nodes keep connections from peers that announce no Boltchain fork id (plain IPFS
+clients), so they can fetch blocks, but such peers are not treated as chain peers.
+Discovery is not through the public IPFS DHT (Boltchain runs its own Kademlia under
+`/bolt/<chain>/kad/1.0.0`): connect to a Boltchain node directly, or use a node's HTTP gateway
+(`--gateway`).

@@ -106,3 +106,35 @@ fn fee_cap_below_base_fee_waits() {
     assert_eq!(p.best(MIN_FEE, &st).len(), 1);
     assert!(p.best(3 * MIN_FEE, &st).is_empty());
 }
+
+#[test]
+fn calldata_floor_and_intrinsic_gas_are_checked_at_admission() {
+    let k = PrivateKeySigner::random();
+    let st = rich(&[&k]);
+    let p = pool();
+    let fee = 10 * u128::from(MIN_FEE);
+    let with = |gas_limit: u64, input: Vec<u8>, to: TxKind| {
+        let mut t = TxEip1559 {
+            chain_id: 1337,
+            gas_limit,
+            max_fee_per_gas: fee,
+            to,
+            input: input.into(),
+            ..Default::default()
+        };
+        let sig = k.sign_transaction_sync(&mut t).unwrap();
+        TxEnvelope::from(t.into_signed(sig))
+    };
+    let call = TxKind::Call(Address::repeat_byte(1));
+    // 2,000 non-zero bytes: intrinsic 21,000 + 32,000 = 53,000, but the EIP-7623 floor is
+    // 21,000 + 10 * 8,000 = 101,000.
+    let data = vec![0xab; 2000];
+    assert_eq!(p.add(with(60_000, data.clone(), call), &st), Err(AddError::IntrinsicGas(101_000)));
+    p.add(with(101_000, data, call), &st).unwrap();
+    // Contract creation: 53,000 plus calldata and initcode words.
+    let code = vec![0u8; 64];
+    assert!(matches!(
+        p.add(with(53_000, code.clone(), TxKind::Create), &st),
+        Err(AddError::IntrinsicGas(n)) if n > 53_000
+    ));
+}

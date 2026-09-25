@@ -12,6 +12,7 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
+revm.workspace = true
 
 [dev-dependencies]
 alloy-signer-local = "2.5"

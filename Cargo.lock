@@ -1625,6 +1625,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
  "parking_lot",
+ "revm",
  "thiserror 2.0.21",
 ]
 
