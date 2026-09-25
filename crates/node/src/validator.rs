@@ -43,6 +43,9 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+/// How often a node re-publishes its head while that head is a mined block.
+const REANNOUNCE: Duration = Duration::from_secs(4);
+
 /// Validator options.
 #[derive(Debug, Clone)]
 pub struct ValidatorConfig {
@@ -318,9 +321,15 @@ impl Validator {
         let mut seen: SeenVotes = HashMap::new();
         let mut actions = ctx.engine.start();
         actions.extend(self.replay(&mut ctx, &mut future));
+        let mut reannounce = tokio::time::interval(REANNOUNCE);
         loop {
             self.handle(&mut ctx, actions, &itx, &sources, &mut future).await;
             actions = tokio::select! {
+                _ = reannounce.tick() => {
+                    // Until the committee certified a block, keep the terminal block visible.
+                    self.reannounce_mined_head().await;
+                    vec![]
+                }
                 ev = events.recv() => match ev {
                     None => break,
                     Some(NetEvent::Consensus { via, data }) => match bolt_consensus::decode::<BlsScheme>(&data) {
@@ -409,7 +418,12 @@ impl Validator {
             ))
         });
         let mut tick = tokio::time::interval(Duration::from_millis(500));
+        let mut last_announce = std::time::Instant::now();
         let ready = loop {
+            if last_announce.elapsed() > REANNOUNCE {
+                self.reannounce_mined_head().await;
+                last_announce = std::time::Instant::now();
+            }
             if pos_ready(&self.chain)? {
                 break true;
             }
@@ -457,6 +471,19 @@ impl Validator {
             );
         }
         Ok(ready)
+    }
+
+    /// Re-publishes the head while it is a mined block, so nodes that missed a block (or sit on a
+    /// lighter branch) converge; this matters most at the terminal block, after which nothing is
+    /// mined any more.
+    async fn reannounce_mined_head(&self) {
+        let Ok(head) = self.chain.head() else { return };
+        if head.number == 0 || head.difficulty.is_zero() {
+            return;
+        }
+        if let Some(a) = bolt_sync::announce_stored(&self.chain, head.number, Vec::new()) {
+            let _ = self.net.publish(a).await;
+        }
     }
 
     /// First PoS epoch: if a mined reorganisation replaced the terminal block before anything

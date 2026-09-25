@@ -1,6 +1,6 @@
 [package]
 name = "bolt-sim"
-description = "Deterministic multi-node simulator for the consensus engine (delays, partitions, crashes, byzantine behaviour)"
+description = "Deterministic multi-node simulators: the consensus engine (delays, partitions, crashes, byzantine behaviour) and the mining phase (fork choice, attacks)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 bolt-consensus.workspace = true
+bolt-pow.workspace = true
 alloy-primitives.workspace = true
 rand.workspace = true
 rayon.workspace = true

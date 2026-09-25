@@ -1,7 +1,11 @@
 # Genesis 檔
 
-`devnet.json` 是開發用的 genesis。其中的 BLS 公鑰與多簽地址都是佔位值，
-**不是有效的 BLS12-381 曲線點**；M3 加入 blst 之後，genesis 驗證會檢查曲線點與持有證明（proof of possession）。
+| 檔案 | 用途 |
+| --- | --- |
+| `mainnet.template.json` | 主網範本：chain id 8017，沒有任何驗證者、多簽或分配，只差啟動時間 |
+| `devnet.json` | 主網格式的測試 genesis（chain id 8017，extra data 不同），CI 用來檢查 `genesis inspect` |
+| `dev.json` | 本地開發鏈（chain id 1337）：3 個注資帳戶、7 個在 genesis 質押的驗證者，從第 1 塊就跑 PoS |
+| `pow-dev.json` | 本地挖礦鏈（chain id 1338）：3 個注資帳戶，RandomBOLT 低難度、4 秒一塊、每 epoch 32 塊；2 位驗證者共質押 128 BOLT 並維持 2 個 epoch 就切換到 PoS |
 
 ```sh
 cargo run -p boltchain -- genesis inspect genesis/devnet.json
@@ -9,29 +13,23 @@ cargo run -p boltchain -- genesis inspect genesis/devnet.json
 
 驗證規則見 `crates/primitives/src/genesis.rs` 的 `Genesis::validate`，重點如下：
 
-- chain id 必須是 8017，slot 長度 6 s，每個 epoch 14,400 個 slot
-- 委員會至少 512 席，gas limit 在 15M–60M 之間
-- 至少 7 個啟動期驗證者，BLS 公鑰不可重複
-- 多簽門檻必須過半；升級 timelock 至少 16 天，參數 timelock 至少 2 天
-- `alloc` 中所有帳戶餘額必須為 0（無創世分配）
-- EIP-4788 與 EIP-2935 的系統合約會自動加入，不可覆寫
+- chain id 必須是 8017，slot 長度 6 s，每個 epoch 14,400 個 slot，委員會至少 512 席，gas limit 在 15M–60M 之間
+- 挖礦參數固定：RandomBOLT、12 秒一塊、ASERT 半衰期 1 小時；起始難度必須大於 0
+- **沒有特殊待遇**（ADR 0007）：不能列 genesis 驗證者、不能調整 PoS 門檻、`alloc` 中所有帳戶餘額必須為 0
+- **沒有治理**（ADR 0008）：genesis 不部署多簽或 timelock，系統合約不可升級
+- EIP-4788 與 EIP-2935 的系統合約會自動加入，不可覆寫；`0xB017…` 系統合約範圍也不可覆寫
+
+dev 鏈（`"dev": true`，chain id 不可為 8017）可以：注資帳戶、在 genesis 質押驗證者（`devValidators`）、
+調低 PoS 門檻（`posMinStakers`、`posMinStakeBolt`、`posStreakEpochs`）、縮短 epoch、改挖礦參數，
+或把 `pow.algorithm` 設成 `keccak` 以加快測試。
 
 ## 主網範本 `mainnet.template.json`
 
-已填入的內容：
+主網從挖礦開始，任何人都能用一般電腦參與；質押達到門檻（128 位驗證者、共 1,000 萬 BOLT，連續 14 個 epoch）後自動切換到 PoS。
+發布前只需要填入 `timestamp`（主網啟動時間），執行 `boltchain genesis inspect genesis/mainnet.json` 確認通過，再公布 genesis hash。
 
-- 7 個啟動期驗證者的收款地址（`feeRecipient`），均為 CAFECA 提供的地址
-- 多簽 9 位簽署者（`governance.owners`），門檻 5-of-9
-- 升級 timelock 16 天、參數 timelock 2 天
-
-**這個檔案刻意無法通過驗證，不能直接用來啟動主網**，因為還缺兩項：
-
-1. 每個驗證者的 BLS12-381 公鑰（目前是全零佔位值）。M3 會提供 `boltchain keys` 工具：
-   各驗證者營運者在自己的機器上產生 BLS 金鑰，並用 `feeRecipient` 地址的私鑰簽署一份綁定聲明，
-   證明這把 BLS 公鑰屬於該地址的持有者。私鑰不離開營運者的機器。
-2. `timestamp`：主網啟動時間。
-
-填好之後執行 `boltchain genesis inspect genesis/mainnet.json` 確認通過，再公布 genesis hash。
+想成為驗證者的人不必出現在 genesis：用 `boltchain keys new` 產生金鑰，`boltchain keys register-tx` 印出
+`StakingManager.register` 交易，從持有質押的錢包送出（至少 64 BOLT）。
 
 ## Bootstrap 節點
 

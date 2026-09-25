@@ -63,6 +63,10 @@ fn call_tx(nonce: u64, to: Address, value: U256, data: Vec<u8>) -> TxEnvelope {
 }
 
 fn register_tx(nonce: u64, key: u32) -> TxEnvelope {
+    register_tx_with(nonce, key, bolt(100))
+}
+
+fn register_tx_with(nonce: u64, key: u32, stake: U256) -> TxEnvelope {
     let sk = dev_key(key);
     let pk = sk.public_key();
     let data = IStakingManager::registerCall {
@@ -72,7 +76,7 @@ fn register_tx(nonce: u64, key: u32) -> TxEnvelope {
         feeRecipient: Address::repeat_byte(0x50 + key as u8),
     }
     .abi_encode();
-    call_tx(nonce, STAKING, bolt(100), data)
+    call_tx(nonce, STAKING, stake, data)
 }
 
 /// Mines the next block on `chain`'s head, `spacing` seconds after it.
@@ -275,14 +279,22 @@ fn stake_thresholds_switch_the_chain_to_pos() {
     let phase = chain.phase().unwrap();
     assert_eq!(phase.pos_epoch, Some(4));
     assert_eq!(phase.terminal_height(chain.rules()), Some(16));
-    // Committee of epoch 4 is drawn at block 13 (start of epoch 3) from matured stake.
+    // A whale stakes 50x more right before the first committee is drawn (block 11, epoch 2)...
+    while chain.head().unwrap().number < 10 {
+        let (h, _) = mine(&chain, vec![], miner, 12);
+        push(&chain, h);
+    }
+    let (h, _) = mine(&chain, vec![register_tx_with(2, 22, bolt(5_000))], miner, 12);
+    push(&chain, h);
+    // ...but the committee of epoch 4, drawn at block 13 (start of epoch 3), only counts stake at
+    // least 2 epochs old: the whale gets no seat.
     while chain.head().unwrap().number < 16 {
         let (h, _) = mine(&chain, vec![], miner, 12);
         push(&chain, h);
     }
     let c = view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: 4 });
     assert_eq!(c.weights.iter().map(|w| *w as u32).sum::<u32>(), 4);
-    assert!(c.ids.iter().all(|id| [1, 2].contains(id)));
+    assert!(c.ids.iter().all(|id| [1, 2].contains(id)), "{:?}", c.ids);
     assert!(view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: 3 }).ids.is_empty());
 
     // Block 17 must come from the PoS committee: mining it fails...
@@ -304,6 +316,10 @@ fn stake_thresholds_switch_the_chain_to_pos() {
         .unwrap();
     assert!(pos.header.difficulty.is_zero());
     chain.commit_pending(&pos.hash).unwrap();
+    // Later committees count all stake: the whale now holds most seats.
+    let c5 = view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: 5 });
+    let whale = c5.ids.iter().position(|id| *id == 3).map(|i| c5.weights[i]).unwrap_or(0);
+    assert!(whale >= 3, "whale seats in epoch 5: {whale} of 4");
     // ...and a mined block at that height is invalid everywhere.
     for (n, h) in blocks.iter().enumerate() {
         follower.import_mined(h, body(&chain, n as u64 + 1), None).unwrap();

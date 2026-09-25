@@ -15,6 +15,8 @@
 //! partitioned, not in the committee) catches up from the published epoch proof, as a real node
 //! does from the finality proofs in announcements.
 
+pub mod pow;
+
 use alloy_primitives::{B256, keccak256};
 use bolt_consensus::{
     Action, BlockInfo, CommitProof, Config, Engine, Message, MockScheme, Scheme, ValidatorIndex,

@@ -1557,6 +1557,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "bolt-consensus",
+ "bolt-pow",
  "rand 0.9.5",
  "rayon",
 ]
