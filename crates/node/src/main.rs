@@ -102,13 +102,13 @@ fn main() -> Result<()> {
         Command::Genesis(GenesisCmd::MakeDev { out, chain_id, validators, fund, extra }) => {
             let g = make_dev_genesis(chain_id, validators, &fund, &extra)?;
             std::fs::write(&out, serde_json::to_string_pretty(&g)? + "\n")?;
-            println!("wrote {} (genesis hash {})", out.display(), g.hash());
+            println!("wrote {} (genesis hash {})", out.display(), bolt_system::genesis_hash(&g)?);
         }
         Command::Genesis(GenesisCmd::Inspect { path }) => {
             let json = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
             let genesis = Genesis::from_json(&json)?;
-            let header = genesis.header();
+            let header = bolt_system::genesis_header(&genesis)?;
             println!("genesis valid");
             println!("  chain id          {}", genesis.config.chain_id);
             println!("  block hash        {}", header.hash_slow());

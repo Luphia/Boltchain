@@ -1405,11 +1405,14 @@ dependencies = [
  "alloy-network",
  "alloy-primitives",
  "alloy-signer-local",
+ "alloy-sol-types",
  "alloy-trie",
+ "bolt-consensus",
  "bolt-exec",
  "bolt-ipld",
  "bolt-primitives",
  "bolt-store",
+ "bolt-system",
  "parking_lot",
  "rayon",
  "revm",
@@ -1580,6 +1583,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bolt-system"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "alloy-trie",
+ "bolt-exec",
+ "bolt-primitives",
+ "revm",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "bolt-txpool"
 version = "0.1.0"
 dependencies = [
@@ -1615,6 +1635,7 @@ dependencies = [
  "bolt-rpc",
  "bolt-store",
  "bolt-sync",
+ "bolt-system",
  "bolt-txpool",
  "clap",
  "k256",

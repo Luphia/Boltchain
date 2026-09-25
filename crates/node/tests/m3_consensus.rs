@@ -91,12 +91,11 @@ async fn seven_validators_survive_two_failures() {
             chain: chain.clone(),
             pool,
             net: net.clone(),
-            genesis: g.clone(),
-            key: dev_key(i),
+            keys: vec![dev_key(i)],
             cfg: ValidatorConfig {
                 slot_ms: 1000,
                 base_timeout_ms: 2500,
-                state_path: dir.path().join("consensus-state.json"),
+                state_dir: dir.path().join("consensus"),
             },
         };
         let task = tokio::spawn(async move {
@@ -111,8 +110,11 @@ async fn seven_validators_survive_two_failures() {
     let fdir = tempfile::tempdir().unwrap();
     let fchain = Arc::new(Chain::open(fdir.path(), &g).unwrap());
     let (fnet, mut fevents) = start_net(fchain.clone(), boot.clone()).await;
-    let follower =
-        Follower::with_finality(fchain.clone(), fnet.clone(), Arc::new(Finality::new(&g)));
+    let follower = Follower::with_finality(
+        fchain.clone(),
+        fnet.clone(),
+        Arc::new(Finality::new(fchain.clone())),
+    );
     let ftask = tokio::spawn(async move {
         while let Some(ev) = fevents.recv().await {
             if let NetEvent::Announce { via, announce } = ev

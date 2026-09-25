@@ -7,6 +7,11 @@
 //!   block and requires the resulting header and envelope to match.
 //! * A follower that is behind walks `parent` links from the announced envelope back to its own
 //!   head, fetching envelopes over Bitswap, then imports the missing blocks in order.
+//! * On consensus networks every import is backed by a finality proof. When the follower is more
+//!   than an epoch behind it cannot check the tip's proof yet (it does not know that committee),
+//!   so it imports epoch by epoch: the first block of each epoch carries the proof that the
+//!   previous epoch's last block is final, checkable with a committee already in local state
+//!   (ADR 0006 §4). Blocks after the last boundary wait for the tip's own proof.
 
 use bolt_chain::{BuiltBlock, Chain, ChainError};
 use bolt_ipld::{BlockBundle, Cid, Envelope, IpldError, decode_block, verify};
@@ -82,10 +87,26 @@ pub enum Outcome {
     Known,
 }
 
-/// Checks finality proofs carried by announcements (consensus networks).
+/// Result of checking a finality proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The proof is valid.
+    Final,
+    /// The proof is invalid.
+    NotFinal,
+    /// The committee needed to check it is not known locally yet (the node is behind).
+    Unknown,
+}
+
+/// Checks finality proofs (consensus networks).
 pub trait FinalityCheck: Send + Sync + std::fmt::Debug + 'static {
-    /// Whether `proof` shows that the block with hash `block` is final.
-    fn is_final(&self, block: &alloy_primitives::B256, proof: &[u8]) -> bool;
+    /// Whether `proof` shows that block `hash` at `height` is final.
+    fn check(&self, height: u64, hash: &alloy_primitives::B256, proof: &[u8]) -> Verdict;
+    /// The finality proof of a block's parent carried in the block's envelope certificate (the
+    /// first block of an epoch carries one for the previous epoch's last block).
+    fn parent_proof(&self, cert: &[u8]) -> Option<Vec<u8>>;
+    /// Whether `height` is the first block of an epoch.
+    fn is_epoch_start(&self, height: u64) -> bool;
 }
 
 /// Follows announcements and keeps the local chain in sync.
@@ -138,12 +159,14 @@ impl Follower {
         if envelope.height != a.height {
             return Err(IpldError::Malformed("announce height").into());
         }
-        if let Some(check) = &self.finality {
-            let hash = envelope.block_hash().ok_or(IpldError::Malformed("header cid"))?;
-            if !check.is_final(&hash, &a.proof) {
-                return Err(SyncError::NotFinal);
-            }
-        }
+        let tip_hash = envelope.block_hash().ok_or(IpldError::Malformed("header cid"))?;
+        let tip_verdict = match &self.finality {
+            Some(check) => match check.check(a.height, &tip_hash, &a.proof) {
+                Verdict::NotFinal => return Err(SyncError::NotFinal),
+                v => v,
+            },
+            None => Verdict::Final,
+        };
         let mut have: HashMap<Cid, Vec<u8>> = HashMap::new();
         have.insert(envelope.header, a.header.clone());
         for b in a.inline {
@@ -158,12 +181,22 @@ impl Follower {
                 chain_of.last().and_then(|(_, e)| e.parent).ok_or(SyncError::Fork(head))?;
             let bytes = match self.local(&parent) {
                 Some(b) => b,
-                None => self
-                    .net
-                    .fetch(&[parent], &peers)
-                    .await?
-                    .remove(&parent)
-                    .ok_or(SyncError::Fork(head))?,
+                None => {
+                    let b = self
+                        .net
+                        .fetch(&[parent], &peers)
+                        .await?
+                        .remove(&parent)
+                        .ok_or(SyncError::Fork(head))?;
+                    // Content-addressed (verified against its CID by the fetch): keep it, so a
+                    // retry after a timeout resumes the walk instead of starting over.
+                    if let Ok(w) = self.chain.store().writer()
+                        && w.put_ipld(&parent, &b).is_ok()
+                    {
+                        let _ = w.commit();
+                    }
+                    b
+                }
             };
             let env = Envelope::decode(&bytes)?;
             chain_of.push((parent, env));
@@ -190,10 +223,44 @@ impl Follower {
         }
         let fetch_ms = started.elapsed().as_millis() as u64;
 
-        // Import oldest first.
+        // Import oldest first. With the tip proven, every ancestor is final. Otherwise each block
+        // is imported only once a later epoch-boundary proof (or finally the tip's) covers it.
         let count = chain_of.len() as u64;
+        let ordered: Vec<(Cid, Envelope)> = chain_of.into_iter().rev().collect();
+        // (height, hash, certificate) of each block, for the boundary proofs.
+        let meta: Vec<(u64, Option<alloy_primitives::B256>, Vec<u8>)> =
+            ordered.iter().map(|(_, e)| (e.height, e.block_hash(), e.qc.clone())).collect();
         let mut height = head;
-        for (root, env) in chain_of.into_iter().rev() {
+        let mut proven_upto = if tip_verdict == Verdict::Final { a.height } else { head };
+        for (i, (root, env)) in ordered.into_iter().enumerate() {
+            let number = meta[i].0;
+            if number > proven_upto {
+                let check =
+                    self.finality.as_ref().expect("unproven blocks only with a finality check");
+                // Next epoch start in the batch: its envelope proves its parent final.
+                let boundary = (i + 1..meta.len()).find(|j| check.is_epoch_start(meta[*j].0));
+                let mut proved = false;
+                if let Some(j) = boundary
+                    && let (Some(proof), Some(parent_hash)) =
+                        (check.parent_proof(&meta[j].2), meta[j - 1].1)
+                {
+                    match check.check(meta[j - 1].0, &parent_hash, &proof) {
+                        Verdict::Final => {
+                            proven_upto = meta[j - 1].0;
+                            proved = true;
+                        }
+                        Verdict::NotFinal => return Err(SyncError::NotFinal),
+                        Verdict::Unknown => {}
+                    }
+                }
+                if !proved {
+                    // Past the last boundary: the tip's proof must be checkable by now.
+                    match check.check(a.height, &tip_hash, &a.proof) {
+                        Verdict::Final => proven_upto = a.height,
+                        _ => return Err(SyncError::NotFinal),
+                    }
+                }
+            }
             let qc = env.qc.clone();
             let block = decode_block(env, |c| have.get(c).cloned())?;
             let chain = self.chain.clone();

@@ -10,6 +10,8 @@ license.workspace = true
 bolt-primitives.workspace = true
 bolt-exec.workspace = true
 bolt-store.workspace = true
+bolt-system.workspace = true
+bolt-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
@@ -25,6 +27,7 @@ tempfile.workspace = true
 alloy-signer-local = "2.5"
 alloy-network = "2.5"
 alloy-trie.workspace = true
+alloy-sol-types.workspace = true
 
 [lints]
 workspace = true

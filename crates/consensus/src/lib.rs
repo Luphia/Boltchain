@@ -11,13 +11,13 @@ pub use types::*;
 
 use alloy_primitives::{B256, keccak256};
 use bolt_primitives::bls::{self, BlsPublicKey, BlsSecretKey, BlsSignature};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// BLS12-381 signatures; QCs carry one aggregate signature plus a signer bitmap.
 #[derive(Clone)]
 pub struct BlsScheme {
     keys: Arc<Vec<BlsPublicKey>>,
-    secret: Option<Arc<BlsSecretKey>>,
+    secrets: Arc<HashMap<ValidatorIndex, BlsSecretKey>>,
 }
 
 impl std::fmt::Debug for BlsScheme {
@@ -27,9 +27,31 @@ impl std::fmt::Debug for BlsScheme {
 }
 
 impl BlsScheme {
-    /// `keys[i]` is validator `i`'s public key (PoP already checked); `secret` is this node's key.
-    pub fn new(keys: Vec<BlsPublicKey>, secret: Option<BlsSecretKey>) -> Self {
-        Self { keys: Arc::new(keys), secret: secret.map(Arc::new) }
+    /// `keys[i]` is committee member `i`'s public key (PoP already checked). Every local secret
+    /// key whose public key is in `keys` becomes a signer at that index.
+    pub fn new(keys: Vec<BlsPublicKey>, local: &[BlsSecretKey]) -> Self {
+        let mut secrets = HashMap::new();
+        for sk in local {
+            let pk = sk.public_key();
+            for (i, k) in keys.iter().enumerate() {
+                if *k == pk {
+                    secrets.insert(i as ValidatorIndex, sk.clone());
+                }
+            }
+        }
+        Self { keys: Arc::new(keys), secrets: Arc::new(secrets) }
+    }
+
+    /// Committee indices this scheme can sign for.
+    pub fn signers(&self) -> Vec<ValidatorIndex> {
+        let mut v: Vec<_> = self.secrets.keys().copied().collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Public key of member `i`.
+    pub fn key(&self, i: ValidatorIndex) -> Option<&BlsPublicKey> {
+        self.keys.get(i as usize)
     }
 }
 
@@ -37,8 +59,8 @@ impl Scheme for BlsScheme {
     type Sig = BlsSignature;
     type Agg = BlsSignature;
 
-    fn sign(&self, _me: ValidatorIndex, msg: &[u8]) -> Self::Sig {
-        self.secret.as_ref().expect("signing requires this node's validator key").sign(msg)
+    fn sign(&self, me: ValidatorIndex, msg: &[u8]) -> Self::Sig {
+        self.secrets.get(&me).expect("signing requires this validator's key").sign(msg)
     }
 
     fn verify(&self, signer: ValidatorIndex, msg: &[u8], sig: &Self::Sig) -> bool {
@@ -97,6 +119,37 @@ pub fn encode<S: Scheme>(m: &Message<S>) -> Vec<u8> {
 /// Decodes a wire message.
 pub fn decode<S: Scheme>(b: &[u8]) -> Option<Message<S>> {
     serde_ipld_dagcbor::from_slice(b).ok()
+}
+
+/// Encodes a block's parent certificate (the envelope `qc` field). The genesis certificate is
+/// encoded as empty bytes.
+pub fn encode_cert<S: Scheme>(c: &Cert<S>) -> Vec<u8> {
+    if let Cert::Qc(q) = c
+        && q.is_genesis()
+    {
+        return Vec::new();
+    }
+    serde_ipld_dagcbor::to_vec(c).expect("certificate serializes")
+}
+
+/// Decodes an envelope certificate. `None` for empty bytes (genesis child) or garbage.
+pub fn decode_cert<S: Scheme>(b: &[u8]) -> Option<Cert<S>> {
+    if b.is_empty() {
+        return None;
+    }
+    serde_ipld_dagcbor::from_slice(b).ok()
+}
+
+/// (epoch, signer bitmap) recorded by a production (BLS) envelope certificate; empty for the
+/// genesis child or undecodable bytes. Used by execution for participation rewards.
+pub fn cert_votes(b: &[u8]) -> (u64, Vec<u8>) {
+    match decode_cert::<BlsScheme>(b) {
+        Some(c) => {
+            let (e, bm) = c.votes();
+            (e, bm.to_vec())
+        }
+        None => (0, Vec::new()),
+    }
 }
 
 #[cfg(test)]

@@ -6,7 +6,10 @@
 
 pub mod block;
 
-pub use block::{BlockExecutor, BlockParams, ExecutedBlock, TxRejection, next_base_fee, tx_env};
+pub use block::{
+    BlockExecutor, BlockParams, ExecutedBlock, TxRejection, VIEW_GAS, ViewError, next_base_fee,
+    tx_env, view_call,
+};
 
 use revm::{
     Context, Database, ExecuteEvm, MainBuilder, MainContext,

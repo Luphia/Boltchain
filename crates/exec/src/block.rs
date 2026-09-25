@@ -228,6 +228,47 @@ where
         Ok(())
     }
 
+    /// Calls a system contract as the system address (no gas charged to the block, no nonce) and
+    /// commits the result. Returns the output; a revert is a fatal block error.
+    pub fn system_call_data(
+        &mut self,
+        to: Address,
+        data: Bytes,
+    ) -> Result<Bytes, BlockError<D::Error>> {
+        let block = self.params.input.block_env();
+        let mut evm = Context::mainnet()
+            .with_db(&mut self.state)
+            .with_cfg(cfg_env(self.params.input.chain_id))
+            .with_block(block)
+            .build_mainnet();
+        match evm.system_call_commit(to, data).map_err(map_evm)? {
+            ExecutionResult::Success { output, .. } => Ok(output.into_data()),
+            _ => Err(BlockError::SystemCall(to)),
+        }
+    }
+
+    /// Read-only call against the current block state (nothing is committed). Runs without the
+    /// EIP-7825 per-transaction gas cap so views over large validator sets fit.
+    pub fn view_call(&mut self, to: Address, data: Bytes) -> Result<Bytes, BlockError<D::Error>> {
+        view_call(&mut self.state, &self.params.input, to, data).map_err(|e| match e {
+            ViewError::Database(d) => db_err(d),
+            ViewError::Reverted => BlockError::SystemCall(to),
+            ViewError::Evm(s) => BlockError::Evm(s),
+        })
+    }
+
+    /// Credits newly issued BOLT to `to` (epoch emission). Not a transaction; recorded in the
+    /// block's state changes.
+    pub fn credit(&mut self, to: Address, amount: u128) -> Result<(), BlockError<D::Error>> {
+        use revm::database_interface::DatabaseCommitExt;
+        self.state.increment_balances([(to, amount)]).map_err(db_err)
+    }
+
+    /// Block parameters.
+    pub fn params(&self) -> &BlockParams {
+        &self.params
+    }
+
     /// Gas left in the block.
     pub fn gas_remaining(&self) -> u64 {
         self.params.input.gas_limit - self.gas_used
@@ -308,6 +349,62 @@ where
             gas_used: self.gas_used,
             bundle: self.state.take_bundle(),
         }
+    }
+}
+
+/// Why a view call failed.
+#[derive(Debug)]
+pub enum ViewError<E> {
+    /// Database failure.
+    Database(E),
+    /// The call reverted or halted.
+    Reverted,
+    /// Internal EVM error.
+    Evm(String),
+}
+
+/// Gas available to a view call.
+pub const VIEW_GAS: u64 = 1 << 40;
+
+/// Read-only call from the system address against `db`, with no gas cap, no fee and no nonce check.
+pub fn view_call<DB: revm::Database>(
+    db: DB,
+    input: &BlockInput,
+    to: Address,
+    data: Bytes,
+) -> Result<Bytes, ViewError<DB::Error>> {
+    use revm::ExecuteEvm;
+    let mut block = input.block_env();
+    block.basefee = 0;
+    block.gas_limit = VIEW_GAS;
+    let mut cfg = cfg_env(input.chain_id);
+    cfg.disable_nonce_check = true;
+    cfg.tx_gas_limit_cap = Some(VIEW_GAS);
+    let tx = TxEnv {
+        caller: revm::handler::SYSTEM_ADDRESS,
+        kind: TxKind::Call(to),
+        data,
+        gas_limit: VIEW_GAS,
+        gas_price: 0,
+        gas_priority_fee: None,
+        chain_id: Some(input.chain_id),
+        ..Default::default()
+    };
+    let mut evm = Context::mainnet().with_db(db).with_cfg(cfg).with_block(block).build_mainnet();
+    match evm.transact(tx) {
+        Ok(r) => match r.result {
+            ExecutionResult::Success { output, .. } => Ok(output.into_data()),
+            _ => Err(ViewError::Reverted),
+        },
+        Err(EVMError::Database(d)) => Err(ViewError::Database(d)),
+        Err(e) => Err(ViewError::Evm(format!("{e:?}"))),
+    }
+}
+
+fn db_err<E: std::fmt::Debug>(e: EvmDatabaseError<E>) -> BlockError<E> {
+    match e {
+        EvmDatabaseError::Database(d) => BlockError::Database(d),
+        other => BlockError::Evm(format!("{other:?}")),
     }
 }
 

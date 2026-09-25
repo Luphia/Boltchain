@@ -14,6 +14,7 @@ use bolt_exec::{
 use bolt_ipld::{BlockBundle, Cid};
 use bolt_primitives::{Genesis, genesis::ChainConfig};
 use bolt_store::{InitAccount, StateView, Store, StoreError, StoredBlock};
+use bolt_system::{CertVotes, EpochRules};
 use parking_lot::Mutex;
 use revm::database::{OriginalValuesKnown, states::StateChangeset};
 use std::{collections::BTreeMap, path::Path};
@@ -68,6 +69,7 @@ pub struct BuiltBlock {
 pub struct Chain {
     store: Store,
     config: ChainConfig,
+    rules: EpochRules,
     genesis_hash: B256,
     pending: Mutex<HashMap<B256, Arc<PendingBlock>>>,
 }
@@ -79,12 +81,14 @@ impl Chain {
     /// Opens the datadir, writing genesis on first start.
     pub fn open(datadir: impl AsRef<Path>, genesis: &Genesis) -> Result<Self> {
         let store = Store::open(datadir)?;
-        let expected = genesis.hash();
+        let genesis_header =
+            bolt_system::genesis_header(genesis).map_err(|e| ChainError::Exec(e.to_string()))?;
+        let expected = genesis_header.hash_slow();
         let head = store.reader()?.head()?;
         match head {
             None => {
-                let alloc: BTreeMap<Address, InitAccount> = genesis
-                    .effective_alloc()
+                let alloc: BTreeMap<Address, InitAccount> = bolt_system::genesis_alloc(genesis)
+                    .map_err(|e| ChainError::Exec(e.to_string()))?
                     .into_iter()
                     .map(|(a, acc)| {
                         let storage = acc
@@ -106,7 +110,7 @@ impl Chain {
                     .collect();
                 let w = store.writer()?;
                 let root = w.init_state(&alloc)?;
-                let header = genesis.header();
+                let header = genesis_header;
                 if root != header.state_root {
                     return Err(ChainError::Exec(format!(
                         "genesis state root mismatch: store {root}, genesis {}",
@@ -129,6 +133,7 @@ impl Chain {
         Ok(Self {
             store,
             config: genesis.config.clone(),
+            rules: EpochRules::from_config(&genesis.config),
             genesis_hash: expected,
             pending: Mutex::new(HashMap::new()),
         })
@@ -156,28 +161,54 @@ impl Chain {
         r.header(n)?.ok_or_else(|| ChainError::Exec("missing head header".into()))
     }
 
-    /// Base fee the next block will use.
-    pub fn next_base_fee(&self) -> Result<u64> {
-        Ok(next_base_fee(&self.head()?, self.config.min_base_fee_wei))
+    /// Epoch rules.
+    pub fn rules(&self) -> &EpochRules {
+        &self.rules
     }
 
-    fn params_for(&self, parent: &Header, timestamp: u64, beneficiary: Address) -> BlockParams {
-        let number = parent.number + 1;
-        // Placeholder randomness until the BLS-VRF lands in M4.
-        let prevrandao = keccak256([parent.mix_hash.as_slice(), &number.to_be_bytes()].concat());
+    /// Base fee the next block will use.
+    pub fn next_base_fee(&self) -> Result<u64> {
+        let r = self.store.reader()?;
+        let p = self.chain_params(&StateView::latest(&r))?;
+        Ok(next_base_fee(&self.head()?, p.min_base_fee))
+    }
+
+    /// Governance parameters (`ParamRegistry`) in the state `db` (the parent of the next block).
+    pub fn chain_params<D: revm::DatabaseRef>(&self, db: D) -> Result<ChainParams>
+    where
+        D::Error: std::fmt::Debug,
+    {
+        let p = bolt_system::queries::call(
+            db,
+            self.config.chain_id,
+            bolt_system::addresses::PARAMS,
+            bolt_system::abi::IParamRegistry::paramsCall {},
+        )
+        .map_err(|e| ChainError::Exec(e.to_string()))?;
+        Ok(ChainParams { gas_limit: p.gasLimit, min_base_fee: p.minBaseFee })
+    }
+
+    fn params_for(
+        &self,
+        parent: &Header,
+        cp: &ChainParams,
+        timestamp: u64,
+        beneficiary: Address,
+        extra_data: Bytes,
+    ) -> BlockParams {
         BlockParams {
             input: BlockInput {
                 chain_id: self.config.chain_id,
-                number,
+                number: parent.number + 1,
                 timestamp,
                 beneficiary,
-                gas_limit: self.config.gas_limit,
-                base_fee: next_base_fee(parent, self.config.min_base_fee_wei),
-                prevrandao,
+                gas_limit: cp.gas_limit,
+                base_fee: next_base_fee(parent, cp.min_base_fee),
+                prevrandao: mix_hash(parent, &extra_data),
             },
             parent_hash: parent.hash_slow(),
             parent_beacon_root: B256::ZERO,
-            extra_data: Bytes::new(),
+            extra_data,
         }
     }
 
@@ -223,7 +254,7 @@ impl Chain {
     fn execute_on(
         &self,
         parent_hash: &B256,
-        mut params_fn: impl FnMut(&Header) -> BlockParams,
+        mut params_fn: impl FnMut(&Header, &ChainParams) -> BlockParams,
         txs: Vec<(TxEnvelope, Address)>,
         expected: Option<&Header>,
         qc: Vec<u8>,
@@ -234,12 +265,12 @@ impl Chain {
             Some(p) => p.header.clone(),
             None => head.clone(),
         };
-        let params = params_fn(&parent_header);
-        let number = params.input.number;
         let mut changes = overlay::Changes::default();
         for a in &ancestors {
             changes.push(a.header.number, a.hash, &a.changes);
         }
+        let (cert_epoch, bitmap) = bolt_consensus::cert_votes(&qc);
+        let votes = CertVotes { epoch: cert_epoch, bitmap };
 
         let mut included = Vec::new();
         let mut rejected = Vec::new();
@@ -247,8 +278,12 @@ impl Chain {
             let reader = self.store.reader()?;
             let view = StateView::latest(&reader);
             let db = overlay::Overlay { base: &view, changes: &changes };
+            let cp = self.chain_params(&db)?;
+            let params = params_fn(&parent_header, &cp);
             let mut ex =
                 BlockExecutor::new(&db, params).map_err(|e| ChainError::Exec(e.to_string()))?;
+            bolt_system::pre_block(&mut ex, &self.rules, &parent_header, &votes)
+                .map_err(|e| ChainError::Exec(format!("system calls: {e}")))?;
             for (tx, sender) in txs {
                 if expected.is_none() && ex.gas_remaining() < 21_000 {
                     break;
@@ -267,6 +302,7 @@ impl Chain {
             }
             ex.finish()
         };
+        let number = executed.params.input.number;
 
         // State root: apply ancestors and this block in a write transaction that is then dropped
         // (aborted). Nothing reaches the database until the block is committed.
@@ -282,8 +318,15 @@ impl Chain {
             && exp != &header
         {
             return Err(ChainError::InvalidBlock(format!(
-                "header mismatch (state root {} vs {})",
-                header.state_root, exp.state_root
+                "header mismatch (state root {} vs {}, gas limit {} vs {}, base fee {:?} vs {:?}, mix {} vs {})",
+                header.state_root,
+                exp.state_root,
+                header.gas_limit,
+                exp.gas_limit,
+                header.base_fee_per_gas,
+                exp.base_fee_per_gas,
+                header.mix_hash,
+                exp.mix_hash
             )));
         }
         let parent_root = match ancestors.last() {
@@ -323,10 +366,15 @@ impl Chain {
         let beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
         let (pending, included, rejected) = self.execute_on(
             parent,
-            |ph| {
-                let mut p = self.params_for(ph, timestamp.max(ph.timestamp + 1), beneficiary);
+            |ph, cp| {
+                let mut p = self.params_for(
+                    ph,
+                    cp,
+                    timestamp.max(ph.timestamp + 1),
+                    beneficiary,
+                    extra_data.clone(),
+                );
                 p.parent_beacon_root = beacon;
-                p.extra_data = extra_data.clone();
                 p
             },
             candidates.into_iter().collect(),
@@ -363,12 +411,8 @@ impl Chain {
         if header.timestamp <= parent.timestamp {
             return Err(invalid("timestamp not after parent".into()));
         }
-        if header.base_fee_per_gas != Some(next_base_fee(&parent, self.config.min_base_fee_wei)) {
-            return Err(invalid("wrong base fee".into()));
-        }
-        if header.gas_limit != self.config.gas_limit {
-            return Err(invalid("wrong gas limit".into()));
-        }
+        // Gas limit, base fee (ParamRegistry) and the RANDAO mix are recomputed during execution
+        // and compared with the header.
         let expected_beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
         if header.parent_beacon_block_root != Some(expected_beacon) {
             return Err(invalid("parent certificate hash mismatch".into()));
@@ -384,11 +428,10 @@ impl Chain {
         let (h, number) = (header.clone(), header.number);
         let (pending, _, _) = self.execute_on(
             &header.parent_hash,
-            |ph| {
-                let mut p = self.params_for(ph, h.timestamp, h.beneficiary);
-                p.input.prevrandao = h.mix_hash;
+            |ph, cp| {
+                let mut p =
+                    self.params_for(ph, cp, h.timestamp, h.beneficiary, h.extra_data.clone());
                 p.parent_beacon_root = expected_beacon;
-                p.extra_data = h.extra_data.clone();
                 p
             },
             transactions.into_iter().zip(senders).collect(),
@@ -491,6 +534,29 @@ impl Chain {
     }
 }
 
+/// Governance parameters that apply to a block (read from `ParamRegistry` in its parent state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainParams {
+    /// Block gas limit.
+    pub gas_limit: u64,
+    /// Minimum base fee.
+    pub min_base_fee: u64,
+}
+
+/// Length of `extra_data` in validator-produced blocks: round (8 bytes) + RANDAO reveal (96 bytes).
+pub const EXTRA_DATA_LEN: usize = 8 + 96;
+
+/// RANDAO mix of the block after `parent` (ADR 0006 §6): with a reveal in `extra_data`,
+/// `keccak(parent.mix_hash ‖ keccak(reveal))`; otherwise (single-producer devnet)
+/// `keccak(parent.mix_hash ‖ number)`. Validators check the reveal's signature before voting.
+pub fn mix_hash(parent: &Header, extra_data: &[u8]) -> B256 {
+    if extra_data.len() == EXTRA_DATA_LEN {
+        keccak256([parent.mix_hash.as_slice(), keccak256(&extra_data[8..]).as_slice()].concat())
+    } else {
+        keccak256([parent.mix_hash.as_slice(), &(parent.number + 1).to_be_bytes()].concat())
+    }
+}
+
 /// A block that was executed and verified but is not final yet.
 #[derive(Debug)]
 pub struct PendingBlock {
@@ -516,5 +582,7 @@ pub fn max_cost(tx: &TxEnvelope) -> U256 {
     U256::from(tx.gas_limit()) * U256::from(tx.max_fee_per_gas()) + tx.value()
 }
 
+#[cfg(test)]
+mod epoch_tests;
 #[cfg(test)]
 mod tests;

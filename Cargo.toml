@@ -23,11 +23,13 @@ bolt-txpool = { path = "crates/txpool" }
 bolt-rpc = { path = "crates/rpc" }
 bolt-sim = { path = "crates/sim" }
 bolt-chain = { path = "crates/chain" }
+bolt-system = { path = "crates/system" }
 
 # ethereum
 revm = { version = "43", default-features = false, features = ["std", "secp256k1", "c-kzg", "blst"] }
 alloy-primitives = { version = "1.7", features = ["serde", "rlp"] }
 alloy-rlp = "0.3"
+alloy-sol-types = "1.7"
 alloy-trie = { version = "0.9", features = ["ethereum"] }
 alloy-consensus = { version = "2.5", default-features = false, features = ["std", "serde", "k256", "secp256k1"] }
 alloy-eips = { version = "2.5", default-features = false, features = ["std", "serde"] }
@@ -80,3 +82,8 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+# Dependencies (revm, blst, libp2p...) are optimized even in debug builds: unoptimized EVM
+# execution and pairings are 10-50x slower, which starves multi-node tests on small CI machines.
+# Our own crates stay unoptimized for fast rebuilds and debuggability.
+opt-level = 2
+

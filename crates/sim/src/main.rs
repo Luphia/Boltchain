@@ -33,10 +33,14 @@ fn main() {
         total.liveness_failures.extend(p.liveness_failures);
         total.safety_violations.extend(p.safety_violations);
         total.messages += p.messages;
+        total.multi_epoch += p.multi_epoch;
+        total.epoch_transitions += p.epoch_transitions;
     }
     println!(
-        "scenarios {} | liveness required in {} | safety violations {} | liveness failures {} | {} messages | {:.1}s",
+        "scenarios {} ({} with rotating committees, {} epoch transitions) | liveness required in {} | safety violations {} | liveness failures {} | {} messages | {:.1}s",
         total.scenarios,
+        total.multi_epoch,
+        total.epoch_transitions,
         total.liveness_required,
         total.safety_violations.len(),
         total.liveness_failures.len(),

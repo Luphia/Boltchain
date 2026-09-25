@@ -1,0 +1,23 @@
+[package]
+name = "bolt-system"
+description = "Boltchain system contracts: artifacts, genesis deployment, ABI bindings, epoch hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bolt-primitives.workspace = true
+bolt-exec.workspace = true
+revm.workspace = true
+alloy-primitives.workspace = true
+alloy-sol-types.workspace = true
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-trie.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

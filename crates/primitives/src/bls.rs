@@ -71,6 +71,27 @@ fn getrandom(buf: &mut [u8]) {
         .expect("reading /dev/urandom");
 }
 
+/// EIP-2537 encoding of a public key: x || y, each padded to 64 bytes (128 bytes). `None` if the
+/// key is invalid.
+pub fn pubkey_point(pk_bytes: &BlsPublicKey) -> Option<[u8; 128]> {
+    let raw = pk(pk_bytes)?.serialize(); // x || y, 48 bytes each
+    let mut out = [0u8; 128];
+    out[16..64].copy_from_slice(&raw[0..48]);
+    out[80..128].copy_from_slice(&raw[48..96]);
+    Some(out)
+}
+
+/// EIP-2537 encoding of a signature: x.c0 || x.c1 || y.c0 || y.c1, each padded to 64 bytes
+/// (256 bytes). blst serializes G2 as x.c1 || x.c0 || y.c1 || y.c0. `None` if invalid.
+pub fn signature_point(s: &BlsSignature) -> Option<[u8; 256]> {
+    let raw = sig(s)?.serialize();
+    let mut out = [0u8; 256];
+    for (i, src) in [48usize, 0, 144, 96].into_iter().enumerate() {
+        out[64 * i + 16..64 * (i + 1)].copy_from_slice(&raw[src..src + 48]);
+    }
+    Some(out)
+}
+
 fn pk(pk: &BlsPublicKey) -> Option<min_pk::PublicKey> {
     // key_validate checks the encoding, that the point is not infinity and is in the subgroup.
     min_pk::PublicKey::key_validate(pk.as_slice()).ok()

@@ -16,24 +16,57 @@
 //!   current round makes a node time out too (it cannot be the only one left waiting).
 //! * **Commit.** When a block `B` of round `r` is certified and `B`'s parent is certified in round
 //!   `r - 1`, the parent and all its ancestors are final.
+//! * **Epoch end** (ADR 0006 §3). Real blocks go up to height `end_height`. Once the high QC is at
+//!   or above it, leaders propose *nil* blocks (hash [`nil_hash`], no payload, validated by the
+//!   engine itself) so the committee can finish the two-chain on its last real block. When that
+//!   block is final the engine emits [`Action::EpochEnd`] and stops; the next epoch starts from
+//!   it with a new committee.
+//!
+//! One engine can sign for several validators of the committee (`me`): they share the safety
+//! state, so they behave exactly like that many honest nodes with identical views.
 
 use crate::types::*;
 use alloy_primitives::B256;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Engine configuration.
+/// Engine configuration (one epoch).
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Chain id (in every signed message).
     pub chain_id: u64,
-    /// Validators and weights.
+    /// Epoch.
+    pub epoch: u64,
+    /// This epoch's committee.
     pub validators: ValidatorSet,
-    /// This node's validator index, or `None` for an observer.
-    pub me: Option<ValidatorIndex>,
-    /// Genesis block hash.
-    pub genesis: B256,
+    /// Committee indices this node signs for (empty for an observer).
+    pub me: Vec<ValidatorIndex>,
+    /// Block the epoch starts from (genesis, or the previous epoch's last block).
+    pub anchor: BlockInfo,
+    /// Height of the epoch's last real block.
+    pub end_height: u64,
     /// Base round timeout in milliseconds (doubles on consecutive timeouts, up to 8x).
     pub base_timeout_ms: u64,
+}
+
+impl Config {
+    /// Single-epoch configuration starting at genesis (tests and the simulator).
+    pub fn genesis(
+        chain_id: u64,
+        validators: ValidatorSet,
+        me: Option<ValidatorIndex>,
+        genesis: B256,
+        base_timeout_ms: u64,
+    ) -> Self {
+        Self {
+            chain_id,
+            epoch: 0,
+            validators,
+            me: me.into_iter().collect(),
+            anchor: BlockInfo { hash: genesis, parent: B256::ZERO, round: 0, height: 0 },
+            end_height: u64::MAX,
+            base_timeout_ms,
+        }
+    }
 }
 
 /// State a validator persists so a restart can neither vote twice in a round nor forget what it
@@ -41,6 +74,8 @@ pub struct Config {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(bound = "")]
 pub struct Persisted<S: Scheme> {
+    /// Epoch this state belongs to.
+    pub epoch: u64,
     /// Last final block.
     pub committed: BlockInfo,
     /// Its certificate (genesis certificate at genesis).
@@ -70,19 +105,26 @@ pub enum Action<S: Scheme> {
         /// Timeout certificate for `round - 1`, if any.
         tc: Option<Tc<S>>,
     },
-    /// These blocks are final, oldest first; `proof` certifies the newest.
+    /// These real blocks are final, oldest first. `proof` proves the newest (its `child_header`
+    /// is left empty for the node to fill in when the child is a real block).
     Commit {
         /// Newly final blocks, oldest first.
         blocks: Vec<BlockInfo>,
-        /// Finality proof material for the last block: its QC and its child's QC and hash.
-        qc: Qc<S>,
-        /// QC of the child that completed the two-chain.
-        child_qc: Qc<S>,
+        /// Finality proof of the last one.
+        proof: CommitProof<S>,
     },
     /// A certified block's ancestor is unknown locally (e.g. an equivocating leader sent us a
     /// different proposal). Fetch the block (content-addressed, so any peer can serve it) and
     /// call [`Engine::on_block`].
     FetchBlock(B256),
+    /// The epoch's last real block is final (it was the last block of the preceding `Commit`).
+    /// The engine has stopped; start the next epoch from it. `proof` is its finality proof.
+    EpochEnd {
+        /// The epoch's last block.
+        block: BlockInfo,
+        /// Proof that it is final.
+        proof: CommitProof<S>,
+    },
     /// Call [`Engine::on_timeout`] with `round` after `after_ms`.
     ScheduleTimeout {
         /// Round.
@@ -131,17 +173,19 @@ pub struct Engine<S: Scheme> {
     /// Latest QC whose commit is blocked on a missing ancestor.
     blocked_commit: Option<Qc<S>>,
     requested: HashSet<B256>,
+    /// The epoch is over (its last block is final): no more signing.
+    finished: bool,
 }
 
 impl<S: Scheme> Engine<S> {
-    /// Creates an engine at genesis.
+    /// Creates an engine at the start of its epoch.
     pub fn new(cfg: Config, scheme: S) -> Self {
-        let genesis = BlockInfo { hash: cfg.genesis, parent: B256::ZERO, round: 0, height: 0 };
-        let gqc = Qc::genesis(cfg.genesis);
+        let anchor = cfg.anchor.clone();
+        let gqc = Qc::anchor(cfg.epoch, anchor.hash, anchor.height);
         let mut blocks = HashMap::new();
-        blocks.insert(genesis.hash, genesis.clone());
+        blocks.insert(anchor.hash, anchor.clone());
         let mut qcs = HashMap::new();
-        qcs.insert(genesis.hash, gqc.clone());
+        qcs.insert(anchor.hash, gqc.clone());
         Self {
             cfg,
             scheme,
@@ -151,7 +195,7 @@ impl<S: Scheme> Engine<S> {
             entry_tc: None,
             blocks,
             qcs,
-            committed: genesis,
+            committed: anchor,
             votes: BTreeMap::new(),
             timeouts: BTreeMap::new(),
             pending: HashMap::new(),
@@ -160,13 +204,17 @@ impl<S: Scheme> Engine<S> {
             consecutive_timeouts: 0,
             blocked_commit: None,
             requested: HashSet::new(),
+            finished: false,
         }
     }
 
     /// Restores an engine from persisted state; call [`Engine::start`] next.
     pub fn resume(cfg: Config, scheme: S, p: Persisted<S>) -> Self {
         let mut e = Self::new(cfg, scheme);
-        if p.committed.height > 0 {
+        if p.epoch != e.cfg.epoch {
+            return e; // state of an older epoch: rounds restart, nothing to carry over
+        }
+        if p.committed.height > e.cfg.anchor.height {
             e.blocks.clear();
             e.qcs.clear();
             e.blocks.insert(p.committed.hash, p.committed.clone());
@@ -183,12 +231,13 @@ impl<S: Scheme> Engine<S> {
     /// State to persist (write it before sending any vote or timeout this engine produced).
     pub fn persisted(&self) -> Persisted<S> {
         Persisted {
+            epoch: self.cfg.epoch,
             committed: self.committed.clone(),
             committed_qc: self
                 .qcs
                 .get(&self.committed.hash)
                 .cloned()
-                .unwrap_or_else(|| Qc::genesis(self.cfg.genesis)),
+                .unwrap_or_else(|| self.anchor_qc()),
             high_qc: self.high_qc.clone(),
             last_voted: self.last_voted,
         }
@@ -219,8 +268,31 @@ impl<S: Scheme> Engine<S> {
         &self.cfg.validators
     }
 
+    /// Whether the epoch is over.
+    pub fn finished(&self) -> bool {
+        self.finished
+    }
+
+    /// Engine configuration.
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    fn anchor_qc(&self) -> Qc<S> {
+        Qc::anchor(self.cfg.epoch, self.cfg.anchor.hash, self.cfg.anchor.height)
+    }
+
     fn leader(&self, round: Round) -> ValidatorIndex {
         self.cfg.validators.leader(round)
+    }
+
+    fn is_me(&self, v: ValidatorIndex) -> bool {
+        self.cfg.me.contains(&v)
+    }
+
+    /// Whether a block at `height` must be a nil block.
+    fn is_nil_height(&self, height: u64) -> bool {
+        height > self.cfg.end_height
     }
 
     fn timeout_ms(&self) -> u64 {
@@ -246,14 +318,25 @@ impl<S: Scheme> Engine<S> {
         if let Some(qc) = self.blocked_commit.clone() {
             self.try_commit(&qc, out);
         }
+        if self.finished {
+            return;
+        }
         out.push(Action::ScheduleTimeout { round, after_ms: self.timeout_ms() });
         self.prune();
-        if self.cfg.me == Some(self.leader(round)) && self.proposed.insert(round) {
-            out.push(Action::Propose {
-                round,
-                qc: self.high_qc.clone(),
-                tc: self.entry_tc.clone(),
-            });
+        if self.is_me(self.leader(round)) && self.proposed.insert(round) {
+            let qc = self.high_qc.clone();
+            let tc = self.entry_tc.clone();
+            if self.is_nil_height(qc.height + 1) {
+                let block = BlockInfo {
+                    hash: nil_hash(self.cfg.epoch, &qc.block, round),
+                    parent: qc.block,
+                    round,
+                    height: qc.height + 1,
+                };
+                out.extend(self.on_proposed(block, qc, tc, Vec::new()));
+            } else {
+                out.push(Action::Propose { round, qc, tc });
+            }
         }
     }
 
@@ -286,6 +369,9 @@ impl<S: Scheme> Engine<S> {
 
     /// Two-chain commit: `qc` certifies B; if B's parent P was certified in B.round - 1, P is final.
     fn try_commit(&mut self, qc: &Qc<S>, out: &mut Vec<Action<S>>) {
+        if self.finished {
+            return;
+        }
         let Some(b) = self.blocks.get(&qc.block).cloned() else {
             self.block_on(qc, qc.block, out);
             return;
@@ -318,11 +404,56 @@ impl<S: Scheme> Engine<S> {
             }
         }
         chain.reverse();
-        self.committed = p;
+        self.committed = p.clone();
         if self.blocked_commit.as_ref().is_some_and(|q| q.round <= qc.round) {
             self.blocked_commit = None;
         }
-        out.push(Action::Commit { blocks: chain, qc: pqc, child_qc: qc.clone() });
+        // Nil blocks never reach the ledger; the proof covers the last real block.
+        let end = self.cfg.end_height;
+        let real: Vec<BlockInfo> = chain.into_iter().filter(|x| x.height <= end).collect();
+        let proof = self.proof_for(&p, &b, pqc, qc.clone());
+        let epoch_over = p.height >= end;
+        if let Some(last) = real.last().cloned() {
+            out.push(Action::Commit { blocks: real, proof: proof.clone() });
+            debug_assert!(!epoch_over || last.height == end || proof.committed_height == end);
+        }
+        if epoch_over {
+            self.finished = true;
+            let block = self.blocks.get(&proof.committed).cloned().unwrap_or(p);
+            out.push(Action::EpochEnd { block, proof });
+        }
+    }
+
+    /// Finality proof for the newest real block at or below P, given QC(P) and QC(B).
+    fn proof_for(&self, p: &BlockInfo, b: &BlockInfo, pqc: Qc<S>, bqc: Qc<S>) -> CommitProof<S> {
+        let end = self.cfg.end_height;
+        if b.height <= end {
+            // Both real: the node attaches B's header.
+            return CommitProof {
+                qc: pqc,
+                child_qc: bqc,
+                child_header: Vec::new(),
+                nil_rounds: Vec::new(),
+                committed: p.hash,
+                committed_height: p.height,
+            };
+        }
+        // B is nil; walk back from B to the last real block collecting nil rounds.
+        let mut rounds = vec![b.round];
+        let mut cur = p.clone();
+        while cur.height > end {
+            rounds.push(cur.round);
+            cur = self.blocks.get(&cur.parent).cloned().expect("nil chain is in the block tree");
+        }
+        rounds.reverse();
+        CommitProof {
+            qc: pqc,
+            child_qc: bqc,
+            child_header: Vec::new(),
+            nil_rounds: rounds,
+            committed: cur.hash,
+            committed_height: cur.height,
+        }
     }
 
     fn block_on(&mut self, qc: &Qc<S>, missing: B256, out: &mut Vec<Action<S>>) {
@@ -357,6 +488,9 @@ impl<S: Scheme> Engine<S> {
     /// Handles a message from the network (signatures are verified here).
     pub fn on_message(&mut self, msg: Message<S>) -> Vec<Action<S>> {
         let mut out = Vec::new();
+        if msg.epoch() != self.cfg.epoch || self.finished {
+            return out;
+        }
         match msg {
             Message::Proposal(p) => self.on_proposal(p, &mut out),
             Message::Vote(v) => self.on_vote(v, &mut out),
@@ -366,23 +500,40 @@ impl<S: Scheme> Engine<S> {
     }
 
     fn verify_qc(&self, qc: &Qc<S>) -> bool {
-        qc.verify(&self.scheme, &self.cfg.validators, self.cfg.chain_id, &self.cfg.genesis)
+        qc.verify(
+            &self.scheme,
+            &self.cfg.validators,
+            self.cfg.chain_id,
+            self.cfg.epoch,
+            &self.cfg.anchor.hash,
+        )
     }
 
     fn verify_tc(&self, tc: &Tc<S>) -> bool {
-        tc.verify(&self.scheme, &self.cfg.validators, self.cfg.chain_id, &self.cfg.genesis)
+        tc.verify(
+            &self.scheme,
+            &self.cfg.validators,
+            self.cfg.chain_id,
+            self.cfg.epoch,
+            &self.cfg.anchor.hash,
+        )
     }
 
     fn on_proposal(&mut self, p: Proposal<S>, out: &mut Vec<Action<S>>) {
         let b = &p.block;
-        if p.proposer != self.leader(b.round)
+        let nil = self.is_nil_height(b.height);
+        if p.epoch != self.cfg.epoch
+            || p.proposer != self.leader(b.round)
             || b.round == 0
             || b.parent != p.qc.block
             || b.height != p.qc.height + 1
             || b.round <= p.qc.round
+            || (nil
+                && (b.hash != nil_hash(self.cfg.epoch, &b.parent, b.round)
+                    || !p.payload.is_empty()))
             || !self.scheme.verify(
                 p.proposer,
-                &proposal_msg(self.cfg.chain_id, b.round, &b.hash, &p.payload),
+                &proposal_msg(self.cfg.chain_id, self.cfg.epoch, b.round, &b.hash, &p.payload),
                 &p.sig,
             )
             || !self.verify_qc(&p.qc)
@@ -404,7 +555,11 @@ impl<S: Scheme> Engine<S> {
         if let Some(tc) = &p.tc {
             self.process_tc(&tc.clone(), out);
         }
-        if b.round != self.round || b.round <= self.last_voted || self.me().is_none() {
+        if b.round != self.round
+            || b.round <= self.last_voted
+            || self.cfg.me.is_empty()
+            || self.finished
+        {
             return;
         }
         if !self.safe_to_vote(&p) {
@@ -414,7 +569,13 @@ impl<S: Scheme> Engine<S> {
             return;
         }
         self.pending.insert(b.hash, p.clone());
-        out.push(Action::Validate(p));
+        if nil {
+            // Nothing to fetch or execute: the hash says it all.
+            let hash = b.hash;
+            out.extend(self.on_validated(hash, true));
+        } else {
+            out.push(Action::Validate(p));
+        }
     }
 
     fn safe_to_vote(&self, p: &Proposal<S>) -> bool {
@@ -428,10 +589,6 @@ impl<S: Scheme> Engine<S> {
         }
     }
 
-    fn me(&self) -> Option<ValidatorIndex> {
-        self.cfg.me
-    }
-
     /// Result of the node's check of a proposed block.
     pub fn on_validated(&mut self, block: B256, valid: bool) -> Vec<Action<S>> {
         let mut out = Vec::new();
@@ -441,23 +598,29 @@ impl<S: Scheme> Engine<S> {
         }
         let r = p.block.round;
         // Conditions may have changed while validating (timeout, newer round).
-        if r != self.round || r <= self.last_voted || !self.safe_to_vote(&p) {
+        if r != self.round || r <= self.last_voted || !self.safe_to_vote(&p) || self.finished {
             return out;
         }
-        let Some(me) = self.me() else { return out };
+        if self.cfg.me.is_empty() {
+            return out;
+        }
         self.last_voted = r;
-        let vote = Vote {
-            round: r,
-            block: p.block.hash,
-            height: p.block.height,
-            signer: me,
-            sig: self.scheme.sign(me, &vote_msg(self.cfg.chain_id, r, &p.block.hash)),
-        };
         let next = self.leader(r + 1);
-        if next == me {
-            self.on_vote(vote, &mut out);
-        } else {
-            out.push(Action::SendTo(next, Message::Vote(vote)));
+        let msg = vote_msg(self.cfg.chain_id, self.cfg.epoch, r, &p.block.hash);
+        for me in self.cfg.me.clone() {
+            let vote = Vote {
+                epoch: self.cfg.epoch,
+                round: r,
+                block: p.block.hash,
+                height: p.block.height,
+                signer: me,
+                sig: self.scheme.sign(me, &msg),
+            };
+            if self.is_me(next) {
+                self.on_vote(vote, &mut out);
+            } else {
+                out.push(Action::SendTo(next, Message::Vote(vote)));
+            }
         }
         out
     }
@@ -471,14 +634,15 @@ impl<S: Scheme> Engine<S> {
         payload: Vec<u8>,
     ) -> Vec<Action<S>> {
         let mut out = Vec::new();
-        let Some(me) = self.me() else { return out };
-        if block.round != self.round || self.leader(block.round) != me {
+        let me = self.leader(block.round);
+        if block.round != self.round || !self.is_me(me) || self.finished {
             return out;
         }
-        let sig = self
-            .scheme
-            .sign(me, &proposal_msg(self.cfg.chain_id, block.round, &block.hash, &payload));
-        let p = Proposal { block, qc, tc, proposer: me, payload, sig };
+        let sig = self.scheme.sign(
+            me,
+            &proposal_msg(self.cfg.chain_id, self.cfg.epoch, block.round, &block.hash, &payload),
+        );
+        let p = Proposal { epoch: self.cfg.epoch, block, qc, tc, proposer: me, payload, sig };
         out.push(Action::Broadcast(Message::Proposal(p.clone())));
         // Our own block needs no validation: we just built and executed it.
         self.on_proposal(p.clone(), &mut out);
@@ -493,12 +657,13 @@ impl<S: Scheme> Engine<S> {
     }
 
     fn on_vote(&mut self, v: Vote<S>, out: &mut Vec<Action<S>>) {
-        if self.me() != Some(self.leader(v.round + 1))
+        if !self.is_me(self.leader(v.round + 1))
+            || v.epoch != self.cfg.epoch
             || (v.signer as usize) >= self.cfg.validators.len()
             || v.round + 2 < self.round
             || !self.scheme.verify(
                 v.signer,
-                &vote_msg(self.cfg.chain_id, v.round, &v.block),
+                &vote_msg(self.cfg.chain_id, self.cfg.epoch, v.round, &v.block),
                 &v.sig,
             )
         {
@@ -521,6 +686,7 @@ impl<S: Scheme> Engine<S> {
         let Some(agg) = self.scheme.aggregate(&sigs) else { return };
         set.done = true;
         let qc = Qc {
+            epoch: self.cfg.epoch,
             round: v.round,
             block: v.block,
             height: set.height,
@@ -533,7 +699,7 @@ impl<S: Scheme> Engine<S> {
     /// The round timer fired.
     pub fn on_timeout(&mut self, round: Round) -> Vec<Action<S>> {
         let mut out = Vec::new();
-        if round != self.round {
+        if round != self.round || self.finished {
             return out;
         }
         self.local_timeout(&mut out);
@@ -546,26 +712,36 @@ impl<S: Scheme> Engine<S> {
         self.consecutive_timeouts = self.consecutive_timeouts.saturating_add(1);
         // Re-arm: if no TC forms, the timeout is re-broadcast.
         out.push(Action::ScheduleTimeout { round, after_ms: self.timeout_ms() });
-        let Some(me) = self.me() else { return };
+        if self.cfg.me.is_empty() {
+            return;
+        }
         self.timed_out.insert(round);
-        let t = Timeout {
-            round,
-            high_qc: self.high_qc.clone(),
-            signer: me,
-            sig: self.scheme.sign(me, &timeout_msg(self.cfg.chain_id, round, self.high_qc.round)),
-            last_tc: self.entry_tc.clone().map(Box::new),
-        };
-        out.push(Action::Broadcast(Message::Timeout(t.clone())));
-        self.on_timeout_msg(t, out);
+        let msg = timeout_msg(self.cfg.chain_id, self.cfg.epoch, round, self.high_qc.round);
+        for me in self.cfg.me.clone() {
+            let t = Timeout {
+                epoch: self.cfg.epoch,
+                round,
+                high_qc: self.high_qc.clone(),
+                signer: me,
+                sig: self.scheme.sign(me, &msg),
+                last_tc: self.entry_tc.clone().map(Box::new),
+            };
+            out.push(Action::Broadcast(Message::Timeout(t.clone())));
+            self.on_timeout_msg(t, out);
+            if self.round != round {
+                break; // our own timeouts completed a TC
+            }
+        }
     }
 
     fn on_timeout_msg(&mut self, t: Timeout<S>, out: &mut Vec<Action<S>>) {
-        if (t.signer as usize) >= self.cfg.validators.len()
+        if t.epoch != self.cfg.epoch
+            || (t.signer as usize) >= self.cfg.validators.len()
             || t.round + 2 < self.round
             || t.high_qc.round >= t.round
             || !self.scheme.verify(
                 t.signer,
-                &timeout_msg(self.cfg.chain_id, t.round, t.high_qc.round),
+                &timeout_msg(self.cfg.chain_id, self.cfg.epoch, t.round, t.high_qc.round),
                 &t.sig,
             )
             || !self.verify_qc(&t.high_qc)
@@ -597,6 +773,7 @@ impl<S: Scheme> Engine<S> {
         if self.cfg.validators.is_quorum(weight) {
             set.done = true;
             let tc = Tc {
+                epoch: self.cfg.epoch,
                 round: t.round,
                 high_qc: set.high_qc.clone(),
                 entries: set.entries.iter().map(|(i, (r, s))| (*i, *r, s.clone())).collect(),

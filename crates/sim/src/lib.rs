@@ -6,13 +6,19 @@
 //! checks:
 //!
 //! * **Safety** (always): no two honest nodes ever finalize different blocks at the same height.
-//! * **Liveness** (when at most `f` validators are faulty and the network is synchronous after
-//!   GST): honest nodes keep finalizing blocks after GST.
+//! * **Liveness** (when every committee's faulty seats are under 1/3 and the network is
+//!   synchronous after GST): honest nodes keep finalizing blocks after GST.
+//!
+//! Multi-epoch scenarios (ADR 0006) give every epoch a different committee (a random subset of the
+//! nodes with random seat weights). Nodes switch engines when their epoch's last block is final,
+//! buffer messages from future epochs, and a node that missed the end of an epoch (crashed,
+//! partitioned, not in the committee) catches up from the published epoch proof, as a real node
+//! does from the finality proofs in announcements.
 
 use alloy_primitives::{B256, keccak256};
 use bolt_consensus::{
-    Action, BlockInfo, Config, Engine, Message, MockScheme, Scheme, ValidatorIndex, ValidatorSet,
-    proposal_msg,
+    Action, BlockInfo, CommitProof, Config, Engine, Message, MockScheme, Scheme, ValidatorIndex,
+    ValidatorSet, proposal_msg,
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::{
@@ -60,20 +66,62 @@ pub struct Scenario {
     pub timeout_ms: u64,
     /// Simulated duration.
     pub duration_ms: u64,
+    /// Blocks per epoch (`u64::MAX`: a single epoch).
+    pub epoch_len: u64,
+    /// Committee of each epoch (the last one repeats).
+    pub committees: Vec<SimCommittee>,
+}
+
+/// A committee: which nodes sit on it and the leader order over its seats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SimCommittee {
+    /// Node id of each member (member index = position).
+    pub members: Vec<usize>,
+    /// Member index of each seat, in leader order.
+    pub seats: Vec<ValidatorIndex>,
+}
+
+impl SimCommittee {
+    /// All `n` nodes, one seat each.
+    pub fn all(n: usize) -> Self {
+        Self { members: (0..n).collect(), seats: (0..n as ValidatorIndex).collect() }
+    }
+
+    fn set(&self) -> ValidatorSet {
+        ValidatorSet::from_seats(self.members.len(), self.seats.clone())
+    }
+
+    fn index_of(&self, node: usize) -> Option<ValidatorIndex> {
+        self.members.iter().position(|m| *m == node).map(|i| i as ValidatorIndex)
+    }
 }
 
 impl Scenario {
-    /// Maximum tolerated faulty validators (equal weights).
-    pub fn f(&self) -> usize {
-        (self.n - 1) / 3
+    /// Nodes that count as faulty for liveness: byzantine, or crashed and not recovered by GST.
+    fn faulty(&self) -> Vec<usize> {
+        let mut f: Vec<usize> = self.byzantine.iter().map(|(b, _)| *b as usize).collect();
+        f.extend(
+            self.crashes
+                .iter()
+                .filter(|(_, _, rec)| rec.is_none_or(|r| r > self.gst_ms))
+                .map(|(c, _, _)| *c as usize),
+        );
+        f
     }
 
-    /// Whether liveness must hold: faulty (byzantine + ever-crashed-and-not-recovered-before-GST)
-    /// validators are at most `f`.
+    /// Committee of `epoch`.
+    pub fn committee(&self, epoch: u64) -> &SimCommittee {
+        &self.committees[(epoch as usize).min(self.committees.len() - 1)]
+    }
+
+    /// Whether liveness must hold: in every committee, faulty seats are under a third.
     pub fn expects_liveness(&self) -> bool {
-        let crashed_after_gst =
-            self.crashes.iter().filter(|(_, _, rec)| rec.is_none_or(|r| r > self.gst_ms)).count();
-        self.byzantine.len() + crashed_after_gst <= self.f()
+        let faulty = self.faulty();
+        self.committees.iter().all(|c| {
+            let set = c.set();
+            let bad: Vec<ValidatorIndex> = faulty.iter().filter_map(|f| c.index_of(*f)).collect();
+            set.weight_of(&bad) * 3 < set.total()
+        })
     }
 
     /// Random scenario for `seed`.
@@ -127,6 +175,46 @@ impl Scenario {
             })
             .collect();
         let dmin = rng.random_range(1..60);
+        // Half the scenarios change committees every few blocks.
+        let (epoch_len, committees) = if rng.random_bool(0.5) {
+            let len = rng.random_range(3..=12);
+            let committees = (0..8)
+                .map(|_| {
+                    let size = rng.random_range(n.min(4).max(n.saturating_sub(3))..=n);
+                    let mut nodes: Vec<usize> = (0..n).collect();
+                    for i in (1..nodes.len()).rev() {
+                        let j = rng.random_range(0..=i);
+                        nodes.swap(i, j);
+                    }
+                    nodes.truncate(size);
+                    let mut seats: Vec<ValidatorIndex> = Vec::new();
+                    for m in 0..size {
+                        for _ in 0..rng.random_range(1..=3) {
+                            seats.push(m as ValidatorIndex);
+                        }
+                    }
+                    // BFT safety assumes byzantine seats below 1/3 in every committee (crashes
+                    // do not matter for safety): top up honest members until that holds.
+                    let is_byz = |m: usize| byzantine.iter().any(|(b, _)| *b as usize == nodes[m]);
+                    let honest: Vec<usize> = (0..size).filter(|m| !is_byz(*m)).collect();
+                    loop {
+                        let bad = seats.iter().filter(|s| is_byz(**s as usize)).count();
+                        if bad * 3 < seats.len() || honest.is_empty() {
+                            break;
+                        }
+                        seats.push(honest[rng.random_range(0..honest.len())] as ValidatorIndex);
+                    }
+                    for i in (1..seats.len()).rev() {
+                        let j = rng.random_range(0..=i);
+                        seats.swap(i, j);
+                    }
+                    SimCommittee { members: nodes, seats }
+                })
+                .collect();
+            (len, committees)
+        } else {
+            (u64::MAX, vec![SimCommittee::all(n)])
+        };
         Self {
             seed,
             n,
@@ -142,6 +230,8 @@ impl Scenario {
             delay_ms: (dmin, dmin + rng.random_range(1..150)),
             timeout_ms: 1_000,
             duration_ms: 60_000,
+            epoch_len,
+            committees,
         }
     }
 }
@@ -159,6 +249,8 @@ pub struct Report {
     pub liveness_ok: bool,
     /// Messages delivered.
     pub messages: u64,
+    /// Highest epoch any honest node reached.
+    pub max_epoch: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -197,36 +289,108 @@ enum Event {
 
 struct Node {
     engine: Engine<MockScheme>,
-    genesis: B256,
     byz: Option<Byzantine>,
     up: bool,
     /// height -> hash committed by this node.
     committed: BTreeMap<u64, B256>,
+    /// Messages for epochs this node has not reached yet.
+    future: Vec<Message<MockScheme>>,
+}
+
+fn engine_for(sc: &Scenario, node: usize, epoch: u64, anchor: BlockInfo) -> Engine<MockScheme> {
+    let c = sc.committee(epoch);
+    let end_height = if sc.epoch_len == u64::MAX { u64::MAX } else { anchor.height + sc.epoch_len };
+    Engine::new(
+        Config {
+            chain_id: 1337,
+            epoch,
+            validators: c.set(),
+            me: c.index_of(node).into_iter().collect(),
+            anchor,
+            end_height,
+            base_timeout_ms: sc.timeout_ms,
+        },
+        MockScheme,
+    )
+}
+
+/// Epoch proofs published by nodes (the announcement path), by epoch.
+type Proofs = BTreeMap<u64, (BlockInfo, CommitProof<MockScheme>)>;
+
+/// Moves `node` into the next epoch(s) using published proofs; returns the start actions.
+fn catch_up(
+    sc: &Scenario,
+    node: &mut Node,
+    id: usize,
+    proofs: &Proofs,
+    canonical: &mut HashMap<u64, B256>,
+    report: &mut Report,
+) -> Vec<Action<MockScheme>> {
+    let mut out = Vec::new();
+    while let Some((block, proof)) = proofs.get(&node.engine.config().epoch) {
+        let cfg = node.engine.config().clone();
+        // Verify as a real node would (committee of that epoch, its anchor).
+        if proof.verify(&MockScheme, &cfg.validators, 1337, &cfg.anchor.hash) != Some(block.hash)
+            || block.height != cfg.end_height
+        {
+            report.safety_violations.push(format!(
+                "seed {}: bad epoch proof accepted for epoch {}",
+                sc.seed, cfg.epoch
+            ));
+            break;
+        }
+        record_commit(sc, node, id, block, canonical, report);
+        let next = cfg.epoch + 1;
+        node.engine = engine_for(sc, id, next, block.clone());
+        out.extend(node.engine.start());
+        let (now, later): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut node.future).into_iter().partition(|m| m.epoch() == next);
+        node.future = later.into_iter().filter(|m| m.epoch() > next).collect();
+        for m in now {
+            out.extend(node.engine.on_message(m));
+        }
+    }
+    out
+}
+
+fn record_commit(
+    sc: &Scenario,
+    node: &mut Node,
+    id: usize,
+    b: &BlockInfo,
+    canonical: &mut HashMap<u64, B256>,
+    report: &mut Report,
+) {
+    if node.byz.is_none() {
+        match canonical.get(&b.height) {
+            Some(h) if *h != b.hash => report.safety_violations.push(format!(
+                "seed {}: node {id} committed {} at height {} but {} was committed before",
+                sc.seed, b.hash, b.height, h
+            )),
+            None => {
+                canonical.insert(b.height, b.hash);
+            }
+            _ => {}
+        }
+    }
+    node.committed.insert(b.height, b.hash);
 }
 
 /// Runs one scenario.
 pub fn run(sc: &Scenario) -> Report {
     let genesis = keccak256(b"sim-genesis");
-    let set = ValidatorSet::equal(sc.n);
+    let anchor = BlockInfo { hash: genesis, parent: B256::ZERO, round: 0, height: 0 };
     let mut rng = StdRng::seed_from_u64(sc.seed ^ 0x5eed);
     let mut nodes: Vec<Node> = (0..sc.n)
         .map(|i| Node {
-            engine: Engine::new(
-                Config {
-                    chain_id: 1337,
-                    validators: set.clone(),
-                    me: Some(i as ValidatorIndex),
-                    genesis,
-                    base_timeout_ms: sc.timeout_ms,
-                },
-                MockScheme,
-            ),
+            engine: engine_for(sc, i, 0, anchor.clone()),
             byz: sc.byzantine.iter().find(|(b, _)| *b as usize == i).map(|(_, k)| *k),
-            genesis,
             up: true,
             committed: BTreeMap::new(),
+            future: Vec::new(),
         })
         .collect();
+    let mut proofs: Proofs = BTreeMap::new();
 
     let mut queue: BinaryHeap<Reverse<(u64, u64, usize)>> = BinaryHeap::new();
     let mut events: Vec<Option<Event>> = Vec::new();
@@ -250,6 +414,7 @@ pub fn run(sc: &Scenario) -> Report {
     let mut canonical: HashMap<u64, B256> = HashMap::new();
     let mut archive: HashMap<B256, BlockInfo> = HashMap::new();
     let mut pending_actions: Vec<(usize, u64, Vec<Action<MockScheme>>)> = Vec::new();
+    let mut pending_later: Vec<(usize, u64, Vec<Action<MockScheme>>)> = Vec::new();
     for (i, n) in nodes.iter_mut().enumerate() {
         if n.byz != Some(Byzantine::Silent) {
             let acts = n.engine.start();
@@ -266,7 +431,7 @@ pub fn run(sc: &Scenario) -> Report {
             for a in acts {
                 handle_action(
                     sc,
-                    &set,
+                    &mut proofs,
                     &mut nodes,
                     &mut rng,
                     i,
@@ -276,8 +441,10 @@ pub fn run(sc: &Scenario) -> Report {
                     &mut canonical,
                     &mut report,
                     &mut archive,
+                    &mut pending_later,
                 );
             }
+            pending_actions.append(&mut pending_later);
         }
         let Some(Reverse((at, _, idx))) = queue.pop() else { break };
         if at > sc.duration_ms {
@@ -319,28 +486,38 @@ pub fn run(sc: &Scenario) -> Report {
                     now,
                     vec![Action::ScheduleTimeout { round: r, after_ms: sc.timeout_ms }],
                 ));
+                let acts =
+                    catch_up(sc, &mut nodes[node], node, &proofs, &mut canonical, &mut report);
+                pending_actions.push((node, now, acts));
             }
             Event::Deliver { to, msg } => {
                 if !nodes[to].up || nodes[to].byz == Some(Byzantine::Silent) {
                     continue;
                 }
                 report.messages += 1;
+                let epoch = nodes[to].engine.config().epoch;
+                if msg.epoch() > epoch {
+                    nodes[to].future.push(msg);
+                    continue;
+                }
                 if nodes[to].byz == Some(Byzantine::VoteForAll)
+                    && msg.epoch() == epoch
                     && let Message::Proposal(p) = &msg
+                    && let Some(me) = nodes[to].engine.config().me.first().copied()
                 {
                     // Vote for anything, ignoring the rules.
-                    let me = to as ValidatorIndex;
                     let v = bolt_consensus::Vote {
+                        epoch,
                         round: p.block.round,
                         block: p.block.hash,
                         height: p.block.height,
                         signer: me,
                         sig: MockScheme.sign(
                             me,
-                            &bolt_consensus::vote_msg(1337, p.block.round, &p.block.hash),
+                            &bolt_consensus::vote_msg(1337, epoch, p.block.round, &p.block.hash),
                         ),
                     };
-                    let next = set.leader(p.block.round + 1);
+                    let next = nodes[to].engine.config().validators.leader(p.block.round + 1);
                     pending_actions.push((to, now, vec![Action::SendTo(next, Message::Vote(v))]));
                 }
                 let acts = nodes[to].engine.on_message(msg);
@@ -358,6 +535,12 @@ pub fn run(sc: &Scenario) -> Report {
                 }
                 let acts = nodes[node].engine.on_timeout(round);
                 pending_actions.push((node, now, acts));
+                // A node stuck in an old epoch picks up the published proof (announcement path).
+                if proofs.contains_key(&nodes[node].engine.config().epoch) {
+                    let acts =
+                        catch_up(sc, &mut nodes[node], node, &proofs, &mut canonical, &mut report);
+                    pending_actions.push((node, now, acts));
+                }
             }
             Event::Validated { node, block, ok } => {
                 if !nodes[node].up {
@@ -395,6 +578,12 @@ pub fn run(sc: &Scenario) -> Report {
         eprintln!("messages {} end time {now}", report.messages);
     }
     report.min_honest_height = honest_min_height(sc, &nodes);
+    report.max_epoch = nodes
+        .iter()
+        .filter(|n| n.byz.is_none())
+        .map(|n| n.engine.config().epoch)
+        .max()
+        .unwrap_or(0);
     if sc.gst_ms >= sc.duration_ms {
         report.height_at_gst = report.min_honest_height;
     }
@@ -402,12 +591,6 @@ pub fn run(sc: &Scenario) -> Report {
     let window_ok = report.min_honest_height >= report.height_at_gst + 2;
     report.liveness_ok = !sc.expects_liveness() || window_ok;
     report
-}
-
-impl Node {
-    fn engine_genesis(&self) -> B256 {
-        self.genesis
-    }
 }
 
 fn honest_min_height(sc: &Scenario, nodes: &[Node]) -> u64 {
@@ -427,7 +610,7 @@ fn honest_min_height(sc: &Scenario, nodes: &[Node]) -> u64 {
 #[allow(clippy::too_many_arguments)]
 fn handle_action(
     sc: &Scenario,
-    set: &ValidatorSet,
+    proofs: &mut Proofs,
     nodes: &mut [Node],
     rng: &mut StdRng,
     from: usize,
@@ -437,7 +620,9 @@ fn handle_action(
     canonical: &mut HashMap<u64, B256>,
     report: &mut Report,
     archive: &mut HashMap<B256, BlockInfo>,
+    later: &mut Vec<(usize, u64, Vec<Action<MockScheme>>)>,
 ) {
+    let _ = nodes[from].engine.config().epoch;
     let send = |rng: &mut StdRng,
                 to: usize,
                 msg: Message<MockScheme>,
@@ -466,8 +651,8 @@ fn handle_action(
                 let mut twin = p.clone();
                 twin.block.hash = keccak256([p.block.hash.as_slice(), b"twin"].concat());
                 twin.sig = MockScheme.sign(
-                    from as ValidatorIndex,
-                    &proposal_msg(1337, twin.block.round, &twin.block.hash, &twin.payload),
+                    p.proposer,
+                    &proposal_msg(1337, p.epoch, twin.block.round, &twin.block.hash, &twin.payload),
                 );
                 // Half the network gets one version; everyone gets the other too, later or
                 // earlier at random, so honest validators see both.
@@ -504,7 +689,11 @@ fn handle_action(
                 send(rng, to, msg.clone(), push);
             }
         }
-        Action::SendTo(to, msg) => send(rng, to as usize, msg, push),
+        Action::SendTo(to, msg) => {
+            // The index refers to the committee of the message's epoch (the node may have moved on).
+            let node = sc.committee(msg.epoch()).members[to as usize];
+            send(rng, node, msg, push)
+        }
         Action::Validate(p) => {
             let ok = p.payload.as_slice() != b"invalid";
             push(
@@ -513,9 +702,14 @@ fn handle_action(
             );
         }
         Action::Propose { round, mut qc, tc } => {
-            if nodes[from].byz == Some(Byzantine::Adversarial) && tc.is_some() {
-                // Fork from genesis, justified only by the TC.
-                qc = bolt_consensus::Qc::genesis(nodes[from].engine_genesis());
+            let epoch = qc.epoch;
+            if nodes[from].byz == Some(Byzantine::Adversarial)
+                && tc.is_some()
+                && nodes[from].engine.config().epoch == epoch
+            {
+                // Fork from the epoch's anchor, justified only by the TC.
+                let a = &nodes[from].engine.config().anchor;
+                qc = bolt_consensus::Qc::anchor(epoch, a.hash, a.height);
             }
             let payload = if nodes[from].byz == Some(Byzantine::InvalidBlocks) {
                 b"invalid".to_vec()
@@ -523,8 +717,13 @@ fn handle_action(
                 vec![]
             };
             let hash = keccak256(
-                [&(from as u64).to_be_bytes()[..], &round.to_be_bytes(), qc.block.as_slice()]
-                    .concat(),
+                [
+                    &(from as u64).to_be_bytes()[..],
+                    &epoch.to_be_bytes(),
+                    &round.to_be_bytes(),
+                    qc.block.as_slice(),
+                ]
+                .concat(),
             );
             let block = BlockInfo { hash, parent: qc.block, round, height: qc.height + 1 };
             archive.insert(hash, block.clone());
@@ -540,20 +739,18 @@ fn handle_action(
         }
         Action::Commit { blocks, .. } => {
             for b in blocks {
-                if nodes[from].byz.is_none() {
-                    match canonical.get(&b.height) {
-                        Some(h) if *h != b.hash => report.safety_violations.push(format!(
-                            "seed {}: node {from} committed {} at height {} but {} was committed before",
-                            sc.seed, b.hash, b.height, h
-                        )),
-                        None => {
-                            canonical.insert(b.height, b.hash);
-                        }
-                        _ => {}
-                    }
+                if b.height > nodes[from].engine.config().end_height {
+                    report
+                        .safety_violations
+                        .push(format!("seed {}: nil block {} committed as real", sc.seed, b.hash));
                 }
-                nodes[from].committed.insert(b.height, b.hash);
+                record_commit(sc, &mut nodes[from], from, &b, canonical, report);
             }
+        }
+        Action::EpochEnd { block, proof } => {
+            proofs.entry(proof.qc.epoch).or_insert((block, proof));
+            let acts = catch_up(sc, &mut nodes[from], from, proofs, canonical, report);
+            later.push((from, now, acts));
         }
         Action::FetchBlock(hash) => {
             // Blocks are content-addressed and published to IPFS when built, so any block that was
@@ -571,7 +768,6 @@ fn handle_action(
             }
         }
     }
-    let _ = set;
 }
 
 /// Summary over many scenarios.
@@ -587,6 +783,10 @@ pub struct Summary {
     pub safety_violations: Vec<String>,
     /// Messages delivered in total.
     pub messages: u64,
+    /// Scenarios with committee rotation.
+    pub multi_epoch: u64,
+    /// Epoch transitions completed (highest honest epoch, summed over scenarios).
+    pub epoch_transitions: u64,
 }
 
 /// Runs scenarios `first..first + count` and aggregates.
@@ -597,6 +797,10 @@ pub fn run_many(first: u64, count: u64) -> Summary {
         let r = run(&sc);
         s.scenarios += 1;
         s.messages += r.messages;
+        if sc.epoch_len != u64::MAX {
+            s.multi_epoch += 1;
+            s.epoch_transitions += r.max_epoch;
+        }
         if sc.expects_liveness() {
             s.liveness_required += 1;
             if !r.liveness_ok {
@@ -625,6 +829,8 @@ mod tests {
             delay_ms: (5, 20),
             timeout_ms: 1_000,
             duration_ms: 10_000,
+            epoch_len: u64::MAX,
+            committees: vec![SimCommittee::all(4)],
         };
         let r = run(&sc);
         assert!(r.safety_violations.is_empty());
@@ -644,11 +850,42 @@ mod tests {
             delay_ms: (5, 50),
             timeout_ms: 1_000,
             duration_ms: 20_000,
+            epoch_len: u64::MAX,
+            committees: vec![SimCommittee::all(7)],
         };
         let r = run(&sc);
         assert!(r.safety_violations.is_empty(), "{:?}", r.safety_violations);
         assert!(r.liveness_ok);
         assert!(r.min_honest_height > 10, "only {}", r.min_honest_height);
+    }
+
+    #[test]
+    fn committees_rotate_every_few_blocks() {
+        // 6 nodes; each epoch (5 blocks) a different committee with uneven seats.
+        let committees = vec![
+            SimCommittee { members: vec![0, 1, 2, 3], seats: vec![0, 1, 2, 3] },
+            SimCommittee { members: vec![2, 3, 4, 5], seats: vec![0, 0, 1, 2, 3] },
+            SimCommittee { members: vec![5, 0, 1, 4], seats: vec![3, 2, 1, 0, 0] },
+            SimCommittee { members: vec![1, 2, 3, 4, 5], seats: vec![0, 1, 2, 3, 4] },
+        ];
+        let sc = Scenario {
+            seed: 3,
+            n: 6,
+            byzantine: vec![(4, Byzantine::Equivocate)],
+            crashes: vec![(2, 3_000, Some(9_000))],
+            gst_ms: 0,
+            drop_before_gst: 0.0,
+            partition_until_ms: 0,
+            delay_ms: (5, 40),
+            timeout_ms: 1_000,
+            duration_ms: 40_000,
+            epoch_len: 5,
+            committees,
+        };
+        let r = run(&sc);
+        assert!(r.safety_violations.is_empty(), "{:?}", r.safety_violations);
+        assert!(r.max_epoch >= 4, "reached epoch {}", r.max_epoch);
+        assert!(r.min_honest_height >= 20, "only {}", r.min_honest_height);
     }
 
     #[test]

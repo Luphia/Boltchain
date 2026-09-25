@@ -58,7 +58,7 @@ fn produce_then_import_is_deterministic() {
     let (d1, d2) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let producer = Chain::open(d1.path(), &g).unwrap();
     let follower = Chain::open(d2.path(), &g).unwrap();
-    assert_eq!(producer.head().unwrap().hash_slow(), g.hash());
+    assert_eq!(producer.head().unwrap().hash_slow(), bolt_system::genesis_hash(&g).unwrap());
 
     let key = dev_key();
     let cid = g.config.chain_id;

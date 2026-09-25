@@ -40,6 +40,22 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: cargo run --release -p bolt-sim -- --scenarios 10000
 
+  contracts:
+    name: system contracts are reproducible
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: contracts/package-lock.json
+      - name: compile with solc 0.8.30 and compare with contracts/out
+        working-directory: contracts
+        run: |
+          npm ci
+          node build.mjs --check
+
   statetest:
     name: osaka state tests
     runs-on: ubuntu-24.04

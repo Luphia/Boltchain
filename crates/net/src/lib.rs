@@ -363,7 +363,7 @@ pub async fn start(
     let bitswap = Bitswap::new(swarm.behaviour().stream.new_control(), source);
     let peer_id = *swarm.local_peer_id();
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
-    let (ev_tx, ev_rx) = mpsc::channel(256);
+    let (ev_tx, ev_rx) = mpsc::channel(EVENT_BUFFER);
     tokio::spawn(run(swarm, cfg, kad_protocol, cmd_rx, cmd_tx.clone(), ev_tx));
     Ok((NetHandle { cmd: cmd_tx, bitswap, peer_id }, ev_rx))
 }
@@ -435,7 +435,7 @@ async fn run(
                 SwarmEvent::ConnectionEstablished { peer_id, num_established, .. }
                     if num_established.get() == 1 =>
                 {
-                    let _ = ev_tx.send(NetEvent::Connected(peer_id)).await;
+                    deliver(&ev_tx, NetEvent::Connected(peer_id));
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }))
                     if info.protocols.contains(&kad_protocol) =>
@@ -451,7 +451,7 @@ async fn run(
                     let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
                         &message_id, &propagation_source, gossipsub::MessageAcceptance::Accept,
                     );
-                    let _ = ev_tx.send(NetEvent::Consensus { via: propagation_source, data: message.data }).await;
+                    deliver(&ev_tx, NetEvent::Consensus { via: propagation_source, data: message.data });
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source, message_id, message,
@@ -471,7 +471,7 @@ async fn run(
                         &message_id, &propagation_source, acceptance,
                     );
                     if let Some(announce) = decoded {
-                        let _ = ev_tx.send(NetEvent::Announce { via: propagation_source, announce }).await;
+                        deliver(&ev_tx, NetEvent::Announce { via: propagation_source, announce });
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Tx(request_response::Event::Message { message, .. })) => match message {
@@ -480,7 +480,8 @@ async fn run(
                         next_id += 1;
                         inbound_tx.insert(id, channel);
                         let (reply, rx) = oneshot::channel();
-                        let _ = ev_tx.send(NetEvent::Tx { raw: request.0, reply }).await;
+                        // If the node is saturated the reply is dropped and the peer gets an error.
+                        deliver(&ev_tx, NetEvent::Tx { raw: request.0, reply });
                         let cmd_tx = cmd_tx.clone();
                         tokio::spawn(async move {
                             let res = rx.await.unwrap_or_else(|_| Err("node dropped the request".into()));
@@ -500,6 +501,29 @@ async fn run(
                 }
                 _ => {}
             }
+        }
+    }
+}
+
+/// Events buffered between the network task and the node.
+const EVENT_BUFFER: usize = 1024;
+
+/// Hands an event to the node without ever blocking the swarm: a node that falls behind loses
+/// gossip (which is lossy anyway, and recovered through announcements and certificates) instead
+/// of stalling Bitswap and every other protocol for all its peers.
+fn deliver(tx: &mpsc::Sender<NetEvent>, ev: NetEvent) {
+    if let Err(mpsc::error::TrySendError::Full(ev)) = tx.try_send(ev) {
+        tracing::warn!(event = ev.kind(), "node is not keeping up; dropped a network event");
+    }
+}
+
+impl NetEvent {
+    fn kind(&self) -> &'static str {
+        match self {
+            NetEvent::Announce { .. } => "announce",
+            NetEvent::Tx { .. } => "tx",
+            NetEvent::Consensus { .. } => "consensus",
+            NetEvent::Connected(_) => "connected",
         }
     }
 }

@@ -18,10 +18,7 @@ use alloy_eips::{
     eip7685::EMPTY_REQUESTS_HASH,
 };
 use alloy_primitives::{Address, B64, B256, Bloom, Bytes, U256, keccak256};
-use alloy_trie::{
-    TrieAccount,
-    root::{state_root_unhashed, storage_root_unhashed},
-};
+use alloy_trie::{TrieAccount, root::storage_root_unhashed};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -70,6 +67,12 @@ pub struct ChainConfig {
     pub gas_limit: u64,
     /// Minimum base fee in wei.
     pub min_base_fee_wei: u64,
+    /// Dev chains only: bootstrap exit threshold on the number of stakers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_exit_min_stakers: Option<u32>,
+    /// Dev chains only: bootstrap exit threshold on total stake, in whole BOLT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_exit_min_stake_bolt: Option<u64>,
 }
 
 impl Default for ChainConfig {
@@ -81,7 +84,19 @@ impl Default for ChainConfig {
             committee_size: MIN_COMMITTEE_SIZE,
             gas_limit: DEFAULT_GAS_LIMIT,
             min_base_fee_wei: MIN_BASE_FEE_WEI,
+            bootstrap_exit_min_stakers: None,
+            bootstrap_exit_min_stake_bolt: None,
         }
+    }
+}
+
+impl ChainConfig {
+    /// Bootstrap exit thresholds: (stakers, total stake in whole BOLT).
+    pub fn bootstrap_exit(&self) -> (u32, u64) {
+        (
+            self.bootstrap_exit_min_stakers.unwrap_or(BOOTSTRAP_EXIT_MIN_STAKERS),
+            self.bootstrap_exit_min_stake_bolt.unwrap_or(BOOTSTRAP_EXIT_MIN_TOTAL_STAKE_BOLT),
+        )
     }
 }
 
@@ -136,7 +151,8 @@ pub struct GenesisAccount {
 }
 
 impl GenesisAccount {
-    fn trie_account(&self) -> TrieAccount {
+    /// The account as stored in the state trie.
+    pub fn trie_account(&self) -> TrieAccount {
         let storage = self
             .storage
             .iter()
@@ -188,6 +204,8 @@ pub enum GenesisError {
     ParamDelay,
     #[error("no genesis allocation: account {0} has a non-zero balance")]
     NonZeroBalance(Address),
+    #[error("bootstrap exit overrides are for dev chains only")]
+    DevOnly,
     #[error("account {0} is a protocol predeploy and cannot be overridden")]
     ReservedAddress(Address),
 }
@@ -209,11 +227,25 @@ impl Genesis {
         if !self.dev && c.chain_id != CHAIN_ID {
             return Err(GenesisError::ChainId(c.chain_id));
         }
-        if c.slot_seconds != SLOT_SECONDS || c.epoch_slots != EPOCH_SLOTS {
-            return Err(GenesisError::SlotTiming);
-        }
-        if c.committee_size < MIN_COMMITTEE_SIZE {
-            return Err(GenesisError::CommitteeTooSmall(c.committee_size));
+        if self.dev {
+            // Dev chains may use short epochs, small committees and low bootstrap thresholds
+            // (vote counters are 16-bit per epoch, committees at most 4096 seats).
+            if c.slot_seconds == 0 || !(2..=65_535).contains(&c.epoch_slots) {
+                return Err(GenesisError::SlotTiming);
+            }
+            if !(1..=4096).contains(&c.committee_size) {
+                return Err(GenesisError::CommitteeTooSmall(c.committee_size));
+            }
+        } else {
+            if c.slot_seconds != SLOT_SECONDS || c.epoch_slots != EPOCH_SLOTS {
+                return Err(GenesisError::SlotTiming);
+            }
+            if c.committee_size < MIN_COMMITTEE_SIZE || c.committee_size > 4096 {
+                return Err(GenesisError::CommitteeTooSmall(c.committee_size));
+            }
+            if c.bootstrap_exit_min_stakers.is_some() || c.bootstrap_exit_min_stake_bolt.is_some() {
+                return Err(GenesisError::DevOnly);
+            }
         }
         if c.gas_limit < GAS_LIMIT_RANGE.0 || c.gas_limit > GAS_LIMIT_RANGE.1 {
             return Err(GenesisError::GasLimit(c.gas_limit));
@@ -273,7 +305,9 @@ impl Genesis {
             if !self.dev && !acc.balance.is_zero() {
                 return Err(GenesisError::NonZeroBalance(*addr));
             }
-            if protocol_predeploys().contains_key(addr) {
+            // Protocol predeploys and the system contract range 0xB017000000000000000000000000000000xxxx.
+            let system = addr[0] == 0xb0 && addr[1] == 0x17 && addr[2..18].iter().all(|b| *b == 0);
+            if protocol_predeploys().contains_key(addr) || system {
                 return Err(GenesisError::ReservedAddress(*addr));
             }
         }
@@ -287,11 +321,6 @@ impl Genesis {
         all
     }
 
-    /// Genesis state root.
-    pub fn state_root(&self) -> B256 {
-        state_root_unhashed(self.effective_alloc().iter().map(|(a, acc)| (*a, acc.trie_account())))
-    }
-
     /// Initial randomness seed: keccak of the concatenated bootstrap BLS keys, in genesis order.
     pub fn initial_seed(&self) -> B256 {
         let mut buf = Vec::with_capacity(48 * self.bootstrap_validators.len());
@@ -301,13 +330,14 @@ impl Genesis {
         keccak256(buf)
     }
 
-    /// The genesis block header, with every Osaka-era field populated.
-    pub fn header(&self) -> Header {
+    /// The genesis block header for a given state root, with every Osaka-era field populated. The
+    /// state root depends on the system contracts, computed by `bolt_system::genesis_header`.
+    pub fn header_with_state_root(&self, state_root: B256) -> Header {
         Header {
             parent_hash: B256::ZERO,
             ommers_hash: EMPTY_OMMER_ROOT_HASH,
             beneficiary: Address::ZERO,
-            state_root: self.state_root(),
+            state_root,
             transactions_root: EMPTY_ROOT_HASH,
             receipts_root: EMPTY_ROOT_HASH,
             logs_bloom: Bloom::ZERO,
@@ -330,11 +360,6 @@ impl Genesis {
             block_access_list_hash: None,
             slot_number: None,
         }
-    }
-
-    /// Genesis block hash (equal to the header's IPFS CID digest).
-    pub fn hash(&self) -> B256 {
-        self.header().hash_slow()
     }
 }
 
@@ -424,10 +449,14 @@ mod tests {
     fn sample_is_valid_and_hash_is_stable() {
         let g = sample();
         g.validate().unwrap();
-        assert_eq!(g.hash(), g.clone().hash());
-        let h = g.header();
+        let root = B256::repeat_byte(1);
+        assert_eq!(
+            g.header_with_state_root(root).hash_slow(),
+            g.clone().header_with_state_root(root).hash_slow()
+        );
+        let h = g.header_with_state_root(root);
         assert_eq!(h.requests_hash, Some(EMPTY_REQUESTS_HASH));
-        assert_ne!(h.state_root, EMPTY_ROOT_HASH, "predeploys must be in state");
+        assert_eq!(h.withdrawals_root, Some(EMPTY_ROOT_HASH));
     }
 
     #[test]
@@ -495,19 +524,17 @@ mod tests {
         assert_eq!(g.validate(), Err(GenesisError::ReservedAddress(BEACON_ROOTS_ADDRESS)));
     }
 
-    /// Pinned against independent Python implementations (py-trie + pyrlp for the header and
-    /// state root; py_ecc and eth_account for the PoPs and bindings), so any change to header
-    /// layout, state-root encoding or key handling shows up here.
+    /// Header layout pinned against an independent Python implementation (pyrlp), for the M0
+    /// state root (before system contracts; py_ecc and eth_account checked the PoPs and
+    /// bindings). The full genesis hash, which now includes the system contracts, is pinned in
+    /// `bolt-system`.
     #[test]
-    fn devnet_genesis_hash_is_pinned() {
+    fn devnet_genesis_header_is_pinned() {
         let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
         let expect = |s: &str| s.parse::<B256>().unwrap();
+        let root = expect("0x9f42bd8694bb51cea140f07dae2ee2a6a9af552101474651939d3ecdcc895863");
         assert_eq!(
-            g.state_root(),
-            expect("0x9f42bd8694bb51cea140f07dae2ee2a6a9af552101474651939d3ecdcc895863")
-        );
-        assert_eq!(
-            g.hash(),
+            g.header_with_state_root(root).hash_slow(),
             expect("0xbf1c712896002f51051519f4df32e94cd9294a38036479587ecce630aff32275")
         );
     }
@@ -533,13 +560,10 @@ mod tests {
     }
 
     #[test]
-    fn storage_affects_state_root() {
-        let mut g = sample();
-        let before = g.state_root();
-        let a = address!("0000000000000000000000000000000000000b01");
+    fn storage_affects_the_trie_account() {
         let mut acc = GenesisAccount { code: Bytes::from_static(&[0x00]), ..Default::default() };
+        assert_eq!(acc.trie_account().storage_root, EMPTY_ROOT_HASH);
         acc.storage.insert(B256::ZERO, B256::with_last_byte(1));
-        g.alloc.insert(a, acc);
-        assert_ne!(g.state_root(), before);
+        assert_ne!(acc.trie_account().storage_root, EMPTY_ROOT_HASH);
     }
 }

@@ -7,7 +7,7 @@
 - 設計決策紀錄：[`docs/adr/`](docs/adr/)
 - 里程碑進度：[`docs/milestones.md`](docs/milestones.md)
 
-## 目前狀態：M3 共識
+## 目前狀態：M4 PoS
 
 | 項目 | 狀態 |
 | --- | --- |
@@ -22,7 +22,11 @@
 | 共識：兩鏈 HotStuff + Jolteon 規則、QC/TC、最終性證明（ADR 0005） | 完成：`crates/consensus` |
 | 決定性模擬器：10,000 個故障情境無安全違規 | 完成：`crates/sim`、`bolt-sim` |
 | 驗證者節點：投票前取得並重新執行區塊；7 個節點關掉 2 個仍持續出塊 | 完成：`boltchain validator` |
-| 委員會與質押合約、增發（M4） | 下一步 |
+| 系統合約：質押、委員會、獎勵、參數、Safe 5-of-9 + timelock（ADR 0006） | 完成：`contracts/`、`crates/system` |
+| 每個 epoch 依質押抽委員會、nil 收尾交接、RANDAO、增發與燃燒記帳 | 完成 |
+| 雙重簽名證據在鏈上驗證並罰沒 | 完成 |
+| 100 個驗證者的 epoch 輪替、跟隨節點跨 epoch 同步 | 已驗收：`crates/node/tests/m4_pos.rs` |
+| 儲存層：檢查點同步、快照、修剪、歷史分片（M5） | 下一步 |
 | Osaka state tests、ARM 基準 | 在 CI 上執行 |
 
 ## 快速開始
@@ -36,6 +40,7 @@ cargo run --release -p bolt-sim -- --scenarios 10000   # 共識模擬器
 cargo run --release -p boltchain -- bench           # 區塊執行基準
 cargo run -p boltchain -- genesis inspect genesis/devnet.json
 scripts/statetest.sh                                 # 需要能連到 github.com
+(cd contracts && npm ci && node build.mjs)           # 重新編譯系統合約（產物已提交在 contracts/out）
 ```
 
 devnet 的使用方式（MetaMask、Foundry）見 [`docs/devnet.md`](docs/devnet.md)。
@@ -55,6 +60,8 @@ cargo run --release -p boltchain -- validator --key data/v$i/key.json --datadir 
   --p2p-port 900$i --rpc 127.0.0.1:854$((5+i)) --block-time 1 \
   --bootnode /ip4/127.0.0.1/udp/9000/quic-v1/p2p/<v0 的 peer id>
 ```
+
+一個節點可以重複 `--key` 同時運行多位驗證者（例如 `--key a.json --key b.json`），它們共用同一份共識安全狀態。
 
 ### 主網驗證者金鑰
 
@@ -82,9 +89,10 @@ crates/
   ipld/        IPLD 編碼、CAR
   net/         libp2p、gossipsub、Bitswap 1.2.0、交易轉發
   sync/        公告、跟隨、回填
-  consensus/   兩鏈 HotStuff（Jolteon 規則）、QC/TC、BLS 聚合、最終性證明
+  consensus/   兩鏈 HotStuff（Jolteon 規則）、epoch 交接、QC/TC、BLS 聚合、最終性證明
+  system/      系統合約：編譯產物、genesis 部署、ABI、epoch hook、委員會抽籤
   sim/         決定性共識模擬器（bolt-sim）
-contracts/     系統合約（Foundry，M4）
+contracts/     系統合約（Solidity 0.8.30，solcjs 編譯；OpenZeppelin 5.6.1、Safe 1.4.1）
 genesis/       genesis 檔（devnet.json：主網格式測試用；dev.json：本地開發鏈；mainnet.template.json：主網範本）
 scripts/       statetest、與 Helia 的互通測試
 ```
