@@ -55,7 +55,7 @@ $B mine --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data \
 ```
 
 - `--randomx-fast`：使用 2 GiB 資料集，雜湊速度約快 8 倍；啟動時需要約 1 分鐘初始化。記憶體少於 4 GiB 的機器請拿掉這個選項。
-- 家用網路請在路由器上把 UDP 與 TCP 8017 轉發到這台機器，或設定 `--p2p-port`。NAT 穿透是下一階段的工作。
+- 家用網路最好在路由器上把 UDP 與 TCP 8017 轉發到這台機器。沒有轉發也能運作：節點會先試 UPnP，再由 AutoNAT 判斷是否在 NAT 後面；是的話會經由 bootnode 的中繼（Circuit Relay v2）讓別人連進來，並嘗試打洞（DCUtR）改成直連。
 - 節點每分鐘會在日誌印一行 `status`，內容包括高度、peer 數、雜湊率與已挖到的區塊數。
 
 查詢餘額：`$B wallet balance --wallet ~/.boltchain-testnet/wallet.json`（預設連本機 RPC `http://127.0.0.1:8545`）。
@@ -91,6 +91,7 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 
 ## 已知限制（測試網第一階段）
 
-- 沒有 NAT 穿透與 relay：在 NAT 後面、又沒有做連接埠轉發的節點只能對外連線，別人連不進來。
-- peer 評分與速率限制還沒做。
+- 中繼連線有時間與流量上限（每條 30 分鐘、256 MiB），會自動重建；打洞在對稱型 NAT 後面通常不會成功，這時資料一直走中繼。
+- 同一把驗證者金鑰不要同時在兩個節點上執行。節點發現金鑰在別處被使用時會停止用它簽署（日誌出現 `another node is signing with this validator key`，`/metrics` 的 `doppelganger` 大於 0）；停掉另一個節點後重新啟動即可恢復。
+- 公開的閘道與瀏覽器每個 IP 每秒限 20 次請求。
 - 測試網可能因為修正而重置，重置時會更新本頁的 genesis 雜湊。

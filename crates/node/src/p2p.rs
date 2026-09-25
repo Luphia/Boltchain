@@ -28,6 +28,10 @@ pub struct P2pArgs {
     /// Use the built-in mainnet bootstrap nodes (node001–node009.cafeca.io).
     #[arg(long)]
     pub mainnet_bootnodes: bool,
+    /// Relay connections for peers behind NAT (circuit relay v2). For nodes with a public
+    /// address; nodes behind NAT find relays and use them automatically.
+    #[arg(long)]
+    pub relay_server: bool,
 }
 
 impl P2pArgs {
@@ -71,6 +75,7 @@ impl P2pArgs {
             producer,
             fork_id: fork_id.to_string(),
             fork_check: Some(fork_check),
+            relay_server: self.relay_server,
         };
         let (net, events) = bolt_net::start(cfg, Arc::new(ChainBlocks(chain))).await?;
         tracing::info!(peer_id = %net.peer_id(), "p2p identity");

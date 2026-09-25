@@ -96,6 +96,7 @@ async fn start_net(
             producer: None,
             fork_id: chain.fork_id().unwrap().to_string(),
             fork_check: None,
+            relay_server: false,
         },
         Arc::new(bolt_sync::ChainBlocks(chain)),
     )

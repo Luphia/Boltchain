@@ -106,6 +106,7 @@ async fn start_net(
             producer: None,
             fork_id: chain.fork_id().unwrap().to_string(),
             fork_check: None,
+            relay_server: false,
         },
         Arc::new(ChainBlocks(chain)),
     )
@@ -264,6 +265,9 @@ async fn hundred_validators_rotate_committees_and_equivocation_is_slashed() {
         .expect("a staker on the committee");
     let sk = dev_key(FIRST_STAKER_KEY + id - 8); // ids 8.. were registered in key order
     let round = 999;
+    // Published by a node that does not hold the key, so the holder receives votes it never sent.
+    let holder = (id - 8) as usize % NODES; // staker keys were dealt round-robin
+    let (publisher, witness) = ((holder + 1) % NODES, (holder + 2) % NODES);
     for block in [B256::repeat_byte(0xa1), B256::repeat_byte(0xb2)] {
         let v: Message<BlsScheme> = Message::Vote(Vote {
             epoch,
@@ -273,17 +277,20 @@ async fn hundred_validators_rotate_committees_and_equivocation_is_slashed() {
             signer: index,
             sig: sk.sign(&vote_msg(1337, epoch, round, &block)),
         });
-        let _ = nodes[0].net.publish_consensus(bolt_consensus::encode(&v)).await;
+        let _ = nodes[publisher].net.publish_consensus(bolt_consensus::encode(&v)).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     // Other nodes detect it and write the evidence transaction's calldata.
-    let evidence_file = nodes[1]
+    let evidence_file = nodes[witness]
         .dir
         .path()
         .join("consensus")
         .join("evidence")
         .join(format!("{epoch}-{round}-{id}.json"));
     wait_until("evidence file", 30, || evidence_file.exists()).await;
+    // The holder sees its key used elsewhere: doppelganger protection stops it signing.
+    wait_until("doppelganger", 30, || bolt_primitives::metrics::DOPPELGANGER.get() == 1).await;
+    eprintln!("node {holder} stopped signing: its key was used elsewhere");
     let ev: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&evidence_file).unwrap()).unwrap();
     let data: Bytes = ev["data"].as_str().unwrap().parse().unwrap();

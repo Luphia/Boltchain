@@ -222,6 +222,42 @@ struct EpochCtx {
     committee: EpochCommittee,
     end: u64,
     mode: Mode,
+    /// Seats this node signs for.
+    me: Vec<ValidatorIndex>,
+    /// Last round this node had voted in when it (re)started this epoch: older messages signed
+    /// with our keys may be our own from before a restart.
+    resumed_round: u64,
+}
+
+/// Doppelganger protection: a validator key running on two nodes double-signs sooner or later
+/// and is slashed. Every consensus message this node publishes is remembered; if a valid vote or
+/// timeout signed by one of our seats arrives that we did not send (in a round after our restart
+/// point), another node holds the same key, and this node stops signing with that validator key
+/// (its other keys keep working) until restarted.
+#[derive(Default)]
+struct Doppelganger {
+    sent: std::collections::HashSet<B256>,
+    /// Validator ids whose keys were seen in use elsewhere.
+    tripped: std::collections::HashSet<u32>,
+}
+
+impl Doppelganger {
+    /// Whether `msg` is signed with a key that must no longer sign.
+    fn blocks(&self, ctx: &EpochCtx, msg: &Message<BlsScheme>) -> bool {
+        if self.tripped.is_empty() {
+            return false;
+        }
+        let seat = match msg {
+            Message::Proposal(p) => p.proposer,
+            Message::Vote(v) => v.signer,
+            Message::Timeout(t) => t.signer,
+        };
+        ctx.committee
+            .committee
+            .members
+            .get(seat as usize)
+            .is_some_and(|id| self.tripped.contains(id))
+    }
 }
 
 fn now_ms() -> u64 {
@@ -316,10 +352,12 @@ impl Validator {
             end_height: end,
             base_timeout_ms,
         };
-        let engine = match std::fs::read(self.state_path())
+        let persisted = std::fs::read(self.state_path())
             .ok()
-            .and_then(|b| serde_json::from_slice::<Persisted<BlsScheme>>(&b).ok())
-        {
+            .and_then(|b| serde_json::from_slice::<Persisted<BlsScheme>>(&b).ok());
+        let resumed_round =
+            persisted.as_ref().filter(|p| p.epoch == epoch).map(|p| p.last_voted).unwrap_or(0);
+        let engine = match persisted {
             // Saved for another terminal block (a mined reorganisation replaced it before
             // anything was certified): start over on this anchor, above every used round.
             Some(p)
@@ -356,7 +394,7 @@ impl Validator {
             ?mode,
             "epoch starting"
         );
-        Ok(EpochCtx { epoch, engine, committee, end, mode })
+        Ok(EpochCtx { epoch, engine, committee, end, mode, me, resumed_round })
     }
 
     /// Height up to which the current epoch's work is final: the head under PoS, the last
@@ -405,11 +443,12 @@ impl Validator {
         };
         let mut ctx = self.enter_epoch(first)?;
         let mut seen: SeenVotes = HashMap::new();
+        let mut dg = Doppelganger::default();
         let mut actions = ctx.engine.start();
         actions.extend(self.replay(&mut ctx, &mut future));
         let mut reannounce = tokio::time::interval(REANNOUNCE);
         loop {
-            self.handle(&mut ctx, actions, &itx, &sources, &rounds, &mut future).await;
+            self.handle(&mut ctx, actions, &itx, &sources, &rounds, &mut future, &mut dg).await;
             if ctx.mode == Mode::Checkpoints {
                 // Mined blocks carry the latest checkpoint QC: it pays its signers.
                 let qc = ctx.engine.high_qc();
@@ -428,6 +467,7 @@ impl Validator {
                     Some(NetEvent::Consensus { via, data }) => match bolt_consensus::decode::<BlsScheme>(&data) {
                         Some(msg) => {
                             self.watch_equivocation(&ctx, &msg, &mut seen);
+                            self.watch_doppelganger(&ctx, &msg, &data, &mut dg);
                             if let Message::Proposal(p) = &msg {
                                 sources.insert(p.block.hash, via);
                                 rounds.insert(p.block.hash, p.block.round);
@@ -689,6 +729,58 @@ impl Validator {
         out
     }
 
+    /// A valid vote or timeout from one of our seats that this node did not send: the same key
+    /// runs elsewhere. Trips [`Doppelganger`] so this node stops signing.
+    fn watch_doppelganger(
+        &self,
+        ctx: &EpochCtx,
+        msg: &Message<BlsScheme>,
+        data: &[u8],
+        dg: &mut Doppelganger,
+    ) {
+        if msg.epoch() != ctx.epoch {
+            return;
+        }
+        let chain_id = self.chain.config().chain_id;
+        let (signer, round, signed, sig) = match msg {
+            Message::Vote(v) => (
+                v.signer,
+                v.round,
+                bolt_consensus::vote_msg(chain_id, v.epoch, v.round, &v.block),
+                &v.sig,
+            ),
+            Message::Timeout(t) => (
+                t.signer,
+                t.round,
+                bolt_consensus::timeout_msg(chain_id, t.epoch, t.round, t.high_qc.round),
+                &t.sig,
+            ),
+            Message::Proposal(_) => return,
+        };
+        if !ctx.me.contains(&signer)
+            || round <= ctx.resumed_round
+            || dg.sent.contains(&alloy_primitives::keccak256(data))
+        {
+            return;
+        }
+        let Some(pk) = ctx.committee.pubkeys.get(signer as usize) else { return };
+        if !bls::verify(pk, &signed, sig) {
+            return;
+        }
+        let Some(&id) = ctx.committee.committee.members.get(signer as usize) else { return };
+        if !dg.tripped.insert(id) {
+            return;
+        }
+        bolt_primitives::metrics::DOPPELGANGER.set(dg.tripped.len() as u64);
+        tracing::error!(
+            validator = id,
+            epoch = ctx.epoch,
+            round,
+            "another node is signing with this validator key; stopped signing with it to avoid \
+             being slashed. Stop the other instance, then restart this node"
+        );
+    }
+
     /// Two votes by one signer in the same epoch and round for different blocks: slashable.
     /// Writes ready-to-send `ConsensusRegistry.submitEvidence` calldata to `evidence/`.
     fn watch_equivocation(&self, ctx: &EpochCtx, msg: &Message<BlsScheme>, seen: &mut SeenVotes) {
@@ -751,6 +843,7 @@ impl Validator {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle(
         &self,
         ctx: &mut EpochCtx,
@@ -759,6 +852,7 @@ impl Validator {
         sources: &HashMap<B256, PeerId>,
         rounds: &HashMap<B256, u64>,
         future: &mut VecDeque<Message<BlsScheme>>,
+        dg: &mut Doppelganger,
     ) {
         let mut queue: VecDeque<Action<BlsScheme>> = actions.into();
         while !queue.is_empty() {
@@ -778,7 +872,15 @@ impl Validator {
             for a in batch {
                 match a {
                     Action::Broadcast(m) | Action::SendTo(_, m) => {
-                        let _ = self.net.publish_consensus(bolt_consensus::encode(&m)).await;
+                        if dg.blocks(ctx, &m) {
+                            continue;
+                        }
+                        let data = bolt_consensus::encode(&m);
+                        if dg.sent.len() > 50_000 {
+                            dg.sent.clear();
+                        }
+                        dg.sent.insert(alloy_primitives::keccak256(&data));
+                        let _ = self.net.publish_consensus(data).await;
                     }
                     Action::ScheduleTimeout { round, after_ms } => {
                         let (itx, epoch) = (itx.clone(), ctx.epoch);

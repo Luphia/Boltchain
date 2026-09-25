@@ -76,6 +76,7 @@ metrics! {
     counter BLOCKS_PRUNED = "blocks_pruned_total", "Block bodies pruned";
     counter TXS_ADMITTED = "txs_admitted_total", "Transactions admitted to the pool";
     gauge PEERS = "peers", "Connected peers";
+    gauge DOPPELGANGER = "doppelganger", "Validator keys of this node seen signing on another node (those keys stopped signing)";
 }
 
 /// Renders every metric plus `extra` gauges (name, help, value) in the Prometheus text format.

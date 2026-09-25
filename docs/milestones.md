@@ -75,7 +75,7 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 
 - [ ] 驗證者 BLS 公鑰（M3 的 `boltchain keys`）
 - [ ] 公開 IPFS 網路的橋接與 epoch 索引（M5）
-- [ ] NAT 穿透（AutoNAT、Circuit Relay v2、DCUtR）與連線數上限（M6）
+- [x] NAT 穿透（AutoNAT、Circuit Relay v2、DCUtR）（M6）
 
 ## M3 結果（2026-09-25）
 
@@ -271,6 +271,13 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - [x] 測試網觀察 1：交易只會被收到它的那個節點放進區塊（其他節點看不到），公開 RPC 送出的交易平均要等好幾個區塊。加上交易 gossip（`/bolt/<chain>/tx`），本機收進交易池的交易會轉發給所有節點（`crates/node/tests/m6_tx_gossip.rs`）
 - [x] 測試網觀察 2：Kubo 經由公開節點從 head 下載到 genesis 全部成功。Helia 連到公開節點時，大約 80 則訊息後就不再送出新的 want（節點端都有回覆）→ 待查
 - [x] 內建區塊鏈瀏覽器第一階段（ADR 0010）：`--explorer`，繁中與英文；首頁與共識階段進度、區塊、交易（系統合約與 ERC-20 解碼）、地址（含地址索引）、驗證者、epoch 與抽查、搜尋、在瀏覽器中驗證 IPFS 區塊
+- [x] 網路強化第一批：
+  - 位址過濾：identify 回報的私有、loopback、Docker（172.17/16）位址不再寫進 Kademlia，除非跟這條連線同一個範圍；避免公開節點互相散播撥不通的位址
+  - peer 評分：gossipsub peer scoring（無效訊息 −100、關閉 IP 同址懲罰），公告時間戳改成單調遞增
+  - 交易 gossip 先做無狀態檢查（解碼、chain id、gas 上限、intrinsic gas）再轉發；storage topic 每個 peer 每分鐘上限 600 則
+  - HTTP 限流：閘道與瀏覽器每個 IP 每秒 20 次（突發 80），同時最多 128 個請求，超過回 429 / 503
+  - NAT 穿透：AutoNAT、UPnP、Circuit Relay v2（`--relay-server` 開啟中繼，每條電路最長 30 分鐘、256 MiB）、DCUtR 打洞；AutoNAT 判定在 NAT 後面時自動經由最多 2 個中繼監聽（`relayed_node_serves_blocks`）
+  - 防罰沒（doppelganger）：收到自己座位簽的、但不是本機送出的投票或逾時訊息，就停止用那把金鑰簽署並記錄錯誤、`doppelganger` 指標加一；該節點的其他金鑰照常運作（`m4_pos` 驗收）
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## M6 追加項目（ADR 0008）

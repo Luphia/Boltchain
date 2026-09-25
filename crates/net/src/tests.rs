@@ -42,6 +42,7 @@ async fn node_with_fork(
             producer,
             fork_id: fork.to_string(),
             fork_check: Some(check),
+            relay_server: false,
         },
         mem.clone(),
     )
@@ -209,4 +210,67 @@ fn mainnet_bootnodes_are_dnsaddr() {
     assert_eq!(b.len(), 9);
     assert_eq!(b[0].to_string(), "/dnsaddr/node001.cafeca.io");
     assert_eq!(b[8].to_string(), "/dnsaddr/node009.cafeca.io");
+}
+
+/// A node with no listen address of its own (as if behind NAT) becomes reachable through a relay
+/// and serves blocks over the relayed connection.
+#[tokio::test(flavor = "multi_thread")]
+async fn relayed_node_serves_blocks() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
+        )
+        .with_test_writer()
+        .try_init();
+    let tcp_local = || vec!["/ip4/127.0.0.1/tcp/0".parse::<Multiaddr>().unwrap()];
+    let start_node = |listen: Vec<Multiaddr>, boot: Vec<Multiaddr>, relay_server: bool| async move {
+        let mem = Arc::new(Mem::default());
+        let (h, rx) = start(
+            NetConfig {
+                chain_id: 1337,
+                keypair: identity::Keypair::generate_ed25519(),
+                listen,
+                bootnodes: boot,
+                producer: None,
+                fork_id: "aabbccdd-0".into(),
+                fork_check: None,
+                relay_server,
+            },
+            mem.clone(),
+        )
+        .await
+        .unwrap();
+        (h, rx, mem)
+    };
+    let (relay, _r_rx, _) = start_node(tcp_local(), vec![], true).await;
+    let relay_addr = loop {
+        if let Some(a) =
+            relay.listen_addrs().await.into_iter().find(|a| a.to_string().contains("/tcp/"))
+        {
+            break a;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    // B listens nowhere except through the relay.
+    let (b, _b_rx, b_mem) = start_node(vec![], vec![relay_addr.clone()], false).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    b.listen(relay_addr.clone().with(Protocol::P2pCircuit)).await.unwrap();
+    let data = b"block served through a relay".to_vec();
+    let cid = bolt_ipld::sha256_cid(bolt_ipld::RAW, &data);
+    b_mem.0.write().insert(cid, data.clone());
+    let circuit = relay_addr.clone().with(Protocol::P2pCircuit).with(Protocol::P2p(b.peer_id()));
+    // C dials B only through the relay, then fetches the block from it.
+    let (c, _c_rx, _) = start_node(tcp_local(), vec![], false).await;
+    let mut got = None;
+    for _ in 0..50 {
+        let _ = c.dial(circuit.clone()).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if c.peers().await.contains(&b.peer_id())
+            && let Ok(m) = c.fetch(&[cid], &[b.peer_id()]).await
+        {
+            got = m.get(&cid).cloned();
+            break;
+        }
+    }
+    assert_eq!(got, Some(data), "block fetched over the relayed connection");
 }

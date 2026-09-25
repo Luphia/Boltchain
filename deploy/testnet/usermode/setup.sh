@@ -29,7 +29,7 @@ for i in $(seq 1 "$N"); do
   A="--genesis $ROOT/testnet.json --datadir $D/data --rpc $RPC --p2p-port $P2P"
   A+=" --metrics 127.0.0.1:$((9016 + i)) --mine --randomx-fast --mining-threads $THREADS"
   A+=" --beneficiary $ADDR --extra-data cafeca-n$i"
-  [ "$i" = 1 ] && A+=" --gateway 0.0.0.0:8080 --explorer --archive"
+  [ "$i" = 1 ] && A+=" --gateway 0.0.0.0:8080 --explorer --archive --relay-server"
   for k in "$D"/keys/v*.json; do A+=" --key $k"; done
   # Everyone dials node 1 and the other local nodes (as public nodes would).
   for b in $BOOT1; do [ "$i" != 1 ] && A+=" --bootnode $b"; done

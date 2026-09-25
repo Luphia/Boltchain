@@ -6,6 +6,10 @@
 //! * Announcements: gossipsub topic `/bolt/<chain id>/announce`, signed by the author.
 //! * Block exchange: Bitswap 1.2.0 (see [`bitswap`]).
 //! * Transaction forwarding: request-response `/bolt/<chain id>/tx/1.0.0` to the block producer.
+//! * NAT traversal: AutoNAT (am I reachable?), UPnP port mapping, circuit relay v2 (public nodes
+//!   with `relay_server` relay for others; a node found to be behind NAT reserves a slot on up to
+//!   two relay-capable peers and is reachable through them) and DCUtR hole punching, which
+//!   upgrades relayed connections to direct ones when the NATs allow it.
 
 pub mod bitswap;
 
@@ -14,11 +18,11 @@ use bitswap::{Bitswap, BlockSource, FetchError};
 use bolt_ipld::Cid;
 use futures::StreamExt;
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, Swarm, gossipsub, identify, identity, kad,
+    Multiaddr, PeerId, StreamProtocol, Swarm, autonat, dcutr, gossipsub, identify, identity, kad,
     multiaddr::Protocol,
-    noise, ping, request_response,
-    swarm::{NetworkBehaviour, SwarmEvent},
-    tcp, yamux,
+    noise, ping, relay, request_response,
+    swarm::{NetworkBehaviour, SwarmEvent, behaviour::toggle::Toggle},
+    tcp, upnp, yamux,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc, time::Duration};
@@ -119,6 +123,8 @@ pub struct NetConfig {
     pub fork_id: String,
     /// Judges a peer's fork id; peers on incompatible rules are disconnected.
     pub fork_check: Option<ForkCheck>,
+    /// Relay connections for peers behind NAT (public nodes).
+    pub relay_server: bool,
 }
 
 /// Verdict on a peer's fork id.
@@ -190,7 +196,18 @@ struct Behaviour {
     gossipsub: gossipsub::Behaviour,
     stream: libp2p_stream::Behaviour,
     tx: request_response::cbor::Behaviour<TxRequest, TxResponse>,
+    autonat: autonat::Behaviour,
+    upnp: upnp::tokio::Behaviour,
+    relay_client: relay::client::Behaviour,
+    relay: Toggle<relay::Behaviour>,
+    dcutr: dcutr::Behaviour,
 }
+
+/// Circuit relay v2 hop protocol (a peer that relays for others).
+const RELAY_HOP: &str = "/libp2p/circuit/relay/0.2.0/hop";
+
+/// Relays a node behind NAT reserves slots on.
+const MAX_RELAYS: usize = 2;
 
 enum Command {
     Publish(Announce),
@@ -202,6 +219,7 @@ enum Command {
     Peers(oneshot::Sender<Vec<PeerId>>),
     ListenAddrs(oneshot::Sender<Vec<Multiaddr>>),
     Dial(Multiaddr),
+    Listen(Multiaddr),
     Shutdown,
 }
 
@@ -239,6 +257,7 @@ impl std::fmt::Debug for Command {
             Command::Peers(_) => "Peers",
             Command::ListenAddrs(_) => "ListenAddrs",
             Command::Dial(_) => "Dial",
+            Command::Listen(_) => "Listen",
             Command::Shutdown => "Shutdown",
         })
     }
@@ -331,6 +350,12 @@ impl NetHandle {
     pub async fn dial(&self, addr: Multiaddr) -> Result<(), NetError> {
         self.cmd.send(Command::Dial(addr)).await.map_err(|_| NetError::Stopped)
     }
+
+    /// Listens on an additional address, e.g. `<relay>/p2p/<id>/p2p-circuit` to be reachable
+    /// through a relay.
+    pub async fn listen(&self, addr: Multiaddr) -> Result<(), NetError> {
+        self.cmd.send(Command::Listen(addr)).await.map_err(|_| NetError::Stopped)
+    }
 }
 
 fn topic(chain_id: u64) -> gossipsub::IdentTopic {
@@ -349,6 +374,86 @@ fn storage_topic(chain_id: u64) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(format!("/bolt/{chain_id}/storage"))
 }
 
+/// Behind NAT: listen through relay-capable peers (up to [`MAX_RELAYS`]).
+fn listen_via_relays(
+    swarm: &mut Swarm<Behaviour>,
+    candidates: &HashMap<PeerId, Multiaddr>,
+    relayed: &mut std::collections::HashSet<PeerId>,
+) {
+    for (peer, addr) in candidates {
+        if relayed.len() >= MAX_RELAYS {
+            break;
+        }
+        if relayed.contains(peer) {
+            continue;
+        }
+        let circuit = addr.clone().with(Protocol::P2pCircuit);
+        match swarm.listen_on(circuit.clone()) {
+            Ok(_) => {
+                tracing::info!(relay = %peer, "behind NAT: listening through relay");
+                relayed.insert(*peer);
+            }
+            Err(e) => tracing::debug!(%circuit, "relay listen failed: {e}"),
+        }
+    }
+}
+
+/// Who can use an address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Globally routable (or a DNS name).
+    Public,
+    /// RFC 1918, CGNAT, unique-local IPv6.
+    Private,
+    /// Loopback.
+    Loopback,
+    /// Unspecified, link-local, multicast, documentation, container bridges.
+    Unroutable,
+}
+
+fn addr_scope(addr: &Multiaddr) -> Scope {
+    for p in addr.iter() {
+        match p {
+            Protocol::Ip4(ip) => {
+                let o = ip.octets();
+                return if ip.is_loopback() {
+                    Scope::Loopback
+                } else if ip.is_unspecified()
+                    || ip.is_link_local()
+                    || ip.is_multicast()
+                    || ip.is_broadcast()
+                    || ip.is_documentation()
+                    || (o[0] == 172 && o[1] == 17)
+                {
+                    // 172.17/16 is Docker's default bridge: never reachable from another host.
+                    Scope::Unroutable
+                } else if ip.is_private() || (o[0] == 100 && (64..128).contains(&o[1])) {
+                    Scope::Private
+                } else {
+                    Scope::Public
+                };
+            }
+            Protocol::Ip6(ip) => {
+                let s = ip.segments();
+                return if ip.is_loopback() {
+                    Scope::Loopback
+                } else if ip.is_unspecified() || ip.is_multicast() || (s[0] & 0xffc0) == 0xfe80 {
+                    Scope::Unroutable
+                } else if (s[0] & 0xfe00) == 0xfc00 {
+                    Scope::Private
+                } else {
+                    Scope::Public
+                };
+            }
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => {
+                return Scope::Public;
+            }
+            _ => {}
+        }
+    }
+    Scope::Unroutable
+}
+
 fn peer_of(addr: &Multiaddr) -> Option<PeerId> {
     addr.iter().find_map(|p| if let Protocol::P2p(id) = p { Some(id) } else { None })
 }
@@ -361,6 +466,7 @@ pub async fn start(
     let setup = |e: &dyn std::fmt::Display| NetError::Setup(e.to_string());
     let chain_id = cfg.chain_id;
     let fork_id = cfg.fork_id.clone();
+    let relay_server = cfg.relay_server;
     let kad_protocol = StreamProtocol::try_from_owned(format!("/bolt/{chain_id}/kad/1.0.0"))
         .map_err(|e| setup(&e))?;
     let tx_protocol = StreamProtocol::try_from_owned(format!("/bolt/{chain_id}/tx/1.0.0"))
@@ -378,7 +484,9 @@ pub async fn start(
             .with_quic()
             .with_dns()
             .map_err(|e| setup(&e))?
-            .with_behaviour(|key| {
+            .with_relay_client(noise::Config::new, yamux::Config::default)
+            .map_err(|e| setup(&e))?
+            .with_behaviour(|key, relay_client| {
                 let peer_id = key.public().to_peer_id();
                 let gossip_cfg = gossipsub::ConfigBuilder::default()
                     .heartbeat_interval(Duration::from_millis(700))
@@ -390,10 +498,12 @@ pub async fn start(
                     })
                     .build()
                     .map_err(|e| e.to_string())?;
-                let gossipsub = gossipsub::Behaviour::new(
+                let mut gossipsub = gossipsub::Behaviour::new(
                     gossipsub::MessageAuthenticity::Signed(key.clone()),
                     gossip_cfg,
                 )?;
+                let (params, thresholds) = score_params(chain_id);
+                gossipsub.with_peer_score(params, thresholds)?;
                 let mut kad_cfg = kad::Config::new(kad_protocol.clone());
                 kad_cfg.set_query_timeout(Duration::from_secs(30));
                 let mut kad = kad::Behaviour::with_config(
@@ -420,6 +530,34 @@ pub async fn start(
                         request_response::Config::default()
                             .with_request_timeout(Duration::from_secs(10)),
                     ),
+                    autonat: autonat::Behaviour::new(
+                        peer_id,
+                        autonat::Config {
+                            boot_delay: Duration::from_secs(10),
+                            retry_interval: Duration::from_secs(60),
+                            refresh_interval: Duration::from_secs(15 * 60),
+                            only_global_ips: false,
+                            ..Default::default()
+                        },
+                    ),
+                    upnp: upnp::tokio::Behaviour::default(),
+                    relay_client,
+                    relay: Toggle::from(relay_server.then(|| {
+                        relay::Behaviour::new(
+                            peer_id,
+                            relay::Config {
+                                max_reservations: 256,
+                                max_circuits: 256,
+                                // Relayed peers sync blocks through us until hole punching gives
+                                // them a direct path: allow more than the libp2p defaults (2 min,
+                                // 128 KiB per circuit).
+                                max_circuit_duration: Duration::from_secs(30 * 60),
+                                max_circuit_bytes: 256 << 20,
+                                ..Default::default()
+                            },
+                        )
+                    })),
+                    dcutr: dcutr::Behaviour::new(peer_id),
                 })
             })
             .map_err(|e| setup(&e))?
@@ -469,6 +607,14 @@ async fn run(
     let mut inbound_tx: HashMap<u64, request_response::ResponseChannel<TxResponse>> =
         HashMap::new();
     let mut next_id = 0u64;
+    // How we reached each peer (scope of the remote address of our connection).
+    let mut reach: HashMap<PeerId, Scope> = HashMap::new();
+    let mut last_at = 0u64;
+    let mut storage_rate: HashMap<PeerId, (u32, std::time::Instant)> = HashMap::new();
+    // NAT traversal: relay-capable peers (dialable address with /p2p) and the ones we listen via.
+    let mut relay_candidates: HashMap<PeerId, Multiaddr> = HashMap::new();
+    let mut relayed: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
+    let mut behind_nat = false;
     let mut bootstrap_tick = tokio::time::interval(Duration::from_secs(60));
 
     loop {
@@ -480,12 +626,15 @@ async fn run(
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     Command::Publish(mut a) => {
-                        a.at = std::time::SystemTime::now()
+                        // Unique per message even when two go out in the same millisecond.
+                        let now = std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .map(|d| d.as_millis() as u64)
                             .unwrap_or(0);
+                        last_at = now.max(last_at + 1);
+                        a.at = last_at;
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), a.encode()) {
-                            tracing::debug!("publish: {e}");
+                            tracing::debug!(height = a.height, "publish announce: {e}");
                         }
                     }
                     Command::PublishConsensus(data) => {
@@ -526,14 +675,35 @@ async fn run(
                         }
                         let _ = swarm.dial(addr);
                     }
+                    Command::Listen(addr) => {
+                        if let Err(e) = swarm.listen_on(addr.clone()) {
+                            tracing::warn!(%addr, "listen: {e}");
+                        }
+                    }
                 }
             }
             event = swarm.select_next_some() => match event {
-                SwarmEvent::NewListenAddr { address, .. } => tracing::info!(%address, "p2p listening"),
-                SwarmEvent::ConnectionEstablished { peer_id, num_established, .. }
-                    if num_established.get() == 1 =>
-                {
-                    deliver(&ev_tx, NetEvent::Connected(peer_id));
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    tracing::info!(%address, "p2p listening");
+                    // A relay only offers its service once it knows an address others can
+                    // reach it at: a relay server's own listen addresses are that.
+                    if cfg.relay_server
+                        && matches!(addr_scope(&address), Scope::Public | Scope::Loopback)
+                        && !address.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+                    {
+                        swarm.add_external_address(address);
+                    }
+                }
+                SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
+                    reach.remove(&peer_id);
+                    storage_rate.remove(&peer_id);
+                    relay_candidates.remove(&peer_id);
+                }
+                SwarmEvent::ConnectionEstablished { peer_id, num_established, endpoint, .. } => {
+                    reach.insert(peer_id, addr_scope(endpoint.get_remote_address()));
+                    if num_established.get() == 1 {
+                        deliver(&ev_tx, NetEvent::Connected(peer_id));
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
                     let remote = info.agent_version.split_whitespace().find_map(|t| t.strip_prefix("fork/"));
@@ -561,8 +731,31 @@ async fn run(
                         ),
                         PeerRules::Compatible => {}
                     }
+                    if info.protocols.iter().any(|p| p.as_ref() == RELAY_HOP)
+                        && let Some(a) = info.listen_addrs.iter().find(|a| {
+                            addr_scope(a) == Scope::Public
+                                && !a.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+                        })
+                    {
+                        let a = if peer_of(a).is_some() { a.clone() } else { a.clone().with(Protocol::P2p(peer_id)) };
+                        relay_candidates.insert(peer_id, a);
+                        if behind_nat {
+                            listen_via_relays(&mut swarm, &relay_candidates, &mut relayed);
+                        }
+                    }
                     if info.protocols.contains(&kad_protocol) {
+                        // Only addresses others can use: public ones, plus private or loopback
+                        // ones when we reach this peer that way ourselves (LAN, local tests).
+                        // Otherwise nodes behind NAT or in containers would spread 192.168.x /
+                        // 172.17.x addresses that nobody else can dial.
+                        let via = reach.get(&peer_id).copied().unwrap_or(Scope::Public);
                         for addr in info.listen_addrs {
+                            match addr_scope(&addr) {
+                                Scope::Public => {}
+                                Scope::Unroutable => continue,
+                                s if s == via => {}
+                                _ => continue,
+                            }
                             swarm.behaviour_mut().kad.add_address(&peer_id, addr);
                         }
                     }
@@ -579,9 +772,9 @@ async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source, message_id, message,
                 })) if message.topic == ttopic.hash() => {
-                    // Size and shape only; the pool checks signature, nonce and balance. Peer
-                    // scoring (M6) will penalise peers that relay invalid transactions.
-                    let ok = !message.data.is_empty() && message.data.len() <= MAX_TX_GOSSIP_BYTES;
+                    // Stateless checks here (a peer relaying a malformed or wrongly signed
+                    // transaction is penalised by peer scoring); nonce and balance in the pool.
+                    let ok = tx_stateless_ok(&message.data, cfg.chain_id);
                     let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
                         &message_id, &propagation_source,
                         if ok { gossipsub::MessageAcceptance::Accept } else { gossipsub::MessageAcceptance::Reject },
@@ -593,11 +786,22 @@ async fn run(
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source, message_id, message,
                 })) if message.topic == stopic.hash() => {
-                    // Checked by the node (signatures, snapshot roots against local headers).
+                    // Checked by the node (signatures, snapshot roots against local headers);
+                    // each peer may relay a bounded number per minute.
+                    let now = std::time::Instant::now();
+                    let (count, since) = storage_rate.entry(propagation_source).or_insert((0, now));
+                    if now.duration_since(*since) > Duration::from_secs(60) {
+                        (*count, *since) = (0, now);
+                    }
+                    *count += 1;
+                    let within = *count <= MAX_STORAGE_PER_MINUTE && message.data.len() <= 64 * 1024;
                     let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
-                        &message_id, &propagation_source, gossipsub::MessageAcceptance::Accept,
+                        &message_id, &propagation_source,
+                        if within { gossipsub::MessageAcceptance::Accept } else { gossipsub::MessageAcceptance::Ignore },
                     );
-                    deliver(&ev_tx, NetEvent::Storage { via: propagation_source, data: message.data });
+                    if within {
+                        deliver(&ev_tx, NetEvent::Storage { via: propagation_source, data: message.data });
+                    }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source, message_id, message,
@@ -640,6 +844,40 @@ async fn run(
                         }
                     }
                 },
+                SwarmEvent::Behaviour(BehaviourEvent::Autonat(autonat::Event::StatusChanged { old, new })) => {
+                    tracing::info!(?old, ?new, "NAT status");
+                    behind_nat = matches!(new, autonat::NatStatus::Private);
+                    if behind_nat {
+                        listen_via_relays(&mut swarm, &relay_candidates, &mut relayed);
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Upnp(e)) => match e {
+                    upnp::Event::NewExternalAddr { external_addr, .. } => tracing::info!(address = %external_addr, "UPnP port mapping added"),
+                    upnp::Event::NonRoutableGateway => tracing::debug!("UPnP gateway is not routable"),
+                    upnp::Event::GatewayNotFound => tracing::debug!("no UPnP gateway"),
+                    upnp::Event::ExpiredExternalAddr { external_addr, .. } => tracing::debug!(address = %external_addr, "UPnP mapping expired"),
+                },
+                SwarmEvent::Behaviour(BehaviourEvent::RelayClient(relay::client::Event::ReservationReqAccepted { relay_peer_id, .. })) => {
+                    tracing::info!(relay = %relay_peer_id, "reachable through relay");
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Dcutr(e)) => match e.result {
+                    Ok(_) => tracing::info!(peer = %e.remote_peer_id, "hole punch succeeded: direct connection"),
+                    Err(err) => tracing::debug!(peer = %e.remote_peer_id, "hole punch failed: {err}"),
+                },
+                SwarmEvent::ExternalAddrConfirmed { address } => tracing::info!(%address, "external address confirmed"),
+                SwarmEvent::ListenerClosed { addresses, .. } => {
+                    // A relay went away: forget it so another can be used.
+                    for a in &addresses {
+                        if a.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+                            && let Some(p) = peer_of(a)
+                        {
+                            relayed.remove(&p);
+                        }
+                    }
+                    if behind_nat {
+                        listen_via_relays(&mut swarm, &relay_candidates, &mut relayed);
+                    }
+                }
                 SwarmEvent::Behaviour(BehaviourEvent::Tx(request_response::Event::OutboundFailure { request_id, error, .. })) => {
                     if let Some(reply) = pending_fwd.remove(&request_id) {
                         let _ = reply.send(Err(format!("forwarding failed: {error}")));
@@ -649,6 +887,60 @@ async fn run(
             }
         }
     }
+}
+
+/// Storage-topic messages (snapshot announcements, audit votes) relayed per peer per minute.
+const MAX_STORAGE_PER_MINUTE: u32 = 600;
+
+/// Whether gossiped bytes are a well-formed, correctly signed transaction for this chain.
+fn tx_stateless_ok(raw: &[u8], chain_id: u64) -> bool {
+    use alloy_consensus::{Transaction as _, TxEnvelope, transaction::SignerRecoverable};
+    use alloy_eips::eip2718::Decodable2718;
+    if raw.is_empty() || raw.len() > MAX_TX_GOSSIP_BYTES {
+        return false;
+    }
+    let mut buf = raw;
+    let Ok(tx) = TxEnvelope::decode_2718(&mut buf) else { return false };
+    buf.is_empty()
+        && !tx.is_eip4844()
+        && tx.chain_id() == Some(chain_id)
+        && tx.recover_signer().is_ok()
+}
+
+/// Peer scoring (gossipsub v1.1): peers that relay invalid messages (undecodable announcements,
+/// malformed or wrongly signed transactions) lose score and are eventually ignored. Delivery-rate
+/// penalties are off: our topics are quiet (a block every few seconds, few transactions), and
+/// several honest nodes may share an address (containers, one operator's host), so co-location
+/// is not penalised either.
+fn score_params(chain_id: u64) -> (gossipsub::PeerScoreParams, gossipsub::PeerScoreThresholds) {
+    let topic = |weight: f64| gossipsub::TopicScoreParams {
+        topic_weight: weight,
+        time_in_mesh_weight: 0.01,
+        time_in_mesh_quantum: Duration::from_secs(1),
+        time_in_mesh_cap: 3600.0,
+        first_message_deliveries_weight: 1.0,
+        first_message_deliveries_decay: 0.9,
+        first_message_deliveries_cap: 100.0,
+        mesh_message_deliveries_weight: 0.0,
+        mesh_failure_penalty_weight: 0.0,
+        invalid_message_deliveries_weight: -100.0,
+        invalid_message_deliveries_decay: 0.5,
+        ..Default::default()
+    };
+    let mut params =
+        gossipsub::PeerScoreParams { ip_colocation_factor_weight: 0.0, ..Default::default() };
+    for (name, weight) in [("announce", 1.0), ("consensus", 1.0), ("tx", 0.5), ("storage", 0.5)] {
+        let t = gossipsub::IdentTopic::new(format!("/bolt/{chain_id}/{name}"));
+        params.topics.insert(t.hash(), topic(weight));
+    }
+    let thresholds = gossipsub::PeerScoreThresholds {
+        gossip_threshold: -500.0,
+        publish_threshold: -1000.0,
+        graylist_threshold: -2500.0,
+        accept_px_threshold: 100.0,
+        opportunistic_graft_threshold: 5.0,
+    };
+    (params, thresholds)
 }
 
 /// Largest transaction relayed by gossip (the pool's own limit is 128 KiB).
@@ -696,3 +988,29 @@ pub fn load_or_create_key(path: &std::path::Path) -> std::io::Result<identity::K
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    #[test]
+    fn address_scopes() {
+        let sc = |a: &str| addr_scope(&a.parse().unwrap());
+        assert_eq!(sc("/ip4/211.22.118.149/tcp/8017"), Scope::Public);
+        assert_eq!(sc("/ip4/192.168.50.40/udp/8017/quic-v1"), Scope::Private);
+        assert_eq!(sc("/ip4/172.17.0.1/tcp/8017"), Scope::Unroutable);
+        assert_eq!(sc("/ip4/127.0.0.1/tcp/8017"), Scope::Loopback);
+        assert_eq!(sc("/ip4/100.64.1.2/tcp/1"), Scope::Private);
+        assert_eq!(sc("/dns4/node001.cafeca.io/tcp/8017"), Scope::Public);
+        assert_eq!(sc("/ip6/fe80::1/tcp/1"), Scope::Unroutable);
+        assert_eq!(sc("/ip6/2001:4860::8888/tcp/1"), Scope::Public);
+    }
+
+    #[test]
+    fn score_params_are_valid_and_txs_checked() {
+        let (p, t) = score_params(1337);
+        assert!(p.validate().is_ok() && t.validate().is_ok());
+        assert!(!tx_stateless_ok(&[], 1337));
+        assert!(!tx_stateless_ok(&[0x02, 0xc0], 1337));
+    }
+}

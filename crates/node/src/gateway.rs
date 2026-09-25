@@ -34,11 +34,31 @@ pub type Handler = Arc<dyn Fn(&str) -> Response + Send + Sync>;
 pub async fn serve(addr: SocketAddr, handler: Handler) -> Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
+    let limits = Arc::new(Limits::default());
     tokio::spawn(async move {
         loop {
-            let Ok((mut sock, _)) = listener.accept().await else { continue };
+            let Ok((mut sock, peer)) = listener.accept().await else { continue };
             let handler = handler.clone();
+            let limits = limits.clone();
             tokio::spawn(async move {
+                // Public endpoint: bound concurrent requests and each client's request rate.
+                let permit = limits.busy.clone().try_acquire_owned();
+                let refusal = match (&permit, limits.allow(peer.ip())) {
+                    (Err(_), _) => Some((503, "server busy, retry shortly")),
+                    (_, false) => Some((429, "too many requests")),
+                    _ => None,
+                };
+                if let Some((status, msg)) = refusal {
+                    let head = format!(
+                        "HTTP/1.1 {status} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nRetry-After: 2\r\nConnection: close\r\n\r\n",
+                        reason(status),
+                        msg.len()
+                    );
+                    let _ = sock.write_all(head.as_bytes()).await;
+                    let _ = sock.write_all(msg.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    return;
+                }
                 let mut buf = vec![0u8; 8192];
                 let mut n = 0;
                 while n < buf.len() {
@@ -73,12 +93,55 @@ pub async fn serve(addr: SocketAddr, handler: Handler) -> Result<SocketAddr> {
     Ok(bound)
 }
 
+/// Request limits of the public HTTP endpoint.
+struct Limits {
+    /// Requests served at once.
+    busy: Arc<tokio::sync::Semaphore>,
+    /// Token bucket per client address: (tokens, last refill).
+    buckets:
+        parking_lot::Mutex<std::collections::HashMap<std::net::IpAddr, (f64, std::time::Instant)>>,
+}
+
+/// Sustained requests per second per client, and the burst allowed.
+const RATE: f64 = 20.0;
+const BURST: f64 = 80.0;
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            busy: Arc::new(tokio::sync::Semaphore::new(128)),
+            buckets: parking_lot::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+}
+
+impl Limits {
+    fn allow(&self, ip: std::net::IpAddr) -> bool {
+        let now = std::time::Instant::now();
+        let mut b = self.buckets.lock();
+        if b.len() > 50_000 {
+            b.retain(|_, (_, t)| now.duration_since(*t).as_secs() < 60);
+        }
+        let (tokens, last) = b.entry(ip).or_insert((BURST, now));
+        *tokens = (*tokens + now.duration_since(*last).as_secs_f64() * RATE).min(BURST);
+        *last = now;
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
         _ => "Internal Server Error",
     }
 }
@@ -161,4 +224,19 @@ pub fn export_epoch(chain: &Chain, epoch: u64) -> Result<Vec<u8>> {
         anyhow::bail!("{}", String::from_utf8_lossy(&body));
     }
     Ok(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_client_is_rate_limited() {
+        let l = Limits::default();
+        let a: std::net::IpAddr = [1, 2, 3, 4].into();
+        let b: std::net::IpAddr = [5, 6, 7, 8].into();
+        let served = (0..200).filter(|_| l.allow(a)).count();
+        assert!((80..=90).contains(&served), "burst then refused: {served}");
+        assert!(l.allow(b), "other clients unaffected");
+    }
 }
