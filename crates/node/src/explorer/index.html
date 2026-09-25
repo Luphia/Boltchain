@@ -455,7 +455,7 @@ async function pageTx(h) {
       x.created && [t("k.created"), aLink(x.created, x.created)],
       [t("k.value"), bolt(x.value, 18)],
       call && [t("k.method"), call],
-      transfers.length && [t("k.transfers"), transfers.map((tr) => `<div>${aLink(tr.from)} → ${aLink(tr.to)} · <span class="mono">${tr.amount ?? "#" + tr.tokenId}</span> <span class="muted">(${aLink(tr.token)})</span></div>`).join("")],
+      transfers.length && [t("k.transfers"), transfers.map((tr) => `<div>${aLink(tr.from, tr.fromLabel)} → ${aLink(tr.to, tr.toLabel)} · <span class="mono">${tr.amount ?? "#" + tr.tokenId}</span> <span class="muted">(${aLink(tr.token, tr.tokenLabel)})</span></div>`).join("")],
       x.fee && [t("k.fee"), `${bolt(x.fee, 8)} <span class="muted">(${t("k.burned")} ${bolt(x.burned, 8)})</span>`],
       x.gasPrice && [t("k.gasprice"), gwei(x.gasPrice)],
       [t("k.gas"), x.gasUsed != null ? `${num(x.gasUsed)} / ${num(x.gasLimit)}` : num(x.gasLimit)],

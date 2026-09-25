@@ -746,16 +746,22 @@ fn transfer_of(l: &alloy_primitives::Log) -> Option<Value> {
         let amount = U256::from_be_slice(&l.data.data[..l.data.data.len().min(32)]);
         return Some(json!({
             "token": l.address,
+            "tokenLabel": label(&l.address),
             "from": Address::from_word(t[1]),
+            "fromLabel": label(&Address::from_word(t[1])),
             "to": Address::from_word(t[2]),
+            "toLabel": label(&Address::from_word(t[2])),
             "amount": amount.to_string(),
         }));
     }
     if t.len() == 4 && t[0] == bolt_store::addr_index::TRANSFER_TOPIC {
         return Some(json!({
             "token": l.address,
+            "tokenLabel": label(&l.address),
             "from": Address::from_word(t[1]),
+            "fromLabel": label(&Address::from_word(t[1])),
             "to": Address::from_word(t[2]),
+            "toLabel": label(&Address::from_word(t[2])),
             "tokenId": U256::from_be_bytes(t[3].0).to_string(),
         }));
     }
