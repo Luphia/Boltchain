@@ -68,17 +68,27 @@ pub const EMISSION_RATE_E18: u128 = 474_645_662_939_840;
 /// Share of emission paid to consensus participation, in basis points. The rest goes to history storage.
 pub const CONSENSUS_REWARD_BPS: u32 = 8_000;
 
-/// Reward multiplier for bootstrap-phase validators, in basis points (25%).
-pub const BOOTSTRAP_REWARD_BPS: u32 = 2_500;
+/// PoS start (phase C, ADR 0007): minimum number of stakers with at least the minimum stake.
+pub const POS_MIN_STAKERS: u32 = 128;
 
-/// Bootstrap phase ends once both thresholds hold within one epoch.
-pub const BOOTSTRAP_EXIT_MIN_STAKERS: u32 = 128;
+/// PoS start: minimum total stake, in whole BOLT.
+pub const POS_MIN_TOTAL_STAKE_BOLT: u64 = 10_000_000;
 
-/// Bootstrap phase exit: minimum total stake, in whole BOLT.
-pub const BOOTSTRAP_EXIT_MIN_TOTAL_STAKE_BOLT: u64 = 10_000_000;
+/// PoS start: consecutive epochs the thresholds must hold; also the minimum age of the stake the
+/// first PoS committee is drawn from.
+pub const POS_STREAK_EPOCHS: u64 = 14;
 
-/// Minimum number of bootstrap validators listed in genesis.
-pub const MIN_BOOTSTRAP_VALIDATORS: usize = 7;
+/// Target spacing of mined blocks, in seconds.
+pub const POW_BLOCK_SECONDS: u64 = 12;
+
+/// ASERT half-life, in seconds.
+pub const POW_HALF_LIFE_SECONDS: u64 = 3_600;
+
+/// Difficulty of the first mined blocks (about 22,000 RandomBOLT hashes per second at 12 s).
+pub const POW_INITIAL_DIFFICULTY: u64 = 1 << 18;
+
+/// Deepest reorganisation a node follows automatically (equals the retained state history).
+pub const MAX_REORG_DEPTH: u64 = 128;
 
 // Compile-time sanity checks on the constants above.
 const _: () = assert!(MIN_COMMITTEE_SIZE >= 512);

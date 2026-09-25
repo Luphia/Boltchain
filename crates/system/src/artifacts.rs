@@ -36,11 +36,5 @@ fn parse(json: &str) -> Artifact {
 artifact!(staking_manager, "StakingManager.json");
 artifact!(consensus_registry, "ConsensusRegistry.json");
 artifact!(reward_distributor, "RewardDistributor.json");
-artifact!(param_registry, "ParamRegistry.json");
 artifact!(history_registry, "HistoryRegistry.json");
-artifact!(system_proxy, "SystemProxy.json");
-artifact!(timelock, "TimelockController.json");
-artifact!(safe, "Safe.json");
-artifact!(safe_proxy, "SafeProxy.json");
-artifact!(safe_fallback, "CompatibilityFallbackHandler.json");
 artifact!(bls_harness, "BLSHarness.json");

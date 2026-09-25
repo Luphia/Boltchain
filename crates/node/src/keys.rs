@@ -1,18 +1,17 @@
 //! Validator key tooling.
 //!
-//! Workflow for a genesis validator operator:
+//! Becoming a validator is the same for everyone (ADR 0007): nobody is listed in genesis.
 //! 1. `boltchain keys new --out validator.key` on the validator machine (the secret stays there).
-//! 2. `boltchain keys binding-message --key validator.key --address <fee recipient>` and sign the
-//!    printed text with the fee-recipient wallet (`personal_sign`, e.g. MetaMask or a hardware wallet).
-//! 3. `boltchain keys genesis-entry --key validator.key --name <name> --fee-recipient <addr>
-//!    --binding-signature <0x...>` prints the checked JSON entry for `bootstrapValidators`.
+//! 2. `boltchain keys register-tx --key validator.key --fee-recipient <addr>` prints the
+//!    `StakingManager.register` transaction (key, proof of possession); send it from the wallet
+//!    that will own the stake, with at least 64 BOLT.
 
 use alloy_primitives::{Address, Bytes, hex};
+use alloy_sol_types::SolCall;
 use anyhow::{Context, Result, bail};
 use bolt_primitives::{
     bls::{self, BlsSecretKey},
-    genesis::BootstrapValidator,
-    params::CHAIN_ID,
+    params::{MIN_STAKE_WEI, WEI_PER_BOLT},
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -51,35 +50,15 @@ pub enum KeysCmd {
         #[arg(long)]
         key: PathBuf,
     },
-    /// Print the text the fee-recipient address must sign (EIP-191 personal_sign).
-    BindingMessage {
+    /// Print the `StakingManager.register` transaction for a key (send it with at least 64 BOLT
+    /// from the wallet that will own the stake).
+    RegisterTx {
         /// Key file.
         #[arg(long)]
         key: PathBuf,
-        /// Fee-recipient address.
-        #[arg(long)]
-        address: Address,
-        /// Chain id.
-        #[arg(long, default_value_t = CHAIN_ID)]
-        chain_id: u64,
-    },
-    /// Print a verified `bootstrapValidators` entry for a genesis file.
-    GenesisEntry {
-        /// Key file.
-        #[arg(long)]
-        key: PathBuf,
-        /// Operator name.
-        #[arg(long)]
-        name: String,
-        /// Fee-recipient address.
+        /// Address that receives rewards and tips.
         #[arg(long)]
         fee_recipient: Address,
-        /// personal_sign signature over the binding message (omit only for dev chains).
-        #[arg(long)]
-        binding_signature: Option<Bytes>,
-        /// Chain id.
-        #[arg(long, default_value_t = CHAIN_ID)]
-        chain_id: u64,
     },
 }
 
@@ -136,27 +115,30 @@ pub fn run(cmd: KeysCmd) -> Result<()> {
             println!("BLS public key      {}", k.public_key());
             println!("proof of possession {}", k.proof_of_possession());
         }
-        KeysCmd::BindingMessage { key, address, chain_id } => {
+        KeysCmd::RegisterTx { key, fee_recipient } => {
             let k = load_key(&key)?;
-            println!("{}", bls::binding_message(chain_id, &k.public_key(), &address));
-        }
-        KeysCmd::GenesisEntry { key, name, fee_recipient, binding_signature, chain_id } => {
-            let k = load_key(&key)?;
-            let pk = k.public_key();
-            if let Some(sig) = &binding_signature
-                && !bls::verify_binding(chain_id, &pk, &fee_recipient, sig)
-            {
-                bail!("binding signature was not made by {fee_recipient} over the binding message");
-            }
-            let entry = BootstrapValidator {
-                name,
-                bls_pubkey: pk,
-                proof_of_possession: k.proof_of_possession(),
-                fee_recipient,
-                binding_signature,
-            };
-            println!("{}", serde_json::to_string_pretty(&entry)?);
+            println!("{}", serde_json::to_string_pretty(&register_tx(&k, fee_recipient)?)?);
         }
     }
     Ok(())
+}
+
+/// The `register` transaction (to, data, minimum value) for `key`.
+pub fn register_tx(key: &BlsSecretKey, fee_recipient: Address) -> Result<serde_json::Value> {
+    let pk = key.public_key();
+    let point = bls::pubkey_point(&pk).context("invalid public key")?;
+    let pop = bls::signature_point(&key.proof_of_possession()).context("invalid PoP")?;
+    let data = bolt_system::abi::IStakingManager::registerCall {
+        pubkey: Bytes::copy_from_slice(pk.as_slice()),
+        pubkeyPoint: Bytes::copy_from_slice(&point),
+        pop: Bytes::copy_from_slice(&pop),
+        feeRecipient: fee_recipient,
+    }
+    .abi_encode();
+    Ok(serde_json::json!({
+        "to": bolt_system::addresses::STAKING,
+        "data": hex::encode_prefixed(data),
+        "minValueWei": MIN_STAKE_WEI.to_string(),
+        "minValueBolt": (MIN_STAKE_WEI / WEI_PER_BOLT).to_string(),
+    }))
 }

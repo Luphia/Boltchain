@@ -49,10 +49,12 @@ pub(crate) mod t {
     pub const IPLD: &str = "ipld";
     /// number(8 BE) -> CID bytes of the block's envelope (its IPFS root)
     pub const ENVELOPES: &str = "envelopes";
+    /// number(8 BE) -> total difficulty (32 bytes BE) of the canonical chain up to that block
+    pub const TD: &str = "td";
 
     pub const ALL: &[&str] = &[
         ACCOUNTS, STORAGE, CODES, TRIE_ACC, TRIE_STO, HEADERS, HASH_NUM, BODIES, SENDERS, RECEIPTS,
-        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META, IPLD, ENVELOPES,
+        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META, IPLD, ENVELOPES, TD,
     ];
 }
 
@@ -388,6 +390,12 @@ impl<'e, K: TransactionKind> Tx<'e, K> {
             .transpose()
     }
 
+    /// Total difficulty of the canonical chain up to block `number` (sum of mined blocks'
+    /// difficulties; blocks produced under PoS add nothing).
+    pub fn total_difficulty(&self, number: u64) -> Result<Option<U256>> {
+        Ok(self.get_raw(t::TD, &num_key(number))?.map(|v| U256::from_be_slice(&v)))
+    }
+
     /// Whether state as of block `number` can be reconstructed.
     pub fn history_covers(&self, number: u64) -> Result<bool> {
         let head = self.head()?.unwrap_or(0);
@@ -465,8 +473,36 @@ impl<'e> Tx<'e, RW> {
             loc.extend_from_slice(&(i as u32).to_be_bytes());
             self.put_raw(t::TX_INDEX, tx.tx_hash().as_slice(), &loc)?;
         }
+        let parent_td = match number.checked_sub(1) {
+            Some(p) => self.total_difficulty(p)?.unwrap_or_default(),
+            None => U256::ZERO,
+        };
+        let td = parent_td.saturating_add(block.header.difficulty);
+        self.put_raw(t::TD, &num_key(number), &td.to_be_bytes::<32>())?;
         self.put_raw(t::META, META_HEAD, &num_key(number))?;
         Ok(hash)
+    }
+
+    /// Removes block `number` (which must be the head) from the block tables and moves the head
+    /// to its parent. State is reverted separately ([`Tx::unwind_state`]).
+    pub(crate) fn remove_head_block(&self, number: u64) -> Result<StoredBlock> {
+        let block = self.block(number)?.ok_or(StoreError::Corrupt(t::HEADERS))?;
+        let n = num_key(number);
+        for tx in &block.transactions {
+            let h = tx.tx_hash();
+            if self.tx_location(h)?.map(|(b, _)| b) == Some(number) {
+                self.del_raw(t::TX_INDEX, h.as_slice())?;
+            }
+        }
+        self.del_raw(t::HASH_NUM, block.header.hash_slow().as_slice())?;
+        for table in [t::HEADERS, t::BODIES, t::SENDERS, t::RECEIPTS, t::ENVELOPES, t::TD] {
+            self.del_raw(table, &n)?;
+        }
+        match number.checked_sub(1) {
+            Some(p) => self.put_raw(t::META, META_HEAD, &num_key(p))?,
+            None => self.del_raw(t::META, META_HEAD)?,
+        }
+        Ok(block)
     }
 
     /// Stores one IPFS block.

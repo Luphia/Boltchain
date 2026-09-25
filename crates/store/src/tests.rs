@@ -210,3 +210,96 @@ fn history_serves_recent_state_and_prunes() {
     // Only the last 128 blocks of history remain.
     assert_eq!(history_len(&r).unwrap(), 128);
 }
+
+#[test]
+fn unwind_restores_state_blocks_and_total_difficulty() {
+    use revm::database::BundleState;
+    let (_d, store) = open();
+    let alice = Address::repeat_byte(0xa1);
+    let contract = Address::repeat_byte(0xc0);
+    let w = store.writer().unwrap();
+    let mut alloc = BTreeMap::new();
+    alloc.insert(alice, InitAccount { balance: U256::from(1000), ..Default::default() });
+    let genesis_root = w.init_state(&alloc).unwrap();
+    let header = alloy_consensus::Header {
+        number: 0,
+        state_root: genesis_root,
+        difficulty: U256::from(7),
+        ..Default::default()
+    };
+    w.put_block(&StoredBlock { header, transactions: vec![], senders: vec![] }, &[]).unwrap();
+    w.commit().unwrap();
+
+    let mut roots = vec![genesis_root];
+    let mut alice_info = AccountInfo { balance: U256::from(1000), ..Default::default() };
+    let mut slot_value = U256::ZERO;
+    for n in 1..=5u64 {
+        let new_alice =
+            AccountInfo { balance: U256::from(1000 + n), nonce: n, ..Default::default() };
+        let mut b = BundleState::builder(n..=n)
+            .state_original_account_info(alice, alice_info.clone())
+            .state_present_account_info(alice, new_alice.clone())
+            .revert_account_info(n, alice, Some(Some(alice_info.clone())));
+        let new_slot = U256::from(n * 10);
+        let contract_info = AccountInfo { nonce: 1, ..Default::default() };
+        if n == 2 {
+            // created in block 2
+            b = b.state_present_account_info(contract, contract_info.clone()).revert_account_info(
+                n,
+                contract,
+                Some(None),
+            );
+        } else if n > 2 {
+            b = b
+                .state_original_account_info(contract, contract_info.clone())
+                .state_present_account_info(contract, contract_info.clone());
+        }
+        if n >= 2 {
+            b = b
+                .state_storage(
+                    contract,
+                    [(U256::from(1), (slot_value, new_slot))].into_iter().collect(),
+                )
+                .revert_storage(n, contract, vec![(U256::from(1), slot_value)]);
+        }
+        let w = store.writer().unwrap();
+        let root = w.apply_bundle(n, b.build()).unwrap();
+        assert_eq!(root, full_state_root(&w).unwrap());
+        let header = alloy_consensus::Header {
+            number: n,
+            state_root: root,
+            difficulty: U256::from(n),
+            ..Default::default()
+        };
+        w.put_block(&StoredBlock { header, transactions: vec![], senders: vec![] }, &[]).unwrap();
+        w.commit().unwrap();
+        roots.push(root);
+        alice_info = new_alice;
+        if n >= 2 {
+            slot_value = new_slot;
+        }
+    }
+    let r = store.reader().unwrap();
+    assert_eq!(r.total_difficulty(5).unwrap(), Some(U256::from(7 + 1 + 2 + 3 + 4 + 5)));
+    drop(r);
+
+    for n in (1..=5u64).rev() {
+        let w = store.writer().unwrap();
+        let (block, root) = w.unwind_head().unwrap();
+        assert_eq!(block.header.number, n);
+        assert_eq!(root, roots[n as usize - 1], "root after undoing block {n}");
+        assert_eq!(root, full_state_root(&w).unwrap());
+        w.commit().unwrap();
+        let r = store.reader().unwrap();
+        assert_eq!(r.head().unwrap(), Some(n - 1));
+        assert!(r.header(n).unwrap().is_none());
+        assert!(r.total_difficulty(n).unwrap().is_none());
+    }
+    let r = store.reader().unwrap();
+    assert_eq!(r.account(&alice).unwrap().unwrap().balance, U256::from(1000));
+    assert!(r.account(&contract).unwrap().is_none());
+    assert_eq!(r.storage(&contract, &B256::with_last_byte(1)).unwrap(), U256::ZERO);
+    assert_eq!(history_len(&r).unwrap(), 0);
+    let w = store.writer().unwrap();
+    assert!(w.unwind_head().is_err(), "genesis cannot be undone");
+}

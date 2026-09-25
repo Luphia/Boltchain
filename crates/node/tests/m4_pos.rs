@@ -1,6 +1,6 @@
-//! M4 acceptance (ADR 0006): 100 validators register on chain during epoch 0; the bootstrap phase
-//! ends and every epoch (6 blocks) samples a new 16-seat committee by stake. The 107 validator
-//! keys (7 bootstrap + 100) run on 5 nodes. A validator double-votes: the nodes detect it and
+//! M4 acceptance (ADR 0006): on a dev chain with 7 genesis validators (PoS from block 1), 100
+//! validators register on chain during epoch 0 and every epoch (6 blocks) samples a new 16-seat
+//! committee by stake. The 107 validator keys run on 5 nodes. A validator double-votes: the nodes detect it and
 //! write evidence, the evidence is submitted as a transaction and the validator is slashed on
 //! chain. A fresh follower then syncs from genesis across all epochs, trusting only finality
 //! proofs (epoch by epoch).
@@ -36,10 +36,10 @@ fn genesis() -> Genesis {
     let mut g = Genesis::from_json(include_str!("../../../genesis/dev.json")).unwrap();
     g.config.epoch_slots = EPOCH;
     g.config.committee_size = 16;
-    g.config.bootstrap_exit_min_stakers = Some(STAKERS);
-    // 100 BOLT on average per staker; the locked-reward cap is 6,400 / 100 = 64 BOLT, although
-    // each bootstrap validator locks ~58,000 BOLT of rewards in epoch 0 (ADR 0006 §11).
-    g.config.bootstrap_exit_min_stake_bolt = Some(6_400);
+    // Genesis validators stake 100 BOLT each here, like an average new staker.
+    for v in &mut g.dev_validators {
+        v.stake_bolt = 100;
+    }
     g
 }
 
@@ -104,6 +104,8 @@ async fn start_net(
             listen: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
             bootnodes: boot,
             producer: None,
+            fork_id: chain.fork_id().unwrap().to_string(),
+            fork_check: None,
         },
         Arc::new(ChainBlocks(chain)),
     )
@@ -153,7 +155,7 @@ fn submit(nodes: &[Node], tx: &TxEnvelope) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn hundred_validators_rotate_committees_and_equivocation_is_slashed() {
     let g = genesis();
-    // 7 bootstrap keys + 100 staker keys, dealt round-robin to the nodes.
+    // 7 genesis keys + 100 staker keys, dealt round-robin to the nodes.
     let mut keys: Vec<Vec<BlsSecretKey>> = vec![Vec::new(); NODES];
     for i in 0..7u32 {
         keys[i as usize % NODES].push(dev_key(i));
@@ -186,6 +188,7 @@ async fn hundred_validators_rotate_committees_and_equivocation_is_slashed() {
                 base_timeout_ms: 3000,
                 state_dir: dir.path().join("consensus"),
             },
+            miner: None,
         };
         let task = tokio::spawn(async move {
             if let Err(e) = v.run(events).await {
@@ -210,31 +213,26 @@ async fn hundred_validators_rotate_committees_and_equivocation_is_slashed() {
     eprintln!("100 validators registered by block {registered_at}");
     assert!(registered_at <= EPOCH, "registrations spilled past epoch 0");
 
-    // Epochs 2..=5 are sampled by stake.
+    // Epochs 2..=5 are sampled by stake from all 107.
     wait_until("epoch 5 final", 240, || nodes.iter().all(|n| head(n) >= 6 * EPOCH)).await;
-    assert!(view(c0, CONSENSUS, IConsensusRegistry::bootstrapEndedCall {}));
     let mut members_seen = BTreeSet::new();
     let mut committees = Vec::new();
-    let (mut bootstrap_seats, mut all_seats) = (0u32, 0u32);
+    let (mut genesis_seats, mut all_seats) = (0u32, 0u32);
     for e in 2..=6u64 {
         let c = view(c0, CONSENSUS, IConsensusRegistry::committeeCall { epoch: e });
         assert_eq!(c.weights.iter().map(|w| *w as u32).sum::<u32>(), 16, "epoch {e}");
         for (id, w) in c.ids.iter().zip(&c.weights) {
             all_seats += *w as u32;
             if *id <= 7 {
-                bootstrap_seats += *w as u32;
+                genesis_seats += *w as u32;
             }
         }
         members_seen.extend(c.ids.iter().copied());
         committees.push(c.ids);
     }
-    // Locked bootstrap rewards (~58k BOLT each) are capped at 64 BOLT of weight: the bootstrap
-    // validators hold 7 x 64 of ~8,700 weight, about 5% of the seats, not all of them.
-    let v1 = view(c0, STAKING, IStakingManager::validatorCall { id: 1 });
-    assert!(v1.locked > bolt(10_000));
-    assert_eq!(view(c0, STAKING, IStakingManager::weightOfCall { id: 1 }), bolt(64));
-    eprintln!("bootstrap validators held {bootstrap_seats} of {all_seats} seats in epochs 2-6");
-    assert!(bootstrap_seats * 5 < all_seats, "bootstrap validators still dominate");
+    // Genesis validators hold 700 of ~10,000 BOLT: no special weight.
+    eprintln!("genesis validators held {genesis_seats} of {all_seats} seats in epochs 2-6");
+    assert!(genesis_seats * 5 < all_seats, "genesis validators dominate");
     eprintln!("committees of epochs 2-6: {committees:?}");
     assert!(committees.windows(2).all(|w| w[0] != w[1]), "committees rotate");
     assert!(members_seen.len() > 30, "only {} distinct validators served", members_seen.len());
@@ -307,7 +305,7 @@ async fn hundred_validators_rotate_committees_and_equivocation_is_slashed() {
         "5% on a first offence"
     );
     assert!(
-        !view(c0, STAKING, IStakingManager::snapshotCall {}).ids.contains(&id),
+        !view(c0, STAKING, IStakingManager::snapshotCall { minAge: 0 }).ids.contains(&id),
         "no longer eligible"
     );
 

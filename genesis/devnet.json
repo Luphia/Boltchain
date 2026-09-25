@@ -5,76 +5,15 @@
     "epochSlots": 14400,
     "committeeSize": 512,
     "gasLimit": 30000000,
-    "minBaseFeeWei": 10000000
+    "minBaseFeeWei": 10000000,
+    "pow": {
+      "algorithm": "randombolt",
+      "initialDifficulty": "0x40000",
+      "blockSeconds": 12,
+      "halfLifeSeconds": 3600
+    }
   },
   "timestamp": 0,
   "extraData": "0x426f6c74636861696e206465766e6574",
-  "bootstrapValidators": [
-    {
-      "name": "dev-0",
-      "blsPubkey": "0x87578b14d9f6dd9fe5c142bdbedcefa932452dca75d33ef5cf5f17c9ce165df2acf0ec13fa68e9bd74de0a69aaca25bd",
-      "proofOfPossession": "0x9650026fa6ddfdd311c1eb6fff9643ee2903d724c8e2856c031236ab27f2612dfe96d0cb669c4d5cd6e387847adc2ec517f9872bf55df515cad97988b5164489b301cc2a8d0112862f968845577d2ab92a6035e508f32c17e6833d78864a0f8c",
-      "feeRecipient": "0x96068c60850f1ed2a2452c1a1bd211184e22d882",
-      "bindingSignature": "0xd0e27ae84d7b05108a3330b8c897b6831491e59fa328d81649594522cc79e93d0f7b8c56702993a6f1ffa208b471fe74f8bbc2fdd218bd3b105dea941a46c13f1c"
-    },
-    {
-      "name": "dev-1",
-      "blsPubkey": "0xa28d92113b374a63450a452f099098ad7e25764ed68275af03400bedebc0c7a40b8a38a8f538d63e01cd2e4d07fe01e6",
-      "proofOfPossession": "0xa4b8c8b3e13dfea91cbbe29e77be72a04c1d1c125a5f77f63d1c3295d2c2cf1fbb894ad6d964afd8fdbc4b537822e7ef191f42e9dc44185fbb177aba363ba83861031039d85ad004014f0502dc846a93c75718cba5ecd0df0b18807dad8e61df",
-      "feeRecipient": "0xef8d73fda592c19aa9c2e8231f5420181c6ac9a3",
-      "bindingSignature": "0xc75d1f90d89f852bfcebb3ee74ebf1f68f240784a4f6514c25a4f74a10e6756c5b7c00470d95e093d5188a8b70fd0f157604eaf4730d88b5bac1167b0174f4641c"
-    },
-    {
-      "name": "dev-2",
-      "blsPubkey": "0x8acf35b6ecf3958109f9e80e0a082a03f2507e4223de4b567c0c2ff7a6b28487a2c877a5c16890524235360af75c87a7",
-      "proofOfPossession": "0xb545c87be6e5e2ded2d9112b617ca02e0c5476b6937ddca3f07cd8fddba459761c61035e19ffc34ad87284f509f399c71532b033817bd4d5b0252a72a37c8f3009698cb3d9a83a0d912c18edee69e80a6996e3bffab3c8563df4f3933c950b95",
-      "feeRecipient": "0xb8fcee4740ac8d482175995d2db9fd7879a7a1e2",
-      "bindingSignature": "0x6fb847d1e43ecdac1cfd3e442b440669e49f98bac264ae3a6073e25e93f01559602262a183e4a8290aedbfc45ea1fe34f025a107ceaae635c316bc8cee9d09a61c"
-    },
-    {
-      "name": "dev-3",
-      "blsPubkey": "0xb52daad7b8b724f5f33965cfe5c14cdef8339168f614c33cbf3311a9e639c052e1a509c3cdb096c1343f2770dcb9acfa",
-      "proofOfPossession": "0xaf85f44a4a5ca619316133966583bfe085c565e06c53c42b299978091c14ec7e2934ca9fbe745ca50bdb2320e8421cd805eb09d5caf4cc736f02158f0f76237ab21c010b6318c513db5ac6408e6aafa80372ae99a26fca31d155a1ae36f8d5a9",
-      "feeRecipient": "0xb99f1f05a0b1481d8e206b3afa90c490ccc1ecb4",
-      "bindingSignature": "0xdc235bc917d5471f1b4666243426904a8312fb8375d1ba4e4a0d8ff279cc93291c2b4422a3484e9c5254b49b39ec23c54005731f622fd6e9f8c27dfe74cf5d361b"
-    },
-    {
-      "name": "dev-4",
-      "blsPubkey": "0x816a62e22ab500f2537c2003778ca2c90df1efd17d82a0ff76e499cc55e9f4bc285b9bbd5260b87fbcbdfe376ee2179d",
-      "proofOfPossession": "0x978af541ec203c9c43535b5bdf65fe4638bcc0605e3e75b8d71c87b9707e3dbf86fb62501dfa621e036136794ecf87411160d32213b0fd07319d245e351695a98d77510d201f25c712374b17208c7bec91ad2fdf9c1b9249972147a49f5ef9c7",
-      "feeRecipient": "0x4d730f04c99d402ae227aeb23b2bee461ab7e0bf",
-      "bindingSignature": "0xf8052cc13759e4dc185d6a0ec3aab2220a6fa27236af4c5d5f6af851b8a079b46e8c146270fe89ef63b003bce0d4bc4784530ac766a18af8e057816c1b1dd1731b"
-    },
-    {
-      "name": "dev-5",
-      "blsPubkey": "0xa6fdb2b77b3184181d6ec76009c7cad68801a68fdc6e1f73634abb237dd0218439537fe4006629285b147490c7b0f287",
-      "proofOfPossession": "0x8cf557e77f07269c26b070f5815d042c4f0294871287d8c9aaeee1f4ca18e1a7b7549b4e5469b68b9aeb48d016a27dc1033c09cf5d59197d1c55fdb954b05d301ced8440815406ccf64a6e60ae0dcc132632dc8bf93f2a94ef6a15364a5c528f",
-      "feeRecipient": "0xe3380703424a25c5ff43f8340dc3dd5e7e068ee1",
-      "bindingSignature": "0xb33048864b789b70a61d46762750a2deda279056b57c29e9de766ca944a0adf219e592328eccfff0b447a402ea9c3dc727f7ee04a2341f8553215a208d45656e1c"
-    },
-    {
-      "name": "dev-6",
-      "blsPubkey": "0xb65df14178bcddb6f587ed77dea9343b10f2433b4d0329c18ea288281f0a4649736a73bb199c0318bbef27fc09bf19fb",
-      "proofOfPossession": "0x98171a54c2c54e75d810b61233a095fc887cb9664f8735a4d58ac5d4d7834e78482d5462488049f618abbacccf93413f05942cef33743520f0b32eb18683e417544ccab4e0996b4bfaa3ae02a90cd8e7afd6ec07d6f45398b22f6b0ac9219332",
-      "feeRecipient": "0x3efe435444482b60fb17bcd56fb10f13189d2f57",
-      "bindingSignature": "0x571361a02c05b7ef7e08c477ed972aba6ae2fba587127486c9d48266ea42e5bf21025b0db868f330883eedda84504dfb6dbf8b7abc7f652224cf7cd74d55adc71c"
-    }
-  ],
-  "governance": {
-    "owners": [
-      "0x57b9eb67b938e0f3ce4f5f6980ac54970c6381fd",
-      "0x029a9307b6b6c96e11ca6bda99da1fed8713e264",
-      "0xa2466e323c909d6416597415a988510783265243",
-      "0x0d5d7797d00ba4ae0430c6ea998132298d16c39d",
-      "0x167060846609b1c46de3838a6ffc38988e0d1cb1",
-      "0x4308bb4bbb89010564b78535a7b33e6a23a843cd",
-      "0x8c1cd1d1637ec65565980c8d4a276332bc787f32",
-      "0x2942687c6f1ea6c42dc750d7c8463792eabbe743",
-      "0x98e85542a2b10aeea5337e82d4bf1eb93ca38b9f"
-    ],
-    "threshold": 5,
-    "upgradeDelaySeconds": 1382400,
-    "paramDelaySeconds": 172800
-  },
   "alloc": {}
 }

@@ -5,25 +5,18 @@ import {Sys, SystemContract} from "./System.sol";
 
 interface IRegistry {
     function members(uint64 epoch) external view returns (uint32[] memory ids, uint16[] memory weights);
-    function bootstrapEnded() external view returns (bool);
 }
 
 interface IStakingRewards {
-    function isBootstrap(uint32 id) external view returns (bool);
-    function lockReward(uint32 id) external payable;
-    function validator(uint32 id)
-        external
-        view
-        returns (address, address, uint256, uint256, uint8, bool, uint64, bytes memory);
+    function validator(uint32 id) external view returns (address, address, uint256, uint8, uint64, bytes memory);
 }
 
 /// @title Circulating supply, participation records and epoch rewards.
-/// @notice New BOLT only enters through `settle`: the node credits this contract with the epoch's
-/// consensus emission, this contract pays it out by participation, and the node debits whatever was
-/// not paid (it stays in the unissued pool). Burned base fees and slashed stake leave the supply.
+/// @notice New BOLT enters in two ways: while blocks are mined, the node credits each block's
+/// reward to its miner and reports it in `onBlock`; under PoS, the node credits this contract with
+/// the epoch's consensus emission in `settle`, which pays it out by participation (what is not
+/// paid stays in the unissued pool). Burned base fees and slashed stake leave the supply.
 contract RewardDistributor is SystemContract {
-    uint256 public constant BOOTSTRAP_REWARD_BPS = 2_500;
-
     /// Circulating supply in wei (cap minus unissued pool).
     uint256 public supply;
     /// Votes per committee member per epoch, as 16 packed 16-bit counters per word (512 members).
@@ -42,11 +35,12 @@ contract RewardDistributor is SystemContract {
         supply = genesisSupply;
     }
 
-    /// Every block, before its transactions: removes the parent's burned base fee from the supply
-    /// and records the votes in the block's certificate (`bitmap` indexes the members of
-    /// `certEpoch`'s committee, bit i of byte i/8).
-    function onBlock(uint256 burned, uint64 certEpoch, bytes calldata bitmap) external onlySystem {
-        supply = burned > supply ? 0 : supply - burned;
+    /// Every block, before its transactions: removes the parent's burned base fee from the supply,
+    /// adds the block reward the node credited to a miner (`minted`, zero under PoS) and records
+    /// the votes in the block's certificate (`bitmap` indexes the members of `certEpoch`'s
+    /// committee, bit i of byte i/8; empty for mined blocks).
+    function onBlock(uint256 burned, uint256 minted, uint64 certEpoch, bytes calldata bitmap) external onlySystem {
+        supply = burned > supply ? minted : supply - burned + minted;
         if (bitmap.length > 64) revert TooManyMembers();
         uint256[32] storage v = votes[certEpoch];
         for (uint256 w = 0; w * 2 < bitmap.length; w++) {
@@ -63,18 +57,13 @@ contract RewardDistributor is SystemContract {
     }
 
     /// First block of epoch `epoch + 1`: pays epoch `epoch`'s committee in proportion to votes x
-    /// seats out of `emission`. Bootstrap validators get 25% while the bootstrap phase lasts, locked
-    /// into their stake. The node first calls `preview` and credits exactly the returned amount to
-    /// this contract; what is not paid stays in the unissued pool.
+    /// seats out of `emission` (nothing for a mined epoch, which has no committee). The node first
+    /// calls `preview` and credits exactly the returned amount to this contract; what is not paid
+    /// stays in the unissued pool.
     function settle(uint64 epoch, uint256 emission) external onlySystem returns (uint256 paid) {
-        (uint32[] memory ids, uint256[] memory shares, bool[] memory locked, uint256 total) = _shares(epoch, emission);
+        (uint32[] memory ids, uint256[] memory shares, uint256 total) = _shares(epoch, emission);
         for (uint256 i = 0; i < ids.length; i++) {
-            if (shares[i] == 0) continue;
-            if (locked[i]) {
-                IStakingRewards(Sys.STAKING).lockReward{value: shares[i]}(ids[i]);
-            } else {
-                rewards[ids[i]] += shares[i];
-            }
+            if (shares[i] != 0) rewards[ids[i]] += shares[i];
         }
         paid = total;
         delete votes[epoch];
@@ -84,33 +73,27 @@ contract RewardDistributor is SystemContract {
 
     /// Amount `settle(epoch, emission)` would pay.
     function preview(uint64 epoch, uint256 emission) external view returns (uint256 paid) {
-        (,,, paid) = _shares(epoch, emission);
+        (,, paid) = _shares(epoch, emission);
     }
 
     function _shares(uint64 epoch, uint256 emission)
         private
         view
-        returns (uint32[] memory ids, uint256[] memory shares, bool[] memory locked, uint256 paid)
+        returns (uint32[] memory ids, uint256[] memory shares, uint256 paid)
     {
         uint16[] memory weights;
         (ids, weights) = IRegistry(Sys.CONSENSUS).members(epoch);
         uint256[32] storage v = votes[epoch];
         shares = new uint256[](ids.length);
-        locked = new bool[](ids.length);
         uint256 total;
         for (uint256 i = 0; i < ids.length && i < 512; i++) {
             shares[i] = ((v[i / 16] >> (16 * (i % 16))) & 0xffff) * weights[i];
             total += shares[i];
         }
-        if (total == 0) return (ids, shares, locked, 0);
-        bool bootstrap = !IRegistry(Sys.CONSENSUS).bootstrapEnded();
+        if (total == 0) return (ids, shares, 0);
         for (uint256 i = 0; i < ids.length; i++) {
             if (shares[i] == 0) continue;
             uint256 share = emission * shares[i] / total;
-            if (bootstrap && IStakingRewards(Sys.STAKING).isBootstrap(ids[i])) {
-                share = share * BOOTSTRAP_REWARD_BPS / 10_000;
-                locked[i] = true;
-            }
             shares[i] = share;
             paid += share;
         }
@@ -120,7 +103,7 @@ contract RewardDistributor is SystemContract {
     function claim(uint32 id) external returns (uint256 amount) {
         amount = rewards[id];
         rewards[id] = 0;
-        (, address to,,,,,,) = IStakingRewards(Sys.STAKING).validator(id);
+        (, address to,,,,) = IStakingRewards(Sys.STAKING).validator(id);
         emit Claimed(id, to, amount);
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert TransferFailed();

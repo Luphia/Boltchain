@@ -4,5 +4,6 @@ pub mod bench;
 pub mod devnet;
 pub mod follow;
 pub mod keys;
+pub mod miner;
 pub mod p2p;
 pub mod validator;

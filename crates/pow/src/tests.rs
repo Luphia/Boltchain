@@ -39,7 +39,12 @@ fn difficulty_check() {
 }
 
 fn params() -> AsertParams {
-    AsertParams { spacing: 12, half_life: 3_600, initial: U256::from(1_000_000u64), minimum: U256::from(1u64) }
+    AsertParams {
+        spacing: 12,
+        half_life: 3_600,
+        initial: U256::from(1_000_000u64),
+        minimum: U256::from(1u64),
+    }
 }
 
 #[test]
@@ -81,13 +86,34 @@ fn bolt_cap() -> U256 {
 
 #[test]
 fn search_finds_a_valid_nonce() {
-    let h = Hasher::new(Mode::Light);
-    let key = key_for(&B256::repeat_byte(3));
-    let seal = B256::repeat_byte(9);
+    for algo in [Algorithm::RandomBolt, Algorithm::Keccak] {
+        let pow = Pow::light(algo);
+        let key = key_for(&B256::repeat_byte(3));
+        let seal = B256::repeat_byte(9);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let (nonce, hash) =
+            pow.search(&key, &seal, U256::from(8u64), 0, 1, 1_000, &stop).unwrap().expect("found");
+        assert_eq!(pow.hash(&key, &seal, nonce).unwrap(), hash);
+        assert!(meets(&hash, U256::from(8u64)));
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(pow.search(&key, &seal, U256::MAX, 0, 1, 1_000, &stop).unwrap().is_none());
+    }
+}
+
+#[test]
+fn header_seal_verifies() {
+    let pow = Pow::light(Algorithm::Keccak);
+    let key = key_for(&B256::repeat_byte(1));
+    let mut h = Header { difficulty: U256::from(1000u64), number: 5, ..Default::default() };
     let stop = std::sync::atomic::AtomicBool::new(false);
-    let (nonce, pow) = search(&h, &key, &seal, U256::from(8u64), 0, 1, 1_000, &stop).unwrap().expect("found");
-    assert_eq!(h.hash(&key, &pow_input(&seal, nonce)).unwrap(), pow);
-    assert!(meets(&pow, U256::from(8u64)));
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(search(&h, &key, &seal, U256::MAX, 0, 1, 1_000, &stop).unwrap().is_none());
+    let (nonce, _) =
+        pow.search(&key, &seal_hash(&h), h.difficulty, 0, 1, 1_000_000, &stop).unwrap().unwrap();
+    h.nonce = B64::from(nonce);
+    assert!(pow.verify(&key, &h).unwrap());
+    // Deterministic inputs: the next nonce happens not to meet the target.
+    h.nonce = B64::from(nonce + 1);
+    assert!(!pow.verify(&key, &h).unwrap());
+    h.nonce = B64::from(nonce);
+    h.difficulty = U256::MAX;
+    assert!(!pow.verify(&key, &h).unwrap());
 }

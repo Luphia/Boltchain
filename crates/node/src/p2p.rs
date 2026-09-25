@@ -49,8 +49,29 @@ impl P2pArgs {
         if self.mainnet_bootnodes {
             bootnodes.extend(bolt_net::mainnet_bootnodes());
         }
-        let cfg =
-            NetConfig { chain_id: chain.config().chain_id, keypair, listen, bootnodes, producer };
+        let fork_id = chain.fork_id()?;
+        let checker = chain.clone();
+        let fork_check = bolt_net::ForkCheck(Arc::new(move |remote: &str| {
+            use bolt_primitives::forks::{Compatibility, ForkId, check, forks};
+            let Ok(remote) = remote.parse::<ForkId>() else {
+                return bolt_net::PeerRules::Incompatible;
+            };
+            let head = checker.head().map(|h| h.number).unwrap_or(0);
+            match check(&checker.genesis_hash(), forks(checker.config().chain_id), head, &remote) {
+                Compatibility::Compatible => bolt_net::PeerRules::Compatible,
+                Compatibility::PeerKnowsNewerFork => bolt_net::PeerRules::Newer,
+                Compatibility::Incompatible => bolt_net::PeerRules::Incompatible,
+            }
+        }));
+        let cfg = NetConfig {
+            chain_id: chain.config().chain_id,
+            keypair,
+            listen,
+            bootnodes,
+            producer,
+            fork_id: fork_id.to_string(),
+            fork_check: Some(fork_check),
+        };
         let (net, events) = bolt_net::start(cfg, Arc::new(ChainBlocks(chain))).await?;
         tracing::info!(peer_id = %net.peer_id(), "p2p identity");
         Ok((net, events))

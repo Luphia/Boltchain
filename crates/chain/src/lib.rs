@@ -2,19 +2,26 @@
 //!
 //! Execution reads a consistent snapshot of the store while RPC readers keep running; the only
 //! write transaction is the final commit of each block (state, tries, block, history pruning).
+//!
+//! Blocks come in two kinds (ADR 0007): *mined* blocks until the epoch PoS starts in
+//! (`ConsensusRegistry.posEpoch`), sealed with RandomBOLT at the ASERT difficulty and chosen by
+//! total difficulty ([`pow`]); and blocks of the PoS committee afterwards, final once certified.
 
 use alloy_consensus::{Header, Transaction as _, TxEnvelope, transaction::SignerRecoverable};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 mod overlay;
+pub mod pow;
 
 use bolt_exec::{
     BlockExecutor, BlockInput, BlockParams, ExecutedBlock, TxRejection, next_base_fee,
 };
 use bolt_ipld::{BlockBundle, Cid};
+use bolt_pow::{AsertParams, Pow};
+use bolt_primitives::params::GAS_LIMIT_RANGE;
 use bolt_primitives::{Genesis, genesis::ChainConfig};
 use bolt_store::{InitAccount, StateView, Store, StoreError, StoredBlock};
-use bolt_system::{CertVotes, EpochRules};
+use bolt_system::{CertVotes, EpochRules, Phase};
 use parking_lot::Mutex;
 use revm::database::{OriginalValuesKnown, states::StateChangeset};
 use std::{collections::BTreeMap, path::Path};
@@ -43,6 +50,10 @@ pub enum ChainError {
     /// The parent is neither the committed head nor a known pending block.
     #[error("unknown parent {0}")]
     UnknownParent(B256),
+    /// A heavier chain forks off deeper than [`bolt_primitives::params::MAX_REORG_DEPTH`] blocks,
+    /// or below a block the PoS committee made final. It is not followed automatically.
+    #[error("refusing reorganisation: {0}")]
+    DeepReorg(String),
 }
 
 /// Result alias.
@@ -72,6 +83,15 @@ pub struct Chain {
     rules: EpochRules,
     genesis_hash: B256,
     pending: Mutex<HashMap<B256, Arc<PendingBlock>>>,
+    /// PoW verification.
+    pow: Pow,
+    asert: AsertParams,
+    /// Mined blocks off the canonical chain (candidates for a reorganisation).
+    side: Mutex<HashMap<B256, pow::SideBlock>>,
+    /// Serializes mined-block imports and reorganisations.
+    import_lock: Mutex<()>,
+    /// Gas limit this node's blocks move towards (0: keep the parent's).
+    gas_target: std::sync::atomic::AtomicU64,
 }
 
 /// A pending block, the included transaction hashes and the skipped ones (hash, reason, drop).
@@ -130,13 +150,63 @@ impl Chain {
                 }
             }
         }
+        let pc = &genesis.config.pow;
+        let algorithm = match pc.algorithm {
+            bolt_primitives::genesis::PowAlgorithm::RandomBolt => bolt_pow::Algorithm::RandomBolt,
+            bolt_primitives::genesis::PowAlgorithm::Keccak => bolt_pow::Algorithm::Keccak,
+        };
         Ok(Self {
             store,
             config: genesis.config.clone(),
             rules: EpochRules::from_config(&genesis.config),
             genesis_hash: expected,
             pending: Mutex::new(HashMap::new()),
+            pow: Pow::light(algorithm),
+            asert: AsertParams {
+                spacing: pc.block_seconds,
+                half_life: pc.half_life_seconds,
+                initial: pc.initial_difficulty,
+                minimum: U256::from(1),
+            },
+            side: Mutex::new(HashMap::new()),
+            import_lock: Mutex::new(()),
+            gas_target: std::sync::atomic::AtomicU64::new(0),
         })
+    }
+
+    /// Proof-of-work function (for miners that verify with the same settings).
+    pub fn pow(&self) -> &Pow {
+        &self.pow
+    }
+
+    /// Sets the gas limit this node's blocks move towards (0: keep the parent's). Each block may
+    /// move it by less than 1/1024 of the parent's, within [`GAS_LIMIT_RANGE`].
+    pub fn set_gas_target(&self, gas: u64) {
+        self.gas_target.store(gas, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Consensus phase in the committed head state.
+    pub fn phase(&self) -> Result<Phase> {
+        let r = self.store.reader()?;
+        bolt_system::queries::phase(&StateView::latest(&r), self.config.chain_id)
+            .map_err(|e| ChainError::Exec(e.to_string()))
+    }
+
+    /// Fork id at the committed head (EIP-2124 layout, ADR 0008 §2).
+    pub fn fork_id(&self) -> Result<bolt_primitives::forks::ForkId> {
+        let head = self.head()?.number;
+        Ok(bolt_primitives::forks::fork_id(
+            &self.genesis_hash,
+            bolt_primitives::forks::forks(self.config.chain_id),
+            head,
+        ))
+    }
+
+    /// Total difficulty of the committed head.
+    pub fn head_total_difficulty(&self) -> Result<U256> {
+        let r = self.store.reader()?;
+        let n = r.head()?.unwrap_or(0);
+        Ok(r.total_difficulty(n)?.unwrap_or_default())
     }
 
     /// The underlying store (for RPC reads).
@@ -168,48 +238,79 @@ impl Chain {
 
     /// Base fee the next block will use.
     pub fn next_base_fee(&self) -> Result<u64> {
-        let r = self.store.reader()?;
-        let p = self.chain_params(&StateView::latest(&r))?;
-        Ok(next_base_fee(&self.head()?, p.min_base_fee))
+        Ok(next_base_fee(&self.head()?, self.config.min_base_fee_wei))
     }
 
-    /// Governance parameters (`ParamRegistry`) in the state `db` (the parent of the next block).
-    pub fn chain_params<D: revm::DatabaseRef>(&self, db: D) -> Result<ChainParams>
-    where
-        D::Error: std::fmt::Debug,
-    {
-        let p = bolt_system::queries::call(
-            db,
-            self.config.chain_id,
-            bolt_system::addresses::PARAMS,
-            bolt_system::abi::IParamRegistry::paramsCall {},
-        )
-        .map_err(|e| ChainError::Exec(e.to_string()))?;
-        Ok(ChainParams { gas_limit: p.gasLimit, min_base_fee: p.minBaseFee })
+    /// Gas limit of this node's next block on `parent`.
+    fn next_gas_limit(&self, parent: &Header) -> u64 {
+        let target = self.gas_target.load(std::sync::atomic::Ordering::Relaxed);
+        next_gas_limit(parent.gas_limit, target)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn params_for(
         &self,
         parent: &Header,
-        cp: &ChainParams,
+        kind: &BlockKind,
         timestamp: u64,
         beneficiary: Address,
         extra_data: Bytes,
+        gas_limit: u64,
+        nonce: alloy_primitives::B64,
     ) -> BlockParams {
+        let prevrandao = match kind {
+            BlockKind::Mined { .. } => {
+                keccak256([parent.mix_hash.as_slice(), parent.hash_slow().as_slice()].concat())
+            }
+            BlockKind::Pos => mix_hash(parent, &extra_data),
+        };
+        let difficulty = match kind {
+            BlockKind::Mined { difficulty } => *difficulty,
+            BlockKind::Pos => U256::ZERO,
+        };
         BlockParams {
             input: BlockInput {
                 chain_id: self.config.chain_id,
                 number: parent.number + 1,
                 timestamp,
                 beneficiary,
-                gas_limit: cp.gas_limit,
-                base_fee: next_base_fee(parent, cp.min_base_fee),
-                prevrandao: mix_hash(parent, &extra_data),
+                gas_limit,
+                base_fee: next_base_fee(parent, self.config.min_base_fee_wei),
+                prevrandao,
             },
             parent_hash: parent.hash_slow(),
             parent_beacon_root: B256::ZERO,
             extra_data,
+            difficulty,
+            nonce,
         }
+    }
+
+    /// Kind of the block after `parent` (whose post-state is `db`): mined, with its difficulty,
+    /// or produced by the PoS committee.
+    fn kind_of<D: revm::DatabaseRef>(&self, db: D, parent: &Header) -> Result<BlockKind>
+    where
+        D::Error: std::fmt::Debug,
+    {
+        let phase = bolt_system::queries::phase(db, self.config.chain_id)
+            .map_err(|e| ChainError::Exec(e.to_string()))?;
+        if phase.is_pos(&self.rules, parent.number + 1) {
+            return Ok(BlockKind::Pos);
+        }
+        Ok(BlockKind::Mined { difficulty: self.difficulty_after(parent)? })
+    }
+
+    /// ASERT difficulty of a mined child of `parent`.
+    pub fn difficulty_after(&self, parent: &Header) -> Result<U256> {
+        let solve_time = if parent.number <= 1 {
+            0
+        } else {
+            let gp = self
+                .header_any(&parent.parent_hash)?
+                .ok_or(ChainError::UnknownParent(parent.parent_hash))?;
+            parent.timestamp.saturating_sub(gp.timestamp)
+        };
+        Ok(bolt_pow::next_difficulty(&self.asert, parent.number, parent.difficulty, solve_time))
     }
 
     /// Header of `hash`, whether committed or pending.
@@ -222,6 +323,19 @@ impl Chain {
             Some(n) => Ok(r.header(n)?),
             None => Ok(None),
         }
+    }
+
+    /// Header of `hash`: committed, pending or a mined side-chain block.
+    pub fn header_any(&self, hash: &B256) -> Result<Option<Header>> {
+        if let Some(h) = self.header_of(hash)? {
+            return Ok(Some(h));
+        }
+        Ok(self.side.lock().get(hash).map(|b| b.header.clone()))
+    }
+
+    /// Forgets a pending block (e.g. a mining template that went stale).
+    pub fn drop_pending(&self, hash: &B256) {
+        self.pending.lock().remove(hash);
     }
 
     /// A pending (executed, not yet final) block.
@@ -254,7 +368,7 @@ impl Chain {
     fn execute_on(
         &self,
         parent_hash: &B256,
-        mut params_fn: impl FnMut(&Header, &ChainParams) -> BlockParams,
+        mut params_fn: impl FnMut(&Header, &BlockKind) -> BlockParams,
         txs: Vec<(TxEnvelope, Address)>,
         expected: Option<&Header>,
         qc: Vec<u8>,
@@ -278,11 +392,33 @@ impl Chain {
             let reader = self.store.reader()?;
             let view = StateView::latest(&reader);
             let db = overlay::Overlay { base: &view, changes: &changes };
-            let cp = self.chain_params(&db)?;
-            let params = params_fn(&parent_header, &cp);
+            let kind = self.kind_of(&db, &parent_header)?;
+            let params = params_fn(&parent_header, &kind);
+            let mined = matches!(kind, BlockKind::Mined { .. });
+            if let Some(exp) = expected {
+                self.check_kind(exp, &kind, &parent_header, &ancestors, &head, &qc)?;
+            } else if mined && !qc.is_empty() {
+                return Err(ChainError::InvalidBlock("mined blocks carry no certificate".into()));
+            }
+            let number = params.input.number;
             let mut ex =
                 BlockExecutor::new(&db, params).map_err(|e| ChainError::Exec(e.to_string()))?;
-            bolt_system::pre_block(&mut ex, &self.rules, &parent_header, &votes)
+            // Hard forks activating at this block (ADR 0008 §2).
+            for fork in bolt_primitives::forks::forks(self.config.chain_id) {
+                if fork.activation != number {
+                    continue;
+                }
+                for c in fork.changes {
+                    let storage: Vec<(U256, U256)> = c
+                        .storage
+                        .iter()
+                        .map(|(k, v)| (U256::from_be_bytes(k.0), U256::from_be_bytes(v.0)))
+                        .collect();
+                    ex.apply_irregular(c.address, c.code.map(Bytes::from_static), &storage)
+                        .map_err(|e| ChainError::Exec(format!("fork {}: {e}", fork.name)))?;
+                }
+            }
+            bolt_system::pre_block(&mut ex, &self.rules, &parent_header, &votes, mined)
                 .map_err(|e| ChainError::Exec(format!("system calls: {e}")))?;
             for (tx, sender) in txs {
                 if expected.is_none() && ex.gas_remaining() < 21_000 {
@@ -352,6 +488,74 @@ impl Chain {
         Ok((pending, included, rejected))
     }
 
+    /// Kind-specific rules for an expected (received) header, checked before executing it: the
+    /// seal and difficulty of a mined block, the absence of both under PoS.
+    fn check_kind(
+        &self,
+        exp: &Header,
+        kind: &BlockKind,
+        parent: &Header,
+        ancestors: &[Arc<PendingBlock>],
+        head: &Header,
+        qc: &[u8],
+    ) -> Result<()> {
+        let invalid = ChainError::InvalidBlock;
+        match kind {
+            BlockKind::Pos => {
+                if !exp.difficulty.is_zero() || exp.nonce != alloy_primitives::B64::ZERO {
+                    return Err(invalid(format!(
+                        "block {} is after the switch to PoS but carries a PoW seal",
+                        exp.number
+                    )));
+                }
+            }
+            BlockKind::Mined { difficulty } => {
+                if !qc.is_empty() {
+                    return Err(invalid("mined blocks carry no certificate".into()));
+                }
+                if exp.difficulty != *difficulty {
+                    return Err(invalid(format!(
+                        "difficulty {} != {difficulty} (ASERT)",
+                        exp.difficulty
+                    )));
+                }
+                if exp.extra_data.len() > 32 {
+                    return Err(invalid("extra data over 32 bytes".into()));
+                }
+                let h = bolt_pow::seed_height(exp.number);
+                let seed = if h == parent.number {
+                    parent.hash_slow()
+                } else if h <= head.number {
+                    self.store
+                        .reader()?
+                        .block_hash(h)?
+                        .ok_or(ChainError::UnknownParent(B256::ZERO))?
+                } else {
+                    ancestors
+                        .iter()
+                        .find(|a| a.header.number == h)
+                        .map(|a| a.hash)
+                        .ok_or(ChainError::UnknownParent(B256::ZERO))?
+                };
+                self.check_seal(exp, &seed)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `header` is sealed under the RandomBOLT key of seed block `seed`.
+    fn check_seal(&self, header: &Header, seed: &B256) -> Result<()> {
+        let key = bolt_pow::key_for(seed);
+        match self.pow.verify(&key, header) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(ChainError::InvalidBlock(format!(
+                "block {} does not meet its difficulty",
+                header.number
+            ))),
+            Err(e) => Err(ChainError::Exec(e.to_string())),
+        }
+    }
+
     /// Builds a block on `parent` from candidate transactions, without committing it.
     #[allow(clippy::too_many_arguments)]
     pub fn build_on(
@@ -366,13 +570,15 @@ impl Chain {
         let beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
         let (pending, included, rejected) = self.execute_on(
             parent,
-            |ph, cp| {
+            |ph, kind| {
                 let mut p = self.params_for(
                     ph,
-                    cp,
+                    kind,
                     timestamp.max(ph.timestamp + 1),
                     beneficiary,
                     extra_data.clone(),
+                    self.next_gas_limit(ph),
+                    alloy_primitives::B64::ZERO,
                 );
                 p.parent_beacon_root = beacon;
                 p
@@ -411,8 +617,14 @@ impl Chain {
         if header.timestamp <= parent.timestamp {
             return Err(invalid("timestamp not after parent".into()));
         }
-        // Gas limit, base fee (ParamRegistry) and the RANDAO mix are recomputed during execution
-        // and compared with the header.
+        if !valid_gas_limit(parent.gas_limit, header.gas_limit) {
+            return Err(invalid(format!(
+                "gas limit {} not within 1/1024 of {} or outside {GAS_LIMIT_RANGE:?}",
+                header.gas_limit, parent.gas_limit
+            )));
+        }
+        // Base fee, difficulty and the RANDAO mix are recomputed during execution and compared
+        // with the header; the kind-specific rules (seal, certificate) are checked first.
         let expected_beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
         if header.parent_beacon_block_root != Some(expected_beacon) {
             return Err(invalid("parent certificate hash mismatch".into()));
@@ -428,9 +640,16 @@ impl Chain {
         let (h, number) = (header.clone(), header.number);
         let (pending, _, _) = self.execute_on(
             &header.parent_hash,
-            |ph, cp| {
-                let mut p =
-                    self.params_for(ph, cp, h.timestamp, h.beneficiary, h.extra_data.clone());
+            |ph, kind| {
+                let mut p = self.params_for(
+                    ph,
+                    kind,
+                    h.timestamp,
+                    h.beneficiary,
+                    h.extra_data.clone(),
+                    h.gas_limit,
+                    h.nonce,
+                );
                 p.parent_beacon_root = expected_beacon;
                 p
             },
@@ -471,8 +690,10 @@ impl Chain {
         )?;
         w.prune_history(number)?;
         w.commit()?;
-        // Drop pending blocks that can no longer be built upon.
+        // Drop pending blocks that can no longer be built upon, and side blocks too old to win.
         self.pending.lock().retain(|_, b| b.header.number > number);
+        let horizon = number.saturating_sub(bolt_primitives::params::MAX_REORG_DEPTH);
+        self.side.lock().retain(|_, b| b.header.number > horizon);
         tracing::debug!(number, hash = %p.hash, root = %p.bundle.root, gas = p.header.gas_used, "committed block");
         Ok(p.header.clone())
     }
@@ -534,21 +755,46 @@ impl Chain {
     }
 }
 
-/// Governance parameters that apply to a block (read from `ParamRegistry` in its parent state).
+/// How a block is produced.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ChainParams {
-    /// Block gas limit.
-    pub gas_limit: u64,
-    /// Minimum base fee.
-    pub min_base_fee: u64,
+pub enum BlockKind {
+    /// Mined (before PoS starts), at this difficulty.
+    Mined {
+        /// ASERT difficulty.
+        difficulty: U256,
+    },
+    /// Produced and certified by the PoS committee.
+    Pos,
+}
+
+/// Whether a block may use `gas_limit` after a parent with `parent_gas_limit`: within the hard
+/// range and less than 1/1024 of the parent's away from it (as Ethereum).
+pub fn valid_gas_limit(parent_gas_limit: u64, gas_limit: u64) -> bool {
+    let max_delta = parent_gas_limit / 1024;
+    (GAS_LIMIT_RANGE.0..=GAS_LIMIT_RANGE.1).contains(&gas_limit)
+        && gas_limit.abs_diff(parent_gas_limit) < max_delta.max(1)
+}
+
+/// Gas limit of a block after a parent with `parent_gas_limit`, moving towards `target` (0: keep).
+pub fn next_gas_limit(parent_gas_limit: u64, target: u64) -> u64 {
+    let step = (parent_gas_limit / 1024).saturating_sub(1);
+    let target = if target == 0 { parent_gas_limit } else { target };
+    let target = target.clamp(GAS_LIMIT_RANGE.0, GAS_LIMIT_RANGE.1);
+    let next = if target > parent_gas_limit {
+        parent_gas_limit + step.min(target - parent_gas_limit)
+    } else {
+        parent_gas_limit - step.min(parent_gas_limit - target)
+    };
+    next.clamp(GAS_LIMIT_RANGE.0, GAS_LIMIT_RANGE.1)
 }
 
 /// Length of `extra_data` in validator-produced blocks: round (8 bytes) + RANDAO reveal (96 bytes).
 pub const EXTRA_DATA_LEN: usize = 8 + 96;
 
-/// RANDAO mix of the block after `parent` (ADR 0006 §6): with a reveal in `extra_data`,
+/// RANDAO mix of a PoS block after `parent` (ADR 0006 §6): with a reveal in `extra_data`,
 /// `keccak(parent.mix_hash ‖ keccak(reveal))`; otherwise (single-producer devnet)
 /// `keccak(parent.mix_hash ‖ number)`. Validators check the reveal's signature before voting.
+/// Mined blocks use `keccak(parent.mix_hash ‖ parent hash)`.
 pub fn mix_hash(parent: &Header, extra_data: &[u8]) -> B256 {
     if extra_data.len() == EXTRA_DATA_LEN {
         keccak256([parent.mix_hash.as_slice(), keccak256(&extra_data[8..]).as_slice()].concat())
@@ -584,5 +830,7 @@ pub fn max_cost(tx: &TxEnvelope) -> U256 {
 
 #[cfg(test)]
 mod epoch_tests;
+#[cfg(test)]
+mod pow_tests;
 #[cfg(test)]
 mod tests;

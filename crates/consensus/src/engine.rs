@@ -228,6 +228,17 @@ impl<S: Scheme> Engine<S> {
         e
     }
 
+    /// A fresh engine for `cfg` that never votes or times out in a round up to `last_voted`.
+    /// Used when the first PoS epoch's anchor (the last mined block) changes before any block
+    /// was certified: nothing certified is dropped, and no signature can conflict with one sent
+    /// for the previous anchor.
+    pub fn reanchored(cfg: Config, scheme: S, last_voted: Round) -> Self {
+        let mut e = Self::new(cfg, scheme);
+        e.last_voted = last_voted;
+        e.round = last_voted;
+        e
+    }
+
     /// State to persist (write it before sending any vote or timeout this engine produced).
     pub fn persisted(&self) -> Persisted<S> {
         Persisted {

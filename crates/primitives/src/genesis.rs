@@ -1,11 +1,13 @@
 //! Genesis file format, validation and genesis header construction.
 //!
-//! Boltchain has no genesis token allocation: every account in `alloc` must have a zero balance.
-//! `alloc` exists only to predeploy contract code (system contracts, the governance multisig).
+//! Boltchain has no genesis token allocation and no privileged accounts: every account in `alloc`
+//! must have a zero balance, and nobody is a validator at genesis. The chain starts with mined
+//! blocks (ADR 0007); `alloc` exists only to predeploy contract code.
 //!
-//! Local development chains (`"dev": true`) are the one exception: they may fund accounts, and to
-//! keep their transactions from being replayable on Boltchain they must use a chain id other
-//! than 8017.
+//! Local development chains (`"dev": true`) are the exception: they may fund accounts, list
+//! validators staked at genesis (PoS from block 1), lower the PoS thresholds and use a fast
+//! stand-in for RandomBOLT. To keep their transactions from being replayable on Boltchain they
+//! must use a chain id other than 8017.
 
 use crate::params::*;
 use alloy_consensus::{
@@ -24,29 +26,26 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub use crate::bls::{BlsPublicKey, BlsSignature};
 
-/// Seconds in one day, used for timelock bounds.
-const DAY: u64 = 86_400;
-
 /// Genesis file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Genesis {
-    /// Local development chain: allows funded accounts, forbids chain id 8017.
+    /// Local development chain: allows funded accounts and genesis validators, forbids chain id
+    /// 8017.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dev: bool,
     /// Chain parameters fixed at genesis.
     pub config: ChainConfig,
-    /// Genesis timestamp (unix seconds). Slot 0 starts here.
+    /// Genesis timestamp (unix seconds).
     pub timestamp: u64,
     /// Header extra data, at most 32 bytes.
     #[serde(default)]
     pub extra_data: Bytes,
-    /// Bootstrap-phase validators. They hold no tokens; they only sign blocks until the
-    /// bootstrap exit thresholds are met.
-    pub bootstrap_validators: Vec<BootstrapValidator>,
-    /// Initial governance: multisig owners and timelock delays.
-    pub governance: Governance,
-    /// Predeployed contracts. Balances must be zero.
+    /// Dev chains only: validators staked at genesis. With any, the chain runs PoS from block 1
+    /// (no mining phase).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dev_validators: Vec<DevValidator>,
+    /// Predeployed contracts. Balances must be zero outside dev chains.
     #[serde(default)]
     pub alloc: BTreeMap<Address, GenesisAccount>,
 }
@@ -57,22 +56,29 @@ pub struct Genesis {
 pub struct ChainConfig {
     /// EIP-155 chain id.
     pub chain_id: u64,
-    /// Slot length in seconds.
+    /// PoS slot length in seconds.
     pub slot_seconds: u64,
-    /// Slots per epoch.
+    /// Blocks per epoch.
     pub epoch_slots: u64,
     /// Committee seats per epoch.
     pub committee_size: u32,
-    /// Initial block gas limit.
+    /// Gas limit of the genesis block; later blocks move it by at most 1/1024 of the parent's
+    /// (block producers vote), within [`GAS_LIMIT_RANGE`].
     pub gas_limit: u64,
     /// Minimum base fee in wei.
     pub min_base_fee_wei: u64,
-    /// Dev chains only: bootstrap exit threshold on the number of stakers.
+    /// Mining phase.
+    #[serde(default)]
+    pub pow: PowConfig,
+    /// Dev chains only: PoS threshold on the number of stakers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bootstrap_exit_min_stakers: Option<u32>,
-    /// Dev chains only: bootstrap exit threshold on total stake, in whole BOLT.
+    pub pos_min_stakers: Option<u32>,
+    /// Dev chains only: PoS threshold on total stake, in whole BOLT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bootstrap_exit_min_stake_bolt: Option<u64>,
+    pub pos_min_stake_bolt: Option<u64>,
+    /// Dev chains only: epochs the thresholds must hold (at most 14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pos_streak_epochs: Option<u64>,
 }
 
 impl Default for ChainConfig {
@@ -84,52 +90,78 @@ impl Default for ChainConfig {
             committee_size: MIN_COMMITTEE_SIZE,
             gas_limit: DEFAULT_GAS_LIMIT,
             min_base_fee_wei: MIN_BASE_FEE_WEI,
-            bootstrap_exit_min_stakers: None,
-            bootstrap_exit_min_stake_bolt: None,
+            pow: PowConfig::default(),
+            pos_min_stakers: None,
+            pos_min_stake_bolt: None,
+            pos_streak_epochs: None,
         }
     }
 }
 
 impl ChainConfig {
-    /// Bootstrap exit thresholds: (stakers, total stake in whole BOLT).
-    pub fn bootstrap_exit(&self) -> (u32, u64) {
+    /// PoS thresholds: (stakers, total stake in whole BOLT, streak in epochs).
+    pub fn pos_thresholds(&self) -> (u32, u64, u64) {
         (
-            self.bootstrap_exit_min_stakers.unwrap_or(BOOTSTRAP_EXIT_MIN_STAKERS),
-            self.bootstrap_exit_min_stake_bolt.unwrap_or(BOOTSTRAP_EXIT_MIN_TOTAL_STAKE_BOLT),
+            self.pos_min_stakers.unwrap_or(POS_MIN_STAKERS),
+            self.pos_min_stake_bolt.unwrap_or(POS_MIN_TOTAL_STAKE_BOLT),
+            self.pos_streak_epochs.unwrap_or(POS_STREAK_EPOCHS),
         )
     }
 }
 
-/// A bootstrap-phase validator.
+/// Proof-of-work algorithm.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PowAlgorithm {
+    /// RandomX with Boltchain parameters (the only one allowed outside dev chains).
+    #[default]
+    RandomBolt,
+    /// keccak256: a fast stand-in for tests on dev chains.
+    Keccak,
+}
+
+/// Mining-phase parameters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct BootstrapValidator {
-    /// Operator name, for humans.
+pub struct PowConfig {
+    /// Algorithm.
+    #[serde(default)]
+    pub algorithm: PowAlgorithm,
+    /// Difficulty of blocks 1 and 2.
+    pub initial_difficulty: U256,
+    /// Target block spacing, in seconds.
+    pub block_seconds: u64,
+    /// ASERT half-life, in seconds.
+    pub half_life_seconds: u64,
+}
+
+impl Default for PowConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: PowAlgorithm::RandomBolt,
+            initial_difficulty: U256::from(POW_INITIAL_DIFFICULTY),
+            block_seconds: POW_BLOCK_SECONDS,
+            half_life_seconds: POW_HALF_LIFE_SECONDS,
+        }
+    }
+}
+
+/// A validator staked at genesis (dev chains only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevValidator {
+    /// Name, for humans.
     pub name: String,
-    /// BLS12-381 public key used for votes and the BLS-VRF.
+    /// BLS12-381 public key used for votes and RANDAO reveals.
     pub bls_pubkey: BlsPublicKey,
     /// Proof of possession of the BLS key (rules out rogue-key attacks on aggregate signatures).
     pub proof_of_possession: BlsSignature,
-    /// Address that receives this validator's (discounted, locked) rewards.
+    /// Owner of the stake.
+    pub owner: Address,
+    /// Receives rewards and tips.
     pub fee_recipient: Address,
-    /// EIP-191 signature by `fee_recipient` over [`crate::bls::binding_message`], proving the
-    /// address holder claims this BLS key. Required outside dev chains.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub binding_signature: Option<Bytes>,
-}
-
-/// Initial governance configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Governance {
-    /// Multisig owners.
-    pub owners: Vec<Address>,
-    /// Signatures required.
-    pub threshold: u32,
-    /// Timelock for system-contract upgrades and security parameters, in seconds.
-    pub upgrade_delay_seconds: u64,
-    /// Timelock for bounded parameter tweaks, in seconds.
-    pub param_delay_seconds: u64,
+    /// Stake, in whole BOLT (at least the minimum stake).
+    pub stake_bolt: u64,
 }
 
 /// A predeployed account.
@@ -184,28 +216,24 @@ pub enum GenesisError {
     BaseFee(u64),
     #[error("extra data is {0} bytes, max 32")]
     ExtraData(usize),
-    #[error("need at least {MIN_BOOTSTRAP_VALIDATORS} bootstrap validators, got {0}")]
-    TooFewValidators(usize),
+    #[error(
+        "mining parameters must be RandomBOLT, {POW_BLOCK_SECONDS}s spacing, {POW_HALF_LIFE_SECONDS}s half-life"
+    )]
+    Pow,
+    #[error("initial difficulty must be positive")]
+    Difficulty,
     #[error("duplicate or invalid BLS public key: {0}")]
     BadValidatorKey(BlsPublicKey),
     #[error("invalid proof of possession for BLS key {0}")]
     BadPossession(BlsPublicKey),
-    #[error("missing fee-recipient binding signature for BLS key {0}")]
-    MissingBinding(BlsPublicKey),
-    #[error("binding signature for BLS key {0} was not made by its fee recipient")]
-    BadBinding(BlsPublicKey),
-    #[error("multisig owners must be unique and non-zero")]
-    BadOwners,
-    #[error("threshold {threshold} invalid for {owners} owners (needs a strict majority)")]
-    Threshold { threshold: u32, owners: usize },
-    #[error("upgrade timelock must be at least the unbonding period plus 2 days")]
-    UpgradeDelay,
-    #[error("param timelock must be at least 2 days and not exceed the upgrade timelock")]
-    ParamDelay,
+    #[error("genesis validator stake below the minimum")]
+    ValidatorStake,
     #[error("no genesis allocation: account {0} has a non-zero balance")]
     NonZeroBalance(Address),
-    #[error("bootstrap exit overrides are for dev chains only")]
+    #[error("genesis validators and PoS threshold overrides are for dev chains only")]
     DevOnly,
+    #[error("PoS streak must be between 1 and {POS_STREAK_EPOCHS} epochs")]
+    Streak,
     #[error("account {0} is a protocol predeploy and cannot be overridden")]
     ReservedAddress(Address),
 }
@@ -228,13 +256,19 @@ impl Genesis {
             return Err(GenesisError::ChainId(c.chain_id));
         }
         if self.dev {
-            // Dev chains may use short epochs, small committees and low bootstrap thresholds
-            // (vote counters are 16-bit per epoch, committees at most 4096 seats).
+            // Dev chains may use short epochs, small committees and low thresholds (vote counters
+            // are 16-bit per epoch, committees at most 4096 seats).
             if c.slot_seconds == 0 || !(2..=65_535).contains(&c.epoch_slots) {
                 return Err(GenesisError::SlotTiming);
             }
             if !(1..=4096).contains(&c.committee_size) {
                 return Err(GenesisError::CommitteeTooSmall(c.committee_size));
+            }
+            if c.pow.block_seconds == 0 || c.pow.half_life_seconds == 0 {
+                return Err(GenesisError::Pow);
+            }
+            if !(1..=POS_STREAK_EPOCHS).contains(&c.pos_thresholds().2) {
+                return Err(GenesisError::Streak);
             }
         } else {
             if c.slot_seconds != SLOT_SECONDS || c.epoch_slots != EPOCH_SLOTS {
@@ -243,9 +277,22 @@ impl Genesis {
             if c.committee_size < MIN_COMMITTEE_SIZE || c.committee_size > 4096 {
                 return Err(GenesisError::CommitteeTooSmall(c.committee_size));
             }
-            if c.bootstrap_exit_min_stakers.is_some() || c.bootstrap_exit_min_stake_bolt.is_some() {
+            if c.pos_min_stakers.is_some()
+                || c.pos_min_stake_bolt.is_some()
+                || c.pos_streak_epochs.is_some()
+                || !self.dev_validators.is_empty()
+            {
                 return Err(GenesisError::DevOnly);
             }
+            if c.pow.algorithm != PowAlgorithm::RandomBolt
+                || c.pow.block_seconds != POW_BLOCK_SECONDS
+                || c.pow.half_life_seconds != POW_HALF_LIFE_SECONDS
+            {
+                return Err(GenesisError::Pow);
+            }
+        }
+        if c.pow.initial_difficulty.is_zero() {
+            return Err(GenesisError::Difficulty);
         }
         if c.gas_limit < GAS_LIMIT_RANGE.0 || c.gas_limit > GAS_LIMIT_RANGE.1 {
             return Err(GenesisError::GasLimit(c.gas_limit));
@@ -257,48 +304,17 @@ impl Genesis {
             return Err(GenesisError::ExtraData(self.extra_data.len()));
         }
 
-        if self.bootstrap_validators.len() < MIN_BOOTSTRAP_VALIDATORS {
-            return Err(GenesisError::TooFewValidators(self.bootstrap_validators.len()));
-        }
         let mut keys = BTreeSet::new();
-        for v in &self.bootstrap_validators {
+        for v in &self.dev_validators {
             if !crate::bls::is_valid_public_key(&v.bls_pubkey) || !keys.insert(v.bls_pubkey) {
                 return Err(GenesisError::BadValidatorKey(v.bls_pubkey));
             }
             if !crate::bls::verify_possession(&v.bls_pubkey, &v.proof_of_possession) {
                 return Err(GenesisError::BadPossession(v.bls_pubkey));
             }
-            match &v.binding_signature {
-                Some(sig)
-                    if !crate::bls::verify_binding(
-                        c.chain_id,
-                        &v.bls_pubkey,
-                        &v.fee_recipient,
-                        sig,
-                    ) =>
-                {
-                    return Err(GenesisError::BadBinding(v.bls_pubkey));
-                }
-                Some(_) => {}
-                None if !self.dev => return Err(GenesisError::MissingBinding(v.bls_pubkey)),
-                None => {}
+            if (v.stake_bolt as u128) * WEI_PER_BOLT < MIN_STAKE_WEI {
+                return Err(GenesisError::ValidatorStake);
             }
-        }
-
-        let g = &self.governance;
-        let owners: BTreeSet<_> = g.owners.iter().collect();
-        if owners.len() != g.owners.len() || owners.iter().any(|o| o.is_zero()) {
-            return Err(GenesisError::BadOwners);
-        }
-        let n = g.owners.len();
-        if n == 0 || (g.threshold as usize) * 2 <= n || g.threshold as usize > n {
-            return Err(GenesisError::Threshold { threshold: g.threshold, owners: n });
-        }
-        if g.upgrade_delay_seconds < (UNBONDING_EPOCHS + 2) * DAY {
-            return Err(GenesisError::UpgradeDelay);
-        }
-        if g.param_delay_seconds < 2 * DAY || g.param_delay_seconds > g.upgrade_delay_seconds {
-            return Err(GenesisError::ParamDelay);
         }
 
         for (addr, acc) in &self.alloc {
@@ -314,6 +330,11 @@ impl Genesis {
         Ok(())
     }
 
+    /// Whether the chain starts with mined blocks (no genesis validators).
+    pub fn starts_with_pow(&self) -> bool {
+        self.dev_validators.is_empty()
+    }
+
     /// `alloc` plus the protocol predeploys every Osaka chain needs (EIP-4788, EIP-2935).
     pub fn effective_alloc(&self) -> BTreeMap<Address, GenesisAccount> {
         let mut all = self.alloc.clone();
@@ -321,13 +342,18 @@ impl Genesis {
         all
     }
 
-    /// Initial randomness seed: keccak of the concatenated bootstrap BLS keys, in genesis order.
+    /// Initial randomness seed: keccak of the chain id, timestamp and extra data (nobody can
+    /// choose it after the genesis file is published).
     pub fn initial_seed(&self) -> B256 {
-        let mut buf = Vec::with_capacity(48 * self.bootstrap_validators.len());
-        for v in &self.bootstrap_validators {
-            buf.extend_from_slice(v.bls_pubkey.as_slice());
-        }
-        keccak256(buf)
+        keccak256(
+            [
+                b"boltchain/genesis-seed".as_slice(),
+                &self.config.chain_id.to_be_bytes(),
+                &self.timestamp.to_be_bytes(),
+                &self.extra_data,
+            ]
+            .concat(),
+        )
     }
 
     /// The genesis block header for a given state root, with every Osaka-era field populated. The
@@ -392,63 +418,59 @@ mod tests {
             config: ChainConfig::default(),
             timestamp: 1_800_000_000,
             extra_data: Bytes::from_static(b"Boltchain"),
-            bootstrap_validators: (0..7u32).map(|i| dev_validator(i, CHAIN_ID)).collect(),
-            governance: Governance {
-                owners: (1..=9u8).map(|i| Address::repeat_byte(0x10 + i)).collect(),
-                threshold: 5,
-                upgrade_delay_seconds: 16 * DAY,
-                param_delay_seconds: 2 * DAY,
-            },
+            dev_validators: vec![],
             alloc: BTreeMap::new(),
         }
     }
 
-    fn dev_validator(i: u32, chain_id: u64) -> BootstrapValidator {
+    fn dev_validator(i: u32) -> DevValidator {
         let k = crate::bls::dev_key(i);
-        let pk = k.public_key();
-        let (fee_recipient, sig) =
-            crate::bls::sign_binding(&crate::bls::dev_eth_key(i), chain_id, &pk).unwrap();
-        BootstrapValidator {
+        DevValidator {
             name: format!("v{i}"),
-            bls_pubkey: pk,
+            bls_pubkey: k.public_key(),
             proof_of_possession: k.proof_of_possession(),
-            fee_recipient,
-            binding_signature: Some(sig),
+            owner: Address::repeat_byte(i as u8 + 1),
+            fee_recipient: Address::repeat_byte(i as u8 + 1),
+            stake_bolt: 1_000,
         }
     }
 
-    #[test]
-    fn validator_keys_are_checked() {
+    fn dev() -> Genesis {
         let mut g = sample();
-        g.bootstrap_validators[2].proof_of_possession =
-            g.bootstrap_validators[3].proof_of_possession;
-        assert!(matches!(g.validate(), Err(GenesisError::BadPossession(_))));
-
-        let mut g = sample();
-        g.bootstrap_validators[2].binding_signature =
-            g.bootstrap_validators[3].binding_signature.clone();
-        assert!(matches!(g.validate(), Err(GenesisError::BadBinding(_))));
-
-        let mut g = sample();
-        g.bootstrap_validators[2].binding_signature = None;
-        assert!(matches!(g.validate(), Err(GenesisError::MissingBinding(_))));
-        // Dev chains may omit bindings.
         g.dev = true;
         g.config.chain_id = 1337;
-        for v in &mut g.bootstrap_validators {
-            v.binding_signature = None;
-        }
-        g.validate().unwrap();
+        g
+    }
 
+    #[test]
+    fn genesis_validators_are_dev_only_and_checked() {
         let mut g = sample();
-        g.bootstrap_validators[0].bls_pubkey = BlsPublicKey::repeat_byte(1);
+        g.dev_validators = vec![dev_validator(0)];
+        assert_eq!(g.validate(), Err(GenesisError::DevOnly));
+
+        let mut g = dev();
+        g.dev_validators = (0..4).map(dev_validator).collect();
+        g.validate().unwrap();
+        assert!(!g.starts_with_pow());
+
+        g.dev_validators[2].proof_of_possession = g.dev_validators[3].proof_of_possession;
+        assert!(matches!(g.validate(), Err(GenesisError::BadPossession(_))));
+
+        let mut g = dev();
+        g.dev_validators = vec![dev_validator(0), dev_validator(0)];
         assert!(matches!(g.validate(), Err(GenesisError::BadValidatorKey(_))));
+
+        let mut g = dev();
+        g.dev_validators = vec![dev_validator(0)];
+        g.dev_validators[0].stake_bolt = 63;
+        assert_eq!(g.validate(), Err(GenesisError::ValidatorStake));
     }
 
     #[test]
     fn sample_is_valid_and_hash_is_stable() {
         let g = sample();
         g.validate().unwrap();
+        assert!(g.starts_with_pow());
         let root = B256::repeat_byte(1);
         assert_eq!(
             g.header_with_state_root(root).hash_slow(),
@@ -462,6 +484,11 @@ mod tests {
     #[test]
     fn json_roundtrip() {
         let g = sample();
+        let json = serde_json::to_string_pretty(&g).unwrap();
+        assert_eq!(Genesis::from_json(&json).unwrap(), g);
+        let mut g = dev();
+        g.dev_validators = vec![dev_validator(1)];
+        g.config.pow.algorithm = PowAlgorithm::Keccak;
         let json = serde_json::to_string_pretty(&g).unwrap();
         assert_eq!(Genesis::from_json(&json).unwrap(), g);
     }
@@ -484,12 +511,6 @@ mod tests {
         );
         assert_eq!(g.validate(), Err(GenesisError::DevChainId));
         g.config.chain_id = 1337;
-        // Bindings name the chain id, so the 8017 ones no longer verify...
-        assert!(matches!(g.validate(), Err(GenesisError::BadBinding(_))));
-        // ...and dev chains may simply omit them.
-        for v in &mut g.bootstrap_validators {
-            v.binding_signature = None;
-        }
         g.validate().unwrap();
     }
 
@@ -504,59 +525,40 @@ mod tests {
         assert!(matches!(g.validate(), Err(GenesisError::CommitteeTooSmall(511))));
 
         let mut g = sample();
-        g.bootstrap_validators.pop();
-        assert!(matches!(g.validate(), Err(GenesisError::TooFewValidators(6))));
+        g.config.pos_min_stakers = Some(1);
+        assert_eq!(g.validate(), Err(GenesisError::DevOnly));
 
         let mut g = sample();
-        g.bootstrap_validators[1].bls_pubkey = g.bootstrap_validators[0].bls_pubkey;
-        assert!(matches!(g.validate(), Err(GenesisError::BadValidatorKey(_))));
+        g.config.pow.algorithm = PowAlgorithm::Keccak;
+        assert_eq!(g.validate(), Err(GenesisError::Pow));
 
         let mut g = sample();
-        g.governance.threshold = 4;
-        assert!(matches!(g.validate(), Err(GenesisError::Threshold { .. })));
+        g.config.pow.block_seconds = 6;
+        assert_eq!(g.validate(), Err(GenesisError::Pow));
 
         let mut g = sample();
-        g.governance.upgrade_delay_seconds = 14 * DAY;
-        assert_eq!(g.validate(), Err(GenesisError::UpgradeDelay));
+        g.config.pow.initial_difficulty = U256::ZERO;
+        assert_eq!(g.validate(), Err(GenesisError::Difficulty));
+
+        let mut g = dev();
+        g.config.pos_streak_epochs = Some(15);
+        assert_eq!(g.validate(), Err(GenesisError::Streak));
 
         let mut g = sample();
         g.alloc.insert(BEACON_ROOTS_ADDRESS, GenesisAccount::default());
         assert_eq!(g.validate(), Err(GenesisError::ReservedAddress(BEACON_ROOTS_ADDRESS)));
     }
 
-    /// Header layout pinned against an independent Python implementation (pyrlp), for the M0
-    /// state root (before system contracts; py_ecc and eth_account checked the PoPs and
-    /// bindings). The full genesis hash, which now includes the system contracts, is pinned in
-    /// `bolt-system`.
+    /// The mainnet template is complete except for the launch timestamp: no validators, no
+    /// multisig, no allocation.
     #[test]
-    fn devnet_genesis_header_is_pinned() {
-        let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
-        let expect = |s: &str| s.parse::<B256>().unwrap();
-        let root = expect("0x9f42bd8694bb51cea140f07dae2ee2a6a9af552101474651939d3ecdcc895863");
-        assert_eq!(
-            g.header_with_state_root(root).hash_slow(),
-            expect("0xbf1c712896002f51051519f4df32e94cd9294a38036479587ecce630aff32275")
-        );
-    }
-
-    /// The mainnet template carries the real validator and multisig addresses but no BLS keys
-    /// yet: it must fail validation on the missing keys and pass once they are filled in.
-    #[test]
-    fn mainnet_template_only_lacks_bls_keys() {
-        let mut g: Genesis =
+    fn mainnet_template_is_valid() {
+        let g: Genesis =
             serde_json::from_str(include_str!("../../../genesis/mainnet.template.json")).unwrap();
-        assert!(matches!(g.validate(), Err(GenesisError::BadValidatorKey(k)) if k.is_zero()));
-        for (i, v) in g.bootstrap_validators.iter_mut().enumerate() {
-            let k = crate::bls::dev_key(100 + i as u32);
-            v.bls_pubkey = k.public_key();
-            v.proof_of_possession = k.proof_of_possession();
-        }
-        // With keys in place, the only thing still missing is each operator's binding signature,
-        // which only the holders of the CAFECA fee-recipient addresses can produce.
-        assert!(matches!(g.validate(), Err(GenesisError::MissingBinding(_))));
-        assert_eq!(g.governance.owners.len(), 9);
-        assert_eq!(g.governance.threshold, 5);
-        assert_eq!(g.bootstrap_validators.len(), 7);
+        g.validate().unwrap();
+        assert!(g.starts_with_pow());
+        assert!(g.alloc.is_empty());
+        assert_eq!(g.config, ChainConfig::default());
     }
 
     #[test]

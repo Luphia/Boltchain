@@ -1,4 +1,5 @@
-//! M3 acceptance: seven validators (the dev genesis set) reach consensus over libp2p on localhost.
+//! M3 acceptance: seven validators (staked in the dev genesis) reach consensus over libp2p on
+//! localhost.
 //! Two of them are stopped; the remaining five (> 2/3) keep finalizing blocks. A follower that is
 //! not a validator accepts blocks only with a valid finality proof and ends on the same head.
 
@@ -25,6 +26,8 @@ async fn start_net(
             listen: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
             bootnodes: boot,
             producer: None,
+            fork_id: chain.fork_id().unwrap().to_string(),
+            fork_check: None,
         },
         Arc::new(ChainBlocks(chain)),
     )
@@ -71,7 +74,7 @@ async fn wait_for(nodes: &[&Node], height: u64, secs: u64) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn seven_validators_survive_two_failures() {
     let g = genesis();
-    assert_eq!(g.bootstrap_validators.len(), 7);
+    assert_eq!(g.dev_validators.len(), 7);
     let mut nodes: Vec<Node> = Vec::new();
     let mut boot: Vec<Multiaddr> = Vec::new();
     for i in 0..7u32 {
@@ -97,6 +100,7 @@ async fn seven_validators_survive_two_failures() {
                 base_timeout_ms: 2500,
                 state_dir: dir.path().join("consensus"),
             },
+            miner: None,
         };
         let task = tokio::spawn(async move {
             if let Err(e) = v.run(events).await {

@@ -19,14 +19,63 @@ async fn node(
     bootnodes: Vec<Multiaddr>,
     key: identity::Keypair,
 ) -> (NetHandle, mpsc::Receiver<NetEvent>, Arc<Mem>) {
+    node_with_fork(producer, bootnodes, key, "aabbccdd-0").await
+}
+
+async fn node_with_fork(
+    producer: Option<PeerId>,
+    bootnodes: Vec<Multiaddr>,
+    key: identity::Keypair,
+    fork: &str,
+) -> (NetHandle, mpsc::Receiver<NetEvent>, Arc<Mem>) {
     let mem = Arc::new(Mem::default());
+    let mine = fork.to_string();
+    let check = ForkCheck(Arc::new(move |r: &str| {
+        if r == mine { PeerRules::Compatible } else { PeerRules::Incompatible }
+    }));
     let (h, rx) = start(
-        NetConfig { chain_id: 1337, keypair: key, listen: local(), bootnodes, producer },
+        NetConfig {
+            chain_id: 1337,
+            keypair: key,
+            listen: local(),
+            bootnodes,
+            producer,
+            fork_id: fork.to_string(),
+            fork_check: Some(check),
+        },
         mem.clone(),
     )
     .await
     .unwrap();
     (h, rx, mem)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn peers_on_other_rules_are_dropped() {
+    let (a, _a_rx, _) =
+        node_with_fork(None, vec![], identity::Keypair::generate_ed25519(), "aabbccdd-0").await;
+    let a_addrs = addrs(&a).await;
+    let (same, _s_rx, _) =
+        node_with_fork(None, a_addrs.clone(), identity::Keypair::generate_ed25519(), "aabbccdd-0")
+            .await;
+    let (other, _o_rx, _) =
+        node_with_fork(None, a_addrs, identity::Keypair::generate_ed25519(), "11223344-0").await;
+    let mut ok = false;
+    for _ in 0..100 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let peers = a.peers().await;
+        if peers.contains(&same.peer_id()) && !peers.contains(&other.peer_id()) {
+            ok = true;
+            // stays disconnected
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if a.peers().await.contains(&other.peer_id()) {
+                ok = false;
+                continue;
+            }
+            break;
+        }
+    }
+    assert!(ok, "compatible peer kept, incompatible dropped");
 }
 
 async fn addrs(h: &NetHandle) -> Vec<Multiaddr> {

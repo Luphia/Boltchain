@@ -196,6 +196,79 @@ impl Tx<'_, RW> {
         Ok(())
     }
 
+    /// Undoes the head block: restores the state before it from the recorded history, removes
+    /// the block and moves the head to its parent. Returns the removed block and the restored
+    /// state root (which must equal the parent's). Only the last [`HISTORY_BLOCKS`] blocks can be
+    /// undone.
+    pub fn unwind_head(&self) -> Result<(crate::StoredBlock, B256)> {
+        let number = self.head()?.ok_or(StoreError::Corrupt("unwind: empty chain"))?;
+        if number == 0 {
+            return Err(StoreError::Corrupt("unwind: cannot undo genesis"));
+        }
+        let root = self.unwind_state(number)?;
+        let block = self.remove_head_block(number)?;
+        Ok((block, root))
+    }
+
+    /// Applies the history recorded for block `number` in reverse and deletes it.
+    fn unwind_state(&self, number: u64) -> Result<B256> {
+        let n = num_key(number);
+        let tbl = self.table(t::HIST_KEYS)?;
+        let mut cursor = self.txn.cursor(&tbl)?;
+        let mut keys = Vec::new();
+        let mut item = cursor.set_range::<Vec<u8>, ()>(&n)?;
+        while let Some((k, ())) = item {
+            if !k.starts_with(&n) {
+                break;
+            }
+            keys.push(k);
+            item = cursor.next::<Vec<u8>, ()>()?;
+        }
+        drop(cursor);
+        if keys.is_empty() && !self.history_covers(number)? {
+            return Err(StoreError::Corrupt("unwind: history pruned"));
+        }
+        let mut changes = StateChangeset::default();
+        let mut storage: BTreeMap<Address, Vec<(U256, U256)>> = BTreeMap::new();
+        for k in &keys {
+            let entry = &k[9..];
+            let hist_key = [entry, &n[..]].concat();
+            if k[8] == 0 {
+                let addr = Address::from_slice(entry);
+                let raw = self
+                    .get_raw(t::ACC_HIST, &hist_key)?
+                    .ok_or(StoreError::Corrupt(t::ACC_HIST))?;
+                let prior =
+                    crate::db::decode_hist_info(&raw).ok_or(StoreError::Corrupt(t::ACC_HIST))?;
+                let info = prior.map(|(nonce, balance, code_hash)| AccountInfo {
+                    nonce,
+                    balance,
+                    code_hash,
+                    ..Default::default()
+                });
+                changes.accounts.push((addr, info));
+                self.del_raw(t::ACC_HIST, &hist_key)?;
+            } else {
+                let addr = Address::from_slice(&entry[..20]);
+                let slot = U256::from_be_slice(&entry[20..52]);
+                let raw = self
+                    .get_raw(t::STO_HIST, &hist_key)?
+                    .ok_or(StoreError::Corrupt(t::STO_HIST))?;
+                storage.entry(addr).or_default().push((slot, U256::from_be_slice(&raw)));
+                self.del_raw(t::STO_HIST, &hist_key)?;
+            }
+            self.del_raw(t::HIST_KEYS, k)?;
+        }
+        for (address, slots) in storage {
+            changes.storage.push(revm::database::states::PlainStorageChangeset {
+                address,
+                wipe_storage: false,
+                storage: slots,
+            });
+        }
+        self.apply_changes(&changes)
+    }
+
     /// Drops history older than [`HISTORY_BLOCKS`] behind `head`.
     pub fn prune_history(&self, head: u64) -> Result<usize> {
         let Some(cutoff) = head.checked_sub(HISTORY_BLOCKS) else { return Ok(0) };

@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 bolt-primitives.workspace = true
 bolt-exec.workspace = true
+bolt-pow.workspace = true
 revm.workspace = true
 alloy-primitives.workspace = true
 alloy-sol-types.workspace = true

@@ -1,7 +1,7 @@
 //! Contract tests on an in-memory revm database built from the genesis state.
 
 use crate::{abi::*, addresses::*, artifacts, genesis_alloc};
-use alloy_primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, TxKind, U256};
 use alloy_sol_types::SolCall;
 use bolt_primitives::{
     Genesis,
@@ -134,17 +134,6 @@ impl Evm {
         }
     }
 
-    /// Call as a contract account (e.g. the Safe executing a transaction), bypassing EIP-3607.
-    pub fn call_as<C: SolCall>(&mut self, caller: Address, to: Address, c: C) -> bool {
-        let block = self.block();
-        let mut evm = Context::mainnet()
-            .with_db(&mut self.db)
-            .with_cfg(bolt_exec::cfg_env(self.chain_id))
-            .with_block(block)
-            .build_mainnet();
-        evm.system_call_with_caller_commit(caller, to, c.abi_encode().into()).unwrap().is_success()
-    }
-
     pub fn deploy_at(&mut self, a: Address, runtime: &Bytes) {
         let c = Bytecode::new_raw(runtime.clone());
         self.db.insert_account_info(
@@ -228,53 +217,53 @@ fn solidity_bls_matches_blst() {
 
 #[test]
 fn genesis_deploys_system_contracts() {
+    // Dev chain with genesis validators: PoS from the start.
     let g = dev_genesis();
     let mut evm = Evm::from_genesis(&g);
-    // Safe
-    let owners = evm.view(SAFE, ISafe::getOwnersCall {});
-    assert_eq!(owners, g.governance.owners);
-    assert_eq!(evm.view(SAFE, ISafe::getThresholdCall {}), U256::from(g.governance.threshold));
-    // Timelocks
-    assert_eq!(
-        evm.view(UPGRADE_TIMELOCK, ITimelock::getMinDelayCall {}),
-        U256::from(g.governance.upgrade_delay_seconds)
-    );
-    assert_eq!(
-        evm.view(PARAM_TIMELOCK, ITimelock::getMinDelayCall {}),
-        U256::from(g.governance.param_delay_seconds)
-    );
-    let proposer = keccak256("PROPOSER_ROLE");
-    assert!(evm.view(UPGRADE_TIMELOCK, ITimelock::hasRoleCall { role: proposer, account: SAFE }));
-    // Bootstrap committee for epochs 0 and 1
-    for e in 0..2 {
-        let c = evm.view(CONSENSUS, IConsensusRegistry::committeeCall { epoch: e });
-        assert_eq!(c.ids, (1..=g.bootstrap_validators.len() as u32).collect::<Vec<_>>());
-    }
+    let n = g.dev_validators.len() as u32;
+    let c = evm.view(CONSENSUS, IConsensusRegistry::committeeCall { epoch: 0 });
+    assert_eq!(c.ids, (1..=n).collect::<Vec<_>>());
+    let p = evm.view(CONSENSUS, IConsensusRegistry::phaseCall {});
+    assert!(p.posScheduled);
+    assert_eq!(p.posEpoch, 0);
     let keys = evm.view(STAKING, IStakingManager::keysOfCall { ids: vec![1, 2] });
-    assert_eq!(&keys.pubkeys[..48], g.bootstrap_validators[0].bls_pubkey.as_slice());
-    assert_eq!(keys.recipients[1], g.bootstrap_validators[1].fee_recipient);
-    // Params and supply
-    let p = evm.view(PARAMS, IParamRegistry::paramsCall {});
-    assert_eq!(p.gasLimit, g.config.gas_limit);
-    assert_eq!(p.committeeSize, g.config.committee_size);
-    // Locked bootstrap rewards weigh at most an average staker at the exit threshold.
-    let (stakers, stake) = g.config.bootstrap_exit();
+    assert_eq!(&keys.pubkeys[..48], g.dev_validators[0].bls_pubkey.as_slice());
+    assert_eq!(keys.recipients[1], g.dev_validators[1].fee_recipient);
+    let staked: U256 = g.dev_validators.iter().map(|v| bolt(v.stake_bolt)).sum();
+    assert_eq!(evm.view(STAKING, IStakingManager::totalActiveStakeCall {}), staked);
+    assert_eq!(evm.balance(STAKING), staked);
+    // Genesis stake counts as matured.
     assert_eq!(
-        U256::from(evm.view(PARAMS, IParamRegistry::lockedWeightCapCall {})),
-        bolt(stake) / U256::from(stakers)
+        evm.view(STAKING, IStakingManager::maturedStakeCall { id: 1, minAge: 14 }),
+        bolt(g.dev_validators[0].stake_bolt)
     );
     let funded: U256 = g.alloc.values().map(|a| a.balance).sum();
-    assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), funded);
+    assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), funded + staked);
     // Genesis-only functions are closed afterwards.
     assert!(!evm.try_call(
         SYSTEM,
         STAKING,
         U256::ZERO,
-        IStakingManager::registerBootstrapCall {
+        IStakingManager::registerGenesisCall {
             pubkey: bytes(&[0; 48]),
-            feeRecipient: Address::ZERO
+            owner: Address::ZERO,
+            feeRecipient: Address::ZERO,
+            stake: U256::ZERO,
         }
     ));
+
+    // Public genesis: nobody is a validator, the chain is mined, nothing is allocated.
+    let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
+    let mut evm = Evm::from_genesis(&g);
+    let p = evm.view(CONSENSUS, IConsensusRegistry::phaseCall {});
+    assert!(!p.posScheduled);
+    assert!(evm.view(CONSENSUS, IConsensusRegistry::committeeCall { epoch: 0 }).ids.is_empty());
+    assert_eq!(evm.view(STAKING, IStakingManager::countCall {}), 0);
+    assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), U256::ZERO);
+    // Only the system contracts and the two Osaka predeploys exist.
+    let alloc = genesis_alloc(&g).unwrap();
+    assert_eq!(alloc.len(), 6, "{:?}", alloc.keys().collect::<Vec<_>>());
+    assert!(alloc.values().all(|a| a.balance.is_zero()));
 }
 
 /// Registers validator `i` (dev key) from `owner` with `stake` wei.
@@ -297,6 +286,13 @@ pub(crate) fn register(evm: &mut Evm, i: u32, owner: Address, stake: U256) -> bo
 
 fn bolt(n: u64) -> U256 {
     U256::from(n) * U256::from(10u64).pow(U256::from(18))
+}
+
+fn begin_epoch(evm: &mut Evm, epoch: u64) {
+    evm.system(
+        CONSENSUS,
+        IConsensusRegistry::beginEpochCall { epoch, thresholdMet: false, streakRequired: 14 },
+    );
 }
 
 #[test]
@@ -323,13 +319,22 @@ fn staking_register_exit_withdraw() {
         }
     ));
     let id = evm.view(STAKING, IStakingManager::countCall {});
-    assert_eq!(id, 8, "7 bootstrap validators + 1");
-    let snap = evm.view(STAKING, IStakingManager::snapshotCall {});
-    assert_eq!(snap.ids, vec![8]);
-    assert_eq!(snap.stakes, vec![bolt(64)]);
-    // top-up by anyone, exit by owner only
+    assert_eq!(id, 8, "7 genesis validators + 1");
+    let snap = evm.view(STAKING, IStakingManager::snapshotCall { minAge: 0 });
+    assert_eq!(snap.ids.len(), 8);
+    assert!(snap.ids.contains(&id));
+    // Not matured yet: left out of a draw that requires 14 epochs of age.
+    let snap = evm.view(STAKING, IStakingManager::snapshotCall { minAge: 14 });
+    assert!(!snap.ids.contains(&id));
+    begin_epoch(&mut evm, 13);
+    assert_eq!(evm.view(STAKING, IStakingManager::maturedStakeCall { id, minAge: 14 }), U256::ZERO);
+    begin_epoch(&mut evm, 14);
+    assert_eq!(evm.view(STAKING, IStakingManager::maturedStakeCall { id, minAge: 14 }), bolt(64));
+    // top-up by anyone (restarts the clock for the new deposit), exit by owner only
     evm.fund(Address::repeat_byte(0xb0), bolt(10));
     evm.call(Address::repeat_byte(0xb0), STAKING, bolt(1), IStakingManager::depositCall { id });
+    assert_eq!(evm.view(STAKING, IStakingManager::maturedStakeCall { id, minAge: 14 }), bolt(64));
+    assert_eq!(evm.view(STAKING, IStakingManager::maturedStakeCall { id, minAge: 0 }), bolt(65));
     assert!(!evm.try_call(
         Address::repeat_byte(0xb0),
         STAKING,
@@ -337,42 +342,15 @@ fn staking_register_exit_withdraw() {
         IStakingManager::requestExitCall { id }
     ));
     evm.call(alice, STAKING, U256::ZERO, IStakingManager::requestExitCall { id });
-    assert!(evm.view(STAKING, IStakingManager::snapshotCall {}).ids.is_empty());
+    assert!(!evm.view(STAKING, IStakingManager::snapshotCall { minAge: 0 }).ids.contains(&id));
     // bonded for 1 + 14 epochs
     assert!(!evm.try_call(alice, STAKING, U256::ZERO, IStakingManager::withdrawCall { id }));
-    evm.system(
-        CONSENSUS,
-        IConsensusRegistry::beginEpochCall {
-            epoch: 14,
-            memberIds: vec![1],
-            weights: vec![1],
-            seats: bytes(&[0, 0]),
-            endBootstrap: false,
-        },
-    );
+    begin_epoch(&mut evm, 28);
     assert!(!evm.try_call(alice, STAKING, U256::ZERO, IStakingManager::withdrawCall { id }));
-    evm.system(
-        CONSENSUS,
-        IConsensusRegistry::beginEpochCall {
-            epoch: 15,
-            memberIds: vec![1],
-            weights: vec![1],
-            seats: bytes(&[0, 0]),
-            endBootstrap: false,
-        },
-    );
+    begin_epoch(&mut evm, 29);
     let before = evm.balance(alice);
     evm.call(alice, STAKING, U256::ZERO, IStakingManager::withdrawCall { id });
     assert_eq!(evm.balance(alice) - before, bolt(65));
-    // pause: only the Safe
-    assert!(!evm.try_call(
-        alice,
-        STAKING,
-        U256::ZERO,
-        IStakingManager::setDepositsPausedCall { paused: true }
-    ));
-    assert!(evm.call_as(SAFE, STAKING, IStakingManager::setDepositsPausedCall { paused: true }));
-    assert!(!register(&mut evm, 23, alice, bolt(64)));
 }
 
 /// Consensus message layouts (duplicated here so the contract test does not depend on the
@@ -450,153 +428,110 @@ fn double_vote_is_slashed() {
     let v = evm.view(STAKING, IStakingManager::validatorCall { id });
     assert_eq!(v.stake, bolt(950));
     assert!(matches!(v.status, IStakingManager::Status::Slashed));
-    assert!(!evm.view(STAKING, IStakingManager::snapshotCall {}).ids.contains(&id));
+    assert!(!evm.view(STAKING, IStakingManager::snapshotCall { minAge: 0 }).ids.contains(&id));
     // replay rejected
     assert!(!evm.tx(reporter, CONSENSUS, U256::ZERO, data.to_vec()).0);
-    // correlated: the next offender pays more (5% + 3 x 50/9000)
+    // correlated: the next offender pays more (5% + 3 x 50 / (9 x 1000 + 7 x 1000 genesis stake))
     let bps = evm.view(CONSENSUS, IConsensusRegistry::slashBpsCall {});
-    assert_eq!(bps, U256::from(500 + 3 * 50 * 10_000 / 9_000));
-}
-
-alloy_sol_types::sol! {
-    function execute(address target, uint256 value, bytes payload, bytes32 predecessor, bytes32 salt) external payable;
+    assert_eq!(bps, U256::from(500 + 3 * 50 * 10_000 / 16_000));
 }
 
 #[test]
-fn upgrades_go_through_the_16_day_timelock() {
-    use alloy_sol_types::SolValue;
+fn no_governance_only_the_node_can_call_admin_functions() {
     let g = dev_genesis();
     let mut evm = Evm::from_genesis(&g);
-    let new_impl = Address::repeat_byte(0x77);
-    // a fresh HistoryRegistry implementation (UUPS, immutable __self = its own address)
-    evm.deploy_at(new_impl, &artifacts::history_registry().deployed);
-    let _ = new_impl;
-    // Deploying via init code at the address would set __self correctly; runtime code copied from
-    // HISTORY_IMPL has __self = HISTORY_IMPL, so use the genesis builder path instead:
-    let fresh = Address::repeat_byte(0x78);
-    let init = Bytecode::new_raw(artifacts::history_registry().bytecode.clone());
-    evm.db.insert_account_info(
-        fresh,
-        AccountInfo {
-            nonce: 1,
-            code_hash: init.hash_slow(),
-            code: Some(init),
-            ..Default::default()
+    let anyone = Address::repeat_byte(0x99);
+    evm.fund(anyone, bolt(1));
+    // Former governance addresses are empty; ParamRegistry's address stays unused.
+    for a in [
+        "0xB0170000000000000000000000000000000000A0",
+        "0xB0170000000000000000000000000000000000A1",
+        "0xB0170000000000000000000000000000000000A2",
+        "0xB017000000000000000000000000000000000004",
+    ] {
+        let a: Address = a.parse().unwrap();
+        assert!(evm.db.load_account(a).unwrap().info.code.as_ref().is_none_or(|c| c.is_empty()));
+    }
+    // No upgrade entry point.
+    alloy_sol_types::sol! {
+        function upgradeToAndCall(address newImplementation, bytes data) external payable;
+    }
+    for c in [STAKING, CONSENSUS, REWARDS, HISTORY] {
+        let call = upgradeToAndCallCall { newImplementation: anyone, data: Bytes::new() };
+        assert!(!evm.try_call(anyone, c, U256::ZERO, call));
+    }
+    // System-only functions.
+    assert!(!evm.try_call(
+        anyone,
+        CONSENSUS,
+        U256::ZERO,
+        IConsensusRegistry::beginEpochCall { epoch: 1, thresholdMet: true, streakRequired: 1 }
+    ));
+    assert!(!evm.try_call(
+        anyone,
+        CONSENSUS,
+        U256::ZERO,
+        IConsensusRegistry::setCommitteeCall {
+            epoch: 3,
+            memberIds: vec![1],
+            weights: vec![1],
+            seats: bytes(&[0, 0]),
+        }
+    ));
+    assert!(!evm.try_call(
+        anyone,
+        REWARDS,
+        U256::ZERO,
+        IRewardDistributor::onBlockCall {
+            burned: U256::ZERO,
+            minted: bolt(1_000_000),
+            certEpoch: 0,
+            bitmap: Bytes::new(),
+        }
+    ));
+    assert!(!evm.try_call(
+        anyone,
+        REWARDS,
+        U256::ZERO,
+        IRewardDistributor::settleCall { epoch: 0, emission: bolt(1) }
+    ));
+}
+
+#[test]
+fn pos_is_scheduled_after_the_threshold_streak() {
+    let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
+    let mut evm = Evm::from_genesis(&g);
+    let begin = |evm: &mut Evm, epoch: u64, met: bool| {
+        evm.system(
+            CONSENSUS,
+            IConsensusRegistry::beginEpochCall { epoch, thresholdMet: met, streakRequired: 3 },
+        )
+    };
+    assert!(!begin(&mut evm, 1, true).scheduled);
+    assert!(!begin(&mut evm, 2, true).scheduled);
+    // A miss restarts the count.
+    assert!(!begin(&mut evm, 3, false).scheduled);
+    assert_eq!(evm.view(CONSENSUS, IConsensusRegistry::phaseCall {}).thresholdStreak, 0);
+    assert!(!begin(&mut evm, 4, true).scheduled);
+    assert!(!begin(&mut evm, 5, true).scheduled);
+    let r = begin(&mut evm, 6, true);
+    assert!(r.scheduled);
+    assert_eq!(r.firstPosEpoch, 8, "two epochs later");
+    // Final: later misses change nothing.
+    let r = begin(&mut evm, 7, false);
+    assert!(r.scheduled);
+    assert_eq!(r.firstPosEpoch, 8);
+    // Mined blocks add their reward to the supply.
+    evm.system(
+        REWARDS,
+        IRewardDistributor::onBlockCall {
+            burned: U256::ZERO,
+            minted: bolt(5),
+            certEpoch: 0,
+            bitmap: Bytes::new(),
         },
     );
-    let runtime = {
-        let block = evm.block();
-        let mut e = Context::mainnet()
-            .with_db(&mut evm.db)
-            .with_cfg(bolt_exec::cfg_env(evm.chain_id))
-            .with_block(block)
-            .build_mainnet();
-        match e.system_call_commit(fresh, Bytes::new()).unwrap() {
-            ExecutionResult::Success { output, .. } => output.into_data(),
-            o => panic!("{o:?}"),
-        }
-    };
-    evm.deploy_at(fresh, &runtime);
-
-    let upgrade =
-        IUpgradeable::upgradeToAndCallCall { newImplementation: fresh, data: Bytes::new() }
-            .abi_encode();
-    // Not even the Safe can upgrade directly.
-    assert!(!evm.call_as(
-        SAFE,
-        HISTORY,
-        IUpgradeable::upgradeToAndCallCall { newImplementation: fresh, data: Bytes::new() }
-    ));
-    // Schedule through the upgrade timelock (only the Safe may propose).
-    let delay = U256::from(g.governance.upgrade_delay_seconds);
-    let schedule = ITimelock::scheduleCall {
-        target: HISTORY,
-        value: U256::ZERO,
-        data: upgrade.clone().into(),
-        predecessor: B256::ZERO,
-        salt: B256::ZERO,
-        delay,
-    };
-    assert!(!evm.call_as(Address::repeat_byte(5), UPGRADE_TIMELOCK, schedule.clone()));
-    assert!(evm.call_as(SAFE, UPGRADE_TIMELOCK, schedule));
-    // shorter than the minimum delay is refused
-    let quick = ITimelock::scheduleCall {
-        target: HISTORY,
-        value: U256::ZERO,
-        data: upgrade.clone().into(),
-        predecessor: B256::ZERO,
-        salt: B256::repeat_byte(1),
-        delay: U256::from(3600),
-    };
-    assert!(!evm.call_as(SAFE, UPGRADE_TIMELOCK, quick));
-    let execute = executeCall {
-        target: HISTORY,
-        value: U256::ZERO,
-        payload: upgrade.into(),
-        predecessor: B256::ZERO,
-        salt: B256::ZERO,
-    };
-    let anyone = Address::repeat_byte(0x99);
-    evm.fund(anyone, U256::from(10u64).pow(U256::from(18)));
-    assert!(!evm.try_call(anyone, UPGRADE_TIMELOCK, U256::ZERO, execute.clone()), "too early");
-    evm.timestamp += g.governance.upgrade_delay_seconds;
-    assert!(
-        evm.try_call(anyone, UPGRADE_TIMELOCK, U256::ZERO, execute),
-        "after the delay anyone may execute"
-    );
-    let slot = U256::from_be_bytes(
-        alloy_primitives::b256!(
-            "0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc"
-        )
-        .0,
-    );
-    let imp = revm::DatabaseRef::storage_ref(&evm.db, HISTORY, slot).unwrap();
-    assert_eq!(Address::from_word(imp.into()), fresh);
-    let _ = (fresh,).abi_encode();
-
-    // Parameters: the 2-day timelock can move them within bounds only.
-    assert!(evm.call_as(PARAM_TIMELOCK, PARAMS, IParamRegistry::setGasLimitCall { v: 40_000_000 }));
-    assert!(!evm.call_as(
-        PARAM_TIMELOCK,
-        PARAMS,
-        IParamRegistry::setGasLimitCall { v: 70_000_000 }
-    ));
-    assert!(!evm.call_as(SAFE, PARAMS, IParamRegistry::setGasLimitCall { v: 40_000_000 }));
-    // committee size: 16-day timelock only, never below the genesis floor
-    let floor = g.config.committee_size.min(bolt_primitives::params::MIN_COMMITTEE_SIZE);
-    assert!(!evm.call_as(
-        PARAM_TIMELOCK,
-        PARAMS,
-        IParamRegistry::setCommitteeSizeCall { v: floor + 1 }
-    ));
-    assert!(!evm.call_as(
-        UPGRADE_TIMELOCK,
-        PARAMS,
-        IParamRegistry::setCommitteeSizeCall { v: floor - 1 }
-    ));
-    assert!(evm.call_as(
-        UPGRADE_TIMELOCK,
-        PARAMS,
-        IParamRegistry::setCommitteeSizeCall { v: floor + 1 }
-    ));
-    // Locked-reward weight cap: 16-day timelock only, never below the minimum stake.
-    let wei = 1_000_000_000_000_000_000u128;
-    assert!(!evm.call_as(
-        PARAM_TIMELOCK,
-        PARAMS,
-        IParamRegistry::setLockedWeightCapCall { v: 100 * wei }
-    ));
-    assert!(!evm.call_as(
-        UPGRADE_TIMELOCK,
-        PARAMS,
-        IParamRegistry::setLockedWeightCapCall { v: 63 * wei }
-    ));
-    assert!(evm.call_as(
-        UPGRADE_TIMELOCK,
-        PARAMS,
-        IParamRegistry::setLockedWeightCapCall { v: 100 * wei }
-    ));
-    assert_eq!(evm.view(PARAMS, IParamRegistry::lockedWeightCapCall {}), 100 * wei);
+    assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), bolt(5));
 }
 
 /// Genesis now includes the compiled system contracts: any change to them, to the deployment
@@ -607,7 +542,7 @@ fn devnet_genesis_hash_is_pinned() {
     let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&g).unwrap(),
-        "0x207c709035ea564bdf810bb59fecf81f5cbb2eb6a5ed9c5db4ef873e0f48ea0c"
+        "0x0e0704a9ae2132b04455e4640d0d9c535af8fadc958f2cd82ab6ae581d963552"
             .parse::<B256>()
             .unwrap()
     );

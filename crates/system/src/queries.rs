@@ -105,3 +105,12 @@ where
 {
     call(db, chain_id, REWARDS, IRewardDistributor::supplyCall {})
 }
+
+/// Consensus phase (PoW or PoS, ADR 0007).
+pub fn phase<D: DatabaseRef>(db: D, chain_id: u64) -> Result<crate::Phase, QueryError>
+where
+    D::Error: std::fmt::Debug,
+{
+    let p = call(db, chain_id, CONSENSUS, IConsensusRegistry::phaseCall {})?;
+    Ok(crate::Phase { pos_epoch: p.posScheduled.then_some(p.posEpoch), streak: p.thresholdStreak })
+}

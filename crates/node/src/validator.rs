@@ -10,6 +10,12 @@
 //! One node may hold several validator keys; every key on the committee signs through the same
 //! engine. When the epoch's last block is final the engine reports it with its proof; the node
 //! stores the proof (the next epoch's first block carries it) and starts the next epoch's engine.
+//!
+//! Mining phase (ADR 0007): until PoS starts the node follows the mined chain (and may mine
+//! itself). The first PoS epoch starts from the last mined block (the terminal block) as its
+//! anchor, like epoch 0 starts from genesis: its first block carries no certificate. If a heavier
+//! mined branch replaces the terminal block before the committee certified anything, the engine
+//! restarts on the new anchor without ever signing again in a round it already used.
 
 use crate::keys;
 use alloy_consensus::Header;
@@ -59,6 +65,25 @@ pub fn epoch_anchor(chain: &Chain, epoch: u64) -> Result<Option<BlockInfo>> {
         round: 0,
         height,
     }))
+}
+
+/// Whether `qc` is the anchor certificate of a chain start: genesis (epoch 0), or the terminal
+/// mined block for the first PoS epoch. The block after it carries no certificate.
+pub fn is_start_anchor(chain: &Chain, qc: &Qc<BlsScheme>) -> bool {
+    if qc.is_genesis() {
+        return true;
+    }
+    if !qc.is_anchor() {
+        return false;
+    }
+    let Ok(phase) = chain.phase() else { return false };
+    phase.pos_epoch == Some(qc.epoch) && phase.terminal_height(chain.rules()) == Some(qc.height)
+}
+
+/// Whether PoS runs from the block after the local head.
+pub fn pos_ready(chain: &Chain) -> Result<bool> {
+    let head = chain.head()?.number;
+    Ok(chain.phase()?.is_pos(chain.rules(), head + 1))
 }
 
 /// The committee of `epoch` from local state, if known yet.
@@ -171,6 +196,8 @@ pub struct Validator {
     pub keys: Vec<BlsSecretKey>,
     /// Options.
     pub cfg: ValidatorConfig,
+    /// Mine while the chain is in its mining phase.
+    pub miner: Option<crate::miner::MinerConfig>,
 }
 
 impl std::fmt::Debug for Validator {
@@ -193,7 +220,7 @@ impl Validator {
 
     /// The envelope certificate for a block whose parent is certified by `qc`.
     fn cert_bytes(&self, qc: &Qc<BlsScheme>) -> Option<Vec<u8>> {
-        if qc.is_genesis() {
+        if is_start_anchor(&self.chain, qc) {
             return Some(Vec::new());
         }
         if !qc.is_anchor() {
@@ -233,6 +260,21 @@ impl Validator {
             .ok()
             .and_then(|b| serde_json::from_slice::<Persisted<BlsScheme>>(&b).ok())
         {
+            // Saved for another terminal block (a mined reorganisation replaced it before
+            // anything was certified): start over on this anchor, above every used round.
+            Some(p)
+                if p.epoch == epoch
+                    && p.high_qc.is_anchor()
+                    && p.committed.height == anchor.height
+                    && p.committed.hash != anchor.hash =>
+            {
+                tracing::warn!(
+                    epoch,
+                    last_voted = p.last_voted,
+                    "anchor changed; restarting epoch"
+                );
+                Engine::reanchored(cfg, scheme, p.last_voted)
+            }
             Some(p) if p.epoch == epoch => {
                 tracing::info!(
                     epoch,
@@ -265,13 +307,17 @@ impl Validator {
     /// Runs until the network event stream ends.
     pub async fn run(self, mut events: mpsc::Receiver<NetEvent>) -> Result<()> {
         std::fs::create_dir_all(&self.cfg.state_dir)?;
-        let mut ctx = self.enter_epoch(self.current_epoch()?)?;
         let (itx, mut irx) = mpsc::unbounded_channel::<Internal>();
         let catch_up = self.spawn_catch_up(itx.clone());
         let mut sources: HashMap<B256, PeerId> = HashMap::new();
         let mut future: VecDeque<Message<BlsScheme>> = VecDeque::new();
+        if !self.mining_phase(&mut events, &mut irx, &catch_up, &mut future).await? {
+            return Ok(());
+        }
+        let mut ctx = self.enter_epoch(self.current_epoch()?)?;
         let mut seen: SeenVotes = HashMap::new();
         let mut actions = ctx.engine.start();
+        actions.extend(self.replay(&mut ctx, &mut future));
         loop {
             self.handle(&mut ctx, actions, &itx, &sources, &mut future).await;
             actions = tokio::select! {
@@ -322,7 +368,11 @@ impl Validator {
                 },
                 i = irx.recv() => match i {
                     None => break,
-                    Some(Internal::Imported) => self.catch_up_epochs(&mut ctx, &mut future),
+                    Some(Internal::Imported) => {
+                        let mut out = self.reanchor(&mut ctx, &mut future);
+                        out.extend(self.catch_up_epochs(&mut ctx, &mut future));
+                        out
+                    }
                     Some(Internal::Timer(e, r)) if e == ctx.epoch => ctx.engine.on_timeout(r),
                     Some(Internal::Validated(e, h, ok)) if e == ctx.epoch => ctx.engine.on_validated(h, ok),
                     Some(Internal::Built(b)) if b.epoch == ctx.epoch => {
@@ -335,6 +385,109 @@ impl Validator {
             };
         }
         Ok(())
+    }
+
+    /// Until PoS starts: follow (and optionally mine) the mined chain, keep transactions, buffer
+    /// early consensus messages. Returns `false` if the network stopped.
+    async fn mining_phase(
+        &self,
+        events: &mut mpsc::Receiver<NetEvent>,
+        irx: &mut mpsc::UnboundedReceiver<Internal>,
+        catch_up: &mpsc::Sender<(PeerId, Announce)>,
+        future: &mut VecDeque<Message<BlsScheme>>,
+    ) -> Result<bool> {
+        if pos_ready(&self.chain)? {
+            return Ok(true);
+        }
+        tracing::info!(head = self.chain.head()?.number, "mining phase: following mined blocks");
+        let miner = self.miner.clone().map(|cfg| {
+            tokio::spawn(crate::miner::run(
+                self.chain.clone(),
+                self.pool.clone(),
+                self.net.clone(),
+                cfg,
+            ))
+        });
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        let ready = loop {
+            if pos_ready(&self.chain)? {
+                break true;
+            }
+            tokio::select! {
+                ev = events.recv() => match ev {
+                    None => break false,
+                    Some(NetEvent::Consensus { data, .. }) => {
+                        if let Some(msg) = bolt_consensus::decode::<BlsScheme>(&data) {
+                            if future.len() >= 4096 {
+                                future.pop_front();
+                            }
+                            future.push_back(msg);
+                        }
+                    }
+                    Some(NetEvent::Announce { via, announce }) => {
+                        let _ = catch_up.try_send((via, announce));
+                    }
+                    Some(NetEvent::Tx { raw, reply }) => {
+                        let r = self.chain.store().reader().ok();
+                        let res = match &r {
+                            Some(r) => self.pool.add_raw(&raw, &HeadState(r)).map_err(|e| e.to_string()),
+                            None => Err("store unavailable".into()),
+                        };
+                        let _ = reply.send(res);
+                    }
+                    Some(NetEvent::Connected(_)) => {}
+                },
+                _ = irx.recv() => {
+                    if let Ok(r) = self.chain.store().reader() {
+                        self.pool.on_new_block(&HeadState(&r));
+                    }
+                }
+                _ = tick.tick() => {}
+            }
+        };
+        if let Some(m) = miner {
+            m.abort();
+        }
+        if ready {
+            let phase = self.chain.phase()?;
+            tracing::info!(
+                epoch = ?phase.pos_epoch,
+                terminal = ?phase.terminal_height(self.chain.rules()),
+                "PoS starts: the committee takes over from the last mined block"
+            );
+        }
+        Ok(ready)
+    }
+
+    /// First PoS epoch: if a mined reorganisation replaced the terminal block before anything
+    /// was certified, restart the engine on the new anchor (never reusing a round).
+    fn reanchor(
+        &self,
+        ctx: &mut EpochCtx,
+        future: &mut VecDeque<Message<BlsScheme>>,
+    ) -> Vec<Action<BlsScheme>> {
+        let Ok(Some(anchor)) = epoch_anchor(&self.chain, ctx.epoch) else { return vec![] };
+        let current = ctx.engine.config().anchor.clone();
+        if anchor.hash == current.hash
+            || ctx.engine.committed().height != current.height
+            || !ctx.engine.high_qc().is_anchor()
+        {
+            return vec![];
+        }
+        tracing::warn!(epoch = ctx.epoch, old = %current.hash, new = %anchor.hash, "terminal block replaced; restarting the epoch");
+        self.persist(&ctx.engine);
+        match self.enter_epoch(ctx.epoch) {
+            Ok(next) => {
+                *ctx = next;
+                let mut out = ctx.engine.start();
+                out.extend(self.replay(ctx, future));
+                out
+            }
+            Err(e) => {
+                tracing::warn!("cannot restart epoch {}: {e:#}", ctx.epoch);
+                vec![]
+            }
+        }
     }
 
     /// Worker importing announced final blocks (with proofs) one announcement at a time.
@@ -718,8 +871,11 @@ async fn validate(
     let env = Envelope::decode(&a.envelope)?;
     anyhow::ensure!(env.height == p.block.height, "envelope height");
     anyhow::ensure!(env.block_hash() == Some(p.block.hash), "envelope names a different block");
-    if p.qc.is_genesis() {
-        anyhow::ensure!(env.qc.is_empty(), "genesis child carries a certificate");
+    if is_start_anchor(chain, &p.qc) {
+        anyhow::ensure!(
+            env.qc.is_empty(),
+            "first block after genesis or the terminal block carries a certificate"
+        );
     } else if p.qc.is_anchor() {
         // First block of an epoch: the envelope must prove the anchor final.
         let f = Finality::new(chain.clone());
@@ -773,8 +929,9 @@ pub struct ValidatorArgs {
     /// Data directory.
     #[arg(long, default_value = "data/validator")]
     pub datadir: PathBuf,
-    /// BLS key file (`boltchain keys new` / `keys dev`); repeat for several validators.
-    #[arg(long, required = true)]
+    /// BLS key file (`boltchain keys new` / `keys dev`); repeat for several validators. Without
+    /// any, the node follows the chain (and mines with `--mine`) but does not validate.
+    #[arg(long)]
     pub key: Vec<PathBuf>,
     /// JSON-RPC listen address.
     #[arg(long, default_value = "127.0.0.1:8545")]
@@ -785,6 +942,9 @@ pub struct ValidatorArgs {
     /// Base round timeout in milliseconds (defaults to two slots).
     #[arg(long)]
     pub timeout_ms: Option<u64>,
+    /// Mining while the chain is in its mining phase.
+    #[command(flatten)]
+    pub mining: crate::miner::MiningArgs,
     /// P2P options.
     #[command(flatten)]
     pub p2p: crate::p2p::P2pArgs,
@@ -801,6 +961,9 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
         cfg.gas_limit,
         cfg.min_base_fee_wei,
     )));
+    if let Some(g) = args.mining.gas_target {
+        chain.set_gas_target(g);
+    }
     let (net, events) = args.p2p.start(&args.datadir, chain.clone(), None).await?;
     let ctx = bolt_rpc::RpcContext {
         chain: chain.clone(),
@@ -811,6 +974,7 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
     let (addr, handle) = bolt_rpc::start(args.rpc, ctx).await?;
     tracing::info!(%addr, keys = keys.len(), "JSON-RPC listening");
     let slot_ms = args.block_time.unwrap_or(cfg.slot_seconds) * 1000;
+    let miner = args.mining.config()?;
     let v = Validator {
         chain,
         pool,
@@ -821,6 +985,7 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
             base_timeout_ms: args.timeout_ms.unwrap_or(slot_ms * 2),
             state_dir: args.datadir.join("consensus"),
         },
+        miner,
     };
     let task = tokio::spawn(v.run(events));
     tokio::signal::ctrl_c().await?;

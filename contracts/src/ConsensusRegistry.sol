@@ -12,7 +12,8 @@ interface IStaking {
 
 /// @title Epochs, committees and equivocation evidence.
 /// @notice The node writes the committee of epoch e+1 at the first block of epoch e (see ADR 0006),
-/// so every committee is fixed one epoch ahead and readable from current state.
+/// so every committee is fixed one epoch ahead and readable from current state. It also tracks
+/// the PoW -> PoS switch (ADR 0007): no committees exist before PoS is scheduled.
 contract ConsensusRegistry is SystemContract {
     struct Committee {
         uint32[] members; // validator ids, in consensus index order
@@ -25,15 +26,21 @@ contract ConsensusRegistry is SystemContract {
     uint256 public constant BASE_SLASH_BPS = 500; // 5%
 
     uint64 public currentEpoch;
-    bool public bootstrapEnded;
-    uint64 public bootstrapEndEpoch;
+    /// Whether the switch to PoS is decided (phase C from `posEpoch` on, ADR 0007 §5).
+    bool public posScheduled;
+    /// First PoS epoch, once scheduled. Blocks of earlier epochs are mined (PoW).
+    uint64 public posEpoch;
+    /// Consecutive epoch starts at which the PoS thresholds were met.
+    uint64 public thresholdStreak;
     mapping(uint64 => Committee) internal committees;
     mapping(bytes32 => bool) public evidenceUsed;
     // Slashed amounts per epoch, in a ring of 16 (covers the 14-epoch correlation window).
     uint256[16] internal slashedRing;
     uint64[16] internal slashedRingEpoch;
 
-    event EpochStarted(uint64 indexed epoch, bytes32 nextCommitteeHash, bool bootstrapEnded);
+    event EpochStarted(uint64 indexed epoch, uint64 thresholdStreak);
+    event PosScheduled(uint64 indexed posEpoch);
+    event CommitteeSet(uint64 indexed epoch, bytes32 committeeHash);
     event Equivocation(uint32 indexed validator, uint64 epoch, uint64 round, uint256 slashed, address reporter);
 
     error BadEvidence();
@@ -46,33 +53,53 @@ contract ConsensusRegistry is SystemContract {
     uint256 private constant VOTE_LEN = 17 + 24 + 32;
     uint256 private constant PROPOSAL_LEN = 21 + 24 + 64;
 
-    /// Genesis: the committees of epochs 0 and 1 (the bootstrap validators).
+    /// Dev chains with genesis validators only: PoS from genesis, with the committee of epoch 0
+    /// (block 1 draws epoch 1's). A regular genesis leaves the registry empty (PoW until the
+    /// thresholds are met).
     function initialize(uint32[] calldata memberIds, uint16[] calldata weights, bytes calldata seats)
         external
         onlyGenesis
     {
+        posScheduled = true;
         _store(0, memberIds, weights, seats);
-        _store(1, memberIds, weights, seats);
     }
 
-    /// First block of epoch `epoch`: records it as current and stores the committee of `epoch + 1`.
-    function beginEpoch(
-        uint64 epoch,
-        uint32[] calldata memberIds,
-        uint16[] calldata weights,
-        bytes calldata seats,
-        bool endBootstrap
-    ) external onlySystem {
+    /// First block of epoch `epoch`. `thresholdMet`: whether stake met the PoS thresholds (T2)
+    /// in the parent state. After `streakRequired` consecutive epochs, PoS is scheduled to start two
+    /// epochs later, so its first committee can be drawn one epoch ahead like every other.
+    function beginEpoch(uint64 epoch, bool thresholdMet, uint64 streakRequired)
+        external
+        onlySystem
+        returns (bool scheduled, uint64 firstPosEpoch)
+    {
         currentEpoch = epoch;
-        if (endBootstrap && !bootstrapEnded) {
-            bootstrapEnded = true;
-            bootstrapEndEpoch = epoch + 1;
+        if (!posScheduled) {
+            thresholdStreak = thresholdMet ? thresholdStreak + 1 : 0;
+            if (thresholdStreak >= streakRequired) {
+                posScheduled = true;
+                posEpoch = epoch + 2;
+                emit PosScheduled(epoch + 2);
+            }
         }
-        _store(epoch + 1, memberIds, weights, seats);
         if (epoch + 1 >= KEEP_EPOCHS) {
             delete committees[epoch + 1 - KEEP_EPOCHS];
         }
-        emit EpochStarted(epoch, keccak256(abi.encode(memberIds, weights, seats)), bootstrapEnded);
+        emit EpochStarted(epoch, thresholdStreak);
+        return (posScheduled, posEpoch);
+    }
+
+    /// Stores the committee of `epoch` (drawn by the node at the start of `epoch - 1`).
+    function setCommittee(uint64 epoch, uint32[] calldata memberIds, uint16[] calldata weights, bytes calldata seats)
+        external
+        onlySystem
+    {
+        _store(epoch, memberIds, weights, seats);
+        emit CommitteeSet(epoch, keccak256(abi.encode(memberIds, weights, seats)));
+    }
+
+    /// (PoS scheduled, first PoS epoch, threshold streak).
+    function phase() external view returns (bool, uint64, uint64) {
+        return (posScheduled, posEpoch, thresholdStreak);
     }
 
     function committee(uint64 epoch)

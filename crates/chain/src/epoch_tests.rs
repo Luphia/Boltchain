@@ -1,5 +1,5 @@
-//! Epochs on a single-producer chain (no consensus): committees, bootstrap exit, rewards and the
-//! supply invariant (ADR 0006 §2, §8).
+//! Epochs on a single-producer chain (no consensus): committees, rewards and the supply invariant
+//! (ADR 0006 §2, §8), on a dev chain with genesis validators (PoS from block 1).
 
 use super::*;
 use alloy_consensus::{SignableTransaction, TxEip1559};
@@ -17,8 +17,6 @@ fn genesis() -> Genesis {
     let mut g = Genesis::from_json(include_str!("../../../genesis/dev.json")).unwrap();
     g.config.epoch_slots = L;
     g.config.committee_size = 8;
-    g.config.bootstrap_exit_min_stakers = Some(10);
-    g.config.bootstrap_exit_min_stake_bolt = Some(640);
     g
 }
 
@@ -146,7 +144,7 @@ fn epochs_rotate_committees_and_pay_rewards() {
     // Every address that can hold BOLT in this test.
     let mut tracked: Vec<Address> = g.alloc.keys().copied().collect();
     tracked.extend([STAKING, REWARDS, CONSENSUS, Address::repeat_byte(0xbe)]);
-    tracked.extend(g.bootstrap_validators.iter().map(|v| v.fee_recipient));
+    tracked.extend(g.dev_validators.iter().map(|v| v.fee_recipient));
     tracked.extend((20..30).map(|k| Address::repeat_byte(0x50 + k as u8)));
     let invariant = |chain: &Chain| {
         let total: U256 = tracked.iter().map(|a| balance(chain, *a)).sum();
@@ -165,58 +163,38 @@ fn epochs_rotate_committees_and_pay_rewards() {
     produce(&chain, txs);
     invariant(&chain);
     assert_eq!(view(&chain, STAKING, IStakingManager::countCall {}), 17);
-    // Block 1 started epoch 0 and wrote committee 1: still the bootstrap set (no stakers yet).
+    // Block 1 started epoch 0 and drew committee 1 from the genesis validators (the new ones
+    // registered after the system calls).
     let c1 = view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: 1 });
-    assert_eq!(c1.ids, (1..=7).collect::<Vec<u32>>());
+    assert!(c1.ids.iter().all(|id| (1..=7).contains(id)), "{:?}", c1.ids);
+    assert_eq!(c1.weights.iter().map(|w| *w as u32).sum::<u32>(), 8);
     for _ in 2..=4 {
         produce(&chain, vec![]);
         invariant(&chain);
     }
-    assert!(!view(&chain, CONSENSUS, IConsensusRegistry::bootstrapEndedCall {}));
 
-    // Block 5 starts epoch 1: epoch 0 is settled (bootstrap: 25%, locked into stake) and, with 10
-    // stakers and 1,000 BOLT staked, the bootstrap phase ends: committee 2 is sampled by stake.
+    // Block 5 starts epoch 1: epoch 0's committee (one seat per genesis validator) is paid, and
+    // committee 2 is drawn by stake from all 17 validators.
     let supply_before = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
     produce(&chain, vec![]);
     invariant(&chain);
     assert_eq!(view(&chain, CONSENSUS, IConsensusRegistry::currentEpochCall {}), 1);
-    assert!(view(&chain, CONSENSUS, IConsensusRegistry::bootstrapEndedCall {}));
-    // Sampled by weight from every eligible validator: the ten new ones (100 BOLT each) and the
-    // bootstrap validators, whose locked rewards count only up to the cap (ADR 0006 §11).
     let c2 = view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: 2 });
     assert!(c2.ids.iter().all(|id| (1..=17).contains(id)), "{:?}", c2.ids);
-    assert_eq!(
-        c2.weights.iter().map(|w| *w as u32).sum::<u32>(),
-        8,
-        "8 seats, not the 7 equal bootstrap seats"
-    );
+    assert_eq!(c2.weights.iter().map(|w| *w as u32).sum::<u32>(), 8);
     assert_eq!(c2.seats.len(), 16);
     let emission = bolt_primitives::params::epoch_emission(
         bolt_primitives::params::SUPPLY_CAP_WEI - supply_before,
     ) * U256::from(8_000)
         / U256::from(10_000);
     let paid = view(&chain, REWARDS, IRewardDistributor::supplyCall {}) - supply_before;
-    // four blocks' votes each (blocks 2-5 certify heights 1-4); 25% for bootstrap validators
-    let expected = emission / U256::from(7) * U256::from(7) / U256::from(4);
-    assert!(
-        paid > expected - U256::from(100) && paid <= emission / U256::from(4),
-        "paid {paid}, expected ~{expected}"
-    );
-    let v1 = view(&chain, STAKING, IStakingManager::validatorCall { id: 1 });
-    assert_eq!(v1.locked, v1.stake);
-    assert!(v1.locked > bolt(10_000), "one epoch of bootstrap rewards is large");
-    // ...but it weighs no more than an average staker at the exit threshold (640 / 10 BOLT).
-    let cap = view(&chain, PARAMS, IParamRegistry::lockedWeightCapCall {});
-    assert_eq!(U256::from(cap), bolt(64));
-    assert_eq!(view(&chain, STAKING, IStakingManager::weightOfCall { id: 1 }), bolt(64));
-    assert_eq!(view(&chain, STAKING, IStakingManager::weightOfCall { id: 8 }), bolt(100));
-    let snap = view(&chain, STAKING, IStakingManager::snapshotCall {});
-    let w1 = snap.ids.iter().position(|i| *i == 1).map(|k| snap.stakes[k]);
-    assert_eq!(w1, Some(bolt(64)), "the lottery sees the capped weight");
-    assert_eq!(view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: 1 }), U256::ZERO);
+    // Blocks 2-5 certify heights 1-4: every member voted in all four; votes are counted per
+    // block, so the whole emission is paid.
+    assert!(paid > emission - U256::from(100) && paid <= emission, "paid {paid} of {emission}");
+    let r = view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: 1 });
+    assert!(r > emission / U256::from(8), "claimable, one seventh of the emission: {r}");
 
-    // Blocks 6-9: epoch 1 is still the bootstrap committee, settled at block 9 at full rate now
-    // that the phase is over (claimable, not locked).
+    // Blocks 6-9: epoch 1's committee is settled at block 9.
     for _ in 6..=9 {
         produce(&chain, vec![]);
         invariant(&chain);
@@ -224,7 +202,7 @@ fn epochs_rotate_committees_and_pay_rewards() {
     let r1 = view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: 1 });
     assert!(r1 > U256::ZERO);
     // Claim sends it to the fee recipient.
-    let fr = g.bootstrap_validators[0].fee_recipient;
+    let fr = g.dev_validators[0].fee_recipient;
     let before = balance(&chain, fr);
     produce(
         &chain,

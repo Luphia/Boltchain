@@ -12,6 +12,9 @@
 //!   so it imports epoch by epoch: the first block of each epoch carries the proof that the
 //!   previous epoch's last block is final, checkable with a committee already in local state
 //!   (ADR 0006 §4). Blocks after the last boundary wait for the tip's own proof.
+//! * Mined blocks (before PoS, ADR 0007) carry no proof: the follower walks back to a block it
+//!   knows (possibly on another branch), checks each seal and lets the chain's fork choice decide
+//!   (total difficulty, reorganisations of at most 128 blocks).
 
 use bolt_chain::{BuiltBlock, Chain, ChainError};
 use bolt_ipld::{BlockBundle, Cid, Envelope, IpldError, decode_block, verify};
@@ -64,6 +67,27 @@ pub fn announce_for(bundle: &BlockBundle) -> Announce {
         inline,
         proof: Vec::new(),
     }
+}
+
+/// The announcement for committed block `number`, rebuilt from the blockstore (inline body up to
+/// 64 KiB), with `proof` attached.
+pub fn announce_stored(chain: &Chain, number: u64, proof: Vec<u8>) -> Option<Announce> {
+    let r = chain.store().reader().ok()?;
+    let root = r.envelope_root(number).ok()??;
+    let envelope = r.ipld(&root).ok()??;
+    let env = Envelope::decode(&envelope).ok()?;
+    let header = r.ipld(&env.header).ok()??;
+    let mut inline = Vec::new();
+    let mut size = 0;
+    for c in &env.chunks {
+        let data = r.ipld(c).ok()??;
+        size += data.len();
+        inline.push(InlineBlock { cid: *c, data });
+    }
+    if size > INLINE_BODY_BYTES {
+        inline.clear();
+    }
+    Some(Announce { height: number, root, envelope, header, inline, proof })
 }
 
 /// Publishes a freshly produced block.
@@ -150,16 +174,25 @@ impl Follower {
     /// Handles one announcement.
     pub async fn on_announce(&self, via: PeerId, a: Announce) -> Result<Outcome> {
         let started = Instant::now();
-        let head = self.head().await?;
-        if a.height <= head {
-            return Ok(Outcome::Known);
-        }
         verify(&a.root, &a.envelope)?;
         let envelope = Envelope::decode(&a.envelope)?;
         if envelope.height != a.height {
             return Err(IpldError::Malformed("announce height").into());
         }
+        verify(&envelope.header, &a.header)?;
         let tip_hash = envelope.block_hash().ok_or(IpldError::Malformed("header cid"))?;
+        let mined =
+            <alloy_consensus::Header as alloy_rlp::Decodable>::decode(&mut a.header.as_slice())
+                .map_err(|_| IpldError::Malformed("header"))?
+                .difficulty
+                > alloy_primitives::U256::ZERO;
+        if mined && self.finality.is_some() {
+            return self.on_mined(via, a, envelope, started).await;
+        }
+        let head = self.head().await?;
+        if a.height <= head {
+            return Ok(Outcome::Known);
+        }
         let tip_verdict = match &self.finality {
             Some(check) => match check.check(a.height, &tip_hash, &a.proof) {
                 Verdict::NotFinal => return Err(SyncError::NotFinal),
@@ -234,6 +267,25 @@ impl Follower {
         let mut proven_upto = if tip_verdict == Verdict::Final { a.height } else { head };
         for (i, (root, env)) in ordered.into_iter().enumerate() {
             let number = meta[i].0;
+            let header_mined = have
+                .get(&env.header)
+                .and_then(|h| {
+                    <alloy_consensus::Header as alloy_rlp::Decodable>::decode(&mut h.as_slice())
+                        .ok()
+                })
+                .is_some_and(|h| !h.difficulty.is_zero());
+            if header_mined && self.finality.is_some() {
+                // Mined ancestors of a PoS block: checked by their seals.
+                let block = decode_block(env, |c| have.get(c).cloned())?;
+                let chain = self.chain.clone();
+                height = block.header.number;
+                tokio::task::spawn_blocking(move || {
+                    chain.import_mined(&block.header, block.transactions, Some(root))
+                })
+                .await
+                .map_err(|e| SyncError::Task(e.to_string()))??;
+                continue;
+            }
             if number > proven_upto {
                 let check =
                     self.finality.as_ref().expect("unproven blocks only with a finality check");
@@ -267,6 +319,85 @@ impl Follower {
             height = block.header.number;
             tokio::task::spawn_blocking(move || {
                 chain.import_final(&block.header, block.transactions, Some(root), qc)
+            })
+            .await
+            .map_err(|e| SyncError::Task(e.to_string()))??;
+        }
+        Ok(Outcome::Imported { height, count, fetch_ms })
+    }
+}
+
+impl Follower {
+    /// A mined block: walk back to a known block, fetch the branch, import it oldest first.
+    async fn on_mined(
+        &self,
+        via: PeerId,
+        a: Announce,
+        envelope: Envelope,
+        started: Instant,
+    ) -> Result<Outcome> {
+        let tip_hash = envelope.block_hash().ok_or(IpldError::Malformed("header cid"))?;
+        let chain = self.chain.clone();
+        let known = move |h: alloy_primitives::B256| chain.knows(&h).unwrap_or(false);
+        if known(tip_hash) {
+            return Ok(Outcome::Known);
+        }
+        let head = self.head().await?;
+        let max_walk = a.height.saturating_sub(head) + bolt_primitives::params::MAX_REORG_DEPTH + 1;
+        let mut have: HashMap<Cid, Vec<u8>> = HashMap::new();
+        have.insert(envelope.header, a.header.clone());
+        for b in a.inline {
+            have.insert(b.cid, b.data);
+        }
+        let peers = self.sources(via).await;
+        let mut branch: Vec<(Cid, Envelope)> = vec![(a.root, envelope)];
+        loop {
+            let (_, last) = branch.last().expect("non-empty");
+            let parent = last.parent.ok_or(SyncError::Fork(head))?;
+            let bytes = match self.local(&parent) {
+                Some(b) => b,
+                None => {
+                    let b = self
+                        .net
+                        .fetch(&[parent], &peers)
+                        .await?
+                        .remove(&parent)
+                        .ok_or(SyncError::Fork(head))?;
+                    if let Ok(w) = self.chain.store().writer()
+                        && w.put_ipld(&parent, &b).is_ok()
+                    {
+                        let _ = w.commit();
+                    }
+                    b
+                }
+            };
+            let env = Envelope::decode(&bytes)?;
+            let hash = env.block_hash().ok_or(IpldError::Malformed("header cid"))?;
+            if known(hash) {
+                break;
+            }
+            branch.push((parent, env));
+            if branch.len() as u64 > max_walk {
+                return Err(SyncError::Fork(head));
+            }
+        }
+        let need: Vec<Cid> = branch
+            .iter()
+            .flat_map(|(_, e)| std::iter::once(e.header).chain(e.chunks.iter().copied()))
+            .filter(|c| !have.contains_key(c))
+            .collect();
+        if !need.is_empty() {
+            have.extend(self.net.fetch(&need, &peers).await?);
+        }
+        let fetch_ms = started.elapsed().as_millis() as u64;
+        let count = branch.len() as u64;
+        let mut height = head;
+        for (root, env) in branch.into_iter().rev() {
+            let block = decode_block(env, |c| have.get(c).cloned())?;
+            let chain = self.chain.clone();
+            height = block.header.number;
+            tokio::task::spawn_blocking(move || {
+                chain.import_mined(&block.header, block.transactions, Some(root))
             })
             .await
             .map_err(|e| SyncError::Task(e.to_string()))??;

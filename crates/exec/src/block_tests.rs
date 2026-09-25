@@ -48,6 +48,8 @@ fn params(number: u64) -> BlockParams {
         parent_hash: B256::repeat_byte(0x11),
         parent_beacon_root: B256::ZERO,
         extra_data: Bytes::new(),
+        difficulty: alloy_primitives::U256::ZERO,
+        nonce: alloy_primitives::B64::ZERO,
     }
 }
 

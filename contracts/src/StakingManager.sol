@@ -6,11 +6,6 @@ import {BLS} from "./BLS.sol";
 
 interface IConsensusRegistry {
     function currentEpoch() external view returns (uint64);
-    function bootstrapEnded() external view returns (bool);
-}
-
-interface IParams {
-    function lockedWeightCap() external view returns (uint128);
 }
 
 interface IRewardDistributor {
@@ -19,7 +14,8 @@ interface IRewardDistributor {
 
 /// @title Validator registry and stake custody.
 /// @notice One BLS key per validator, registered with an on-chain verified proof of possession.
-/// No delegation (liquid staking can be built on top). Exits take effect after 14 epochs.
+/// No delegation (liquid staking can be built on top). Exits take effect after 14 epochs. The same
+/// rules apply to every address: no reserved seats, no locked or discounted stake (ADR 0007).
 contract StakingManager is SystemContract {
     enum Status {
         None,
@@ -33,10 +29,10 @@ contract StakingManager is SystemContract {
         address owner; // controls the stake; receives it on withdrawal
         address feeRecipient; // receives rewards and block tips
         uint128 stake; // wei
-        uint128 locked; // part of `stake` locked until the bootstrap phase ends
+        uint128 recent; // part of `stake` deposited in or after `recentEpoch` (not matured yet)
         Status status;
-        bool bootstrap; // listed in genesis
         uint64 exitEpoch; // epoch in which the exit was requested (or the slashing happened)
+        uint64 recentEpoch; // epoch of the latest deposit
         bytes32 pk0; // compressed BLS public key, bytes 0..32
         bytes16 pk1; // bytes 32..48
     }
@@ -46,10 +42,8 @@ contract StakingManager is SystemContract {
     mapping(bytes32 => uint32) public idOfPubkey; // keccak(compressed pubkey) => id
     uint32[] internal active; // Active validators (any stake)
     mapping(uint32 => uint32) internal activePos; // id => index + 1 in `active`
-    uint32[] internal bootstrapIds;
     uint256 public totalActiveStake;
     uint256 public deadStake; // slashed funds kept locked forever (burned)
-    bool public depositsPaused;
 
     event Registered(uint32 indexed id, address indexed owner, bytes pubkey, address feeRecipient, uint256 stake);
     event Deposited(uint32 indexed id, uint256 amount);
@@ -57,9 +51,7 @@ contract StakingManager is SystemContract {
     event Withdrawn(uint32 indexed id, uint256 amount);
     event Slashed(uint32 indexed id, uint256 amount, address reporter, uint256 reward);
     event FeeRecipientChanged(uint32 indexed id, address feeRecipient);
-    event DepositsPaused(bool paused);
 
-    error Paused();
     error BelowMinimum();
     error BadKey();
     error KeyTaken();
@@ -67,17 +59,20 @@ contract StakingManager is SystemContract {
     error NotOwner();
     error BadStatus();
     error StillBonded();
-    error Locked();
     error TransferFailed();
 
     // ---------------------------------------------------------------- genesis
 
-    /// Registers a genesis bootstrap validator (no stake; its PoP and address binding were checked
-    /// by the node when validating genesis).
-    function registerBootstrap(bytes calldata pubkey, address feeRecipient) external onlyGenesis returns (uint32 id) {
-        id = _create(pubkey, feeRecipient, feeRecipient, 0);
-        validators[id].bootstrap = true;
-        bootstrapIds.push(id);
+    /// Dev chains only (the node refuses such a genesis for chain 8017): a validator staked at
+    /// genesis. The node credits this contract with `stake` and checked the key's PoP.
+    function registerGenesis(bytes calldata pubkey, address owner, address feeRecipient, uint256 stake)
+        external
+        onlyGenesis
+        returns (uint32 id)
+    {
+        id = _create(pubkey, owner, feeRecipient, stake);
+        validators[id].recent = 0; // matured from the start
+        totalActiveStake += stake;
     }
 
     // ---------------------------------------------------------------- validators
@@ -91,7 +86,6 @@ contract StakingManager is SystemContract {
         payable
         returns (uint32 id)
     {
-        if (depositsPaused) revert Paused();
         if (msg.value < Sys.MIN_STAKE) revert BelowMinimum();
         if (pubkey.length != 48 || keccak256(BLS.compressG1(pubkeyPoint)) != keccak256(pubkey)) revert BadKey();
         if (!BLS.verify(pubkeyPoint, pubkey, pop, BLS.POP_DST)) revert BadProofOfPossession();
@@ -101,9 +95,9 @@ contract StakingManager is SystemContract {
 
     /// Adds stake to an active validator (anyone may top up).
     function deposit(uint32 id) external payable {
-        if (depositsPaused) revert Paused();
         Validator storage v = validators[id];
         if (v.status != Status.Active) revert BadStatus();
+        _addRecent(v, msg.value);
         v.stake += uint128(msg.value);
         totalActiveStake += msg.value;
         emit Deposited(id, msg.value);
@@ -127,10 +121,9 @@ contract StakingManager is SystemContract {
         if (msg.sender != v.owner) revert NotOwner();
         if (v.status != Status.Exiting && v.status != Status.Slashed) revert BadStatus();
         if (_epoch() < v.exitEpoch + 1 + Sys.UNBONDING_EPOCHS) revert StillBonded();
-        if (v.locked > 0 && !IConsensusRegistry(Sys.CONSENSUS).bootstrapEnded()) revert Locked();
         uint256 amount = v.stake;
         v.stake = 0;
-        v.locked = 0;
+        v.recent = 0;
         v.status = Status.Withdrawn;
         emit Withdrawn(id, amount);
         (bool ok,) = v.owner.call{value: amount}("");
@@ -158,7 +151,7 @@ contract StakingManager is SystemContract {
             _deactivate(id, v.stake);
         }
         v.stake -= uint128(amount);
-        v.locked = v.locked > v.stake ? v.stake : v.locked;
+        if (v.recent > v.stake) v.recent = v.stake;
         v.status = Status.Slashed;
         v.exitEpoch = _epoch();
         deadStake += amount - reward;
@@ -170,38 +163,23 @@ contract StakingManager is SystemContract {
         }
     }
 
-    /// Adds bootstrap-phase rewards to a validator's stake, locked until the phase ends.
-    function lockReward(uint32 id) external payable {
-        if (msg.sender != Sys.REWARDS) revert Unauthorized();
-        Validator storage v = validators[id];
-        v.stake += uint128(msg.value);
-        v.locked += uint128(msg.value);
-        if (v.status == Status.Active) totalActiveStake += msg.value;
-    }
-
-    /// Emergency brake on new stake (the only power the multisig has without a timelock).
-    function setDepositsPaused(bool paused) external {
-        if (msg.sender != Sys.SAFE) revert Unauthorized();
-        depositsPaused = paused;
-        emit DepositsPaused(paused);
-    }
-
     // ---------------------------------------------------------------- views
 
-    /// Active validators with at least the minimum stake, with their lottery weights: the
-    /// committee lottery input. The order is unspecified; the node sorts by id.
-    function snapshot() external view returns (uint32[] memory ids, uint256[] memory stakes) {
+    /// Active validators whose lottery weight is at least the minimum stake: the committee lottery
+    /// input. The weight is the stake deposited at least `minAge` epochs ago (0: all stake; the
+    /// first PoS committee uses 14, ADR 0007 §5). The order is unspecified; the node sorts by id.
+    function snapshot(uint64 minAge) external view returns (uint32[] memory ids, uint256[] memory stakes) {
         uint256 n = active.length;
         ids = new uint32[](n);
         stakes = new uint256[](n);
-        uint256 cap = IParams(Sys.PARAMS).lockedWeightCap();
+        uint64 epoch = _epoch();
         uint256 k;
         for (uint256 i = 0; i < n; i++) {
             uint32 id = active[i];
-            Validator storage v = validators[id];
-            if (v.stake >= Sys.MIN_STAKE) {
+            uint256 w = _matured(validators[id], epoch, minAge);
+            if (w >= Sys.MIN_STAKE) {
                 ids[k] = id;
-                stakes[k] = _weight(v, cap);
+                stakes[k] = w;
                 k++;
             }
         }
@@ -211,41 +189,21 @@ contract StakingManager is SystemContract {
         }
     }
 
-    /// Bootstrap validators still active (the committee while the bootstrap phase lasts).
-    function bootstrapSet() external view returns (uint32[] memory ids) {
-        uint256 n = bootstrapIds.length;
-        ids = new uint32[](n);
-        uint256 k;
-        for (uint256 i = 0; i < n; i++) {
-            if (validators[bootstrapIds[i]].status == Status.Active) ids[k++] = bootstrapIds[i];
-        }
-        assembly {
-            mstore(ids, k)
-        }
-    }
-
-    /// Stakers counted for the bootstrap exit condition (active, at least the minimum stake).
-    /// `total` sums lottery weights, so locked bootstrap rewards count only up to the cap.
+    /// Stakers counted for the phase thresholds (active, at least the minimum stake) and their
+    /// total stake.
     function stakerStats() external view returns (uint256 stakers, uint256 total) {
-        uint256 cap = IParams(Sys.PARAMS).lockedWeightCap();
         for (uint256 i = 0; i < active.length; i++) {
             Validator storage v = validators[active[i]];
             if (v.stake >= Sys.MIN_STAKE) {
                 stakers++;
-                total += _weight(v, cap);
+                total += v.stake;
             }
         }
     }
 
-    /// Lottery weight: unlocked stake plus locked bootstrap rewards up to `cap` (ADR 0006 §11).
-    /// The cap follows the stake while it stays staked; the funds themselves are not reduced.
-    function weightOf(uint32 id) external view returns (uint256) {
-        return _weight(validators[id], IParams(Sys.PARAMS).lockedWeightCap());
-    }
-
-    function _weight(Validator storage v, uint256 cap) private view returns (uint256) {
-        uint256 locked = v.locked;
-        return v.stake - locked + (locked < cap ? locked : cap);
+    /// Stake of validator `id` deposited at least `minAge` epochs ago.
+    function maturedStake(uint32 id, uint64 minAge) external view returns (uint256) {
+        return _matured(validators[id], _epoch(), minAge);
     }
 
     function pubkeyOf(uint32 id) public view returns (bytes memory) {
@@ -270,22 +228,32 @@ contract StakingManager is SystemContract {
             address owner,
             address feeRecipient,
             uint256 stake,
-            uint256 locked,
             Status status,
-            bool bootstrap,
             uint64 exitEpoch,
             bytes memory pubkey
         )
     {
         Validator storage v = validators[id];
-        return (v.owner, v.feeRecipient, v.stake, v.locked, v.status, v.bootstrap, v.exitEpoch, pubkeyOf(id));
-    }
-
-    function isBootstrap(uint32 id) external view returns (bool) {
-        return validators[id].bootstrap;
+        return (v.owner, v.feeRecipient, v.stake, v.status, v.exitEpoch, pubkeyOf(id));
     }
 
     // ---------------------------------------------------------------- internal
+
+    /// `recent` covers every deposit since `recentEpoch`; once that is a full unbonding period
+    /// old, all of it has matured and the bucket restarts. A new deposit restarts the clock for
+    /// the whole bucket, which can only under-count matured stake.
+    function _addRecent(Validator storage v, uint256 amount) private {
+        uint64 epoch = _epoch();
+        if (epoch >= v.recentEpoch + Sys.UNBONDING_EPOCHS) v.recent = 0;
+        v.recent += uint128(amount);
+        v.recentEpoch = epoch;
+    }
+
+    /// `minAge` is at most the unbonding period (a longer one would need more buckets).
+    function _matured(Validator storage v, uint64 epoch, uint64 minAge) private view returns (uint256) {
+        if (minAge == 0 || epoch >= v.recentEpoch + minAge) return v.stake;
+        return v.stake - v.recent;
+    }
 
     function _create(bytes calldata pubkey, address owner, address feeRecipient, uint256 stake)
         private
@@ -300,6 +268,8 @@ contract StakingManager is SystemContract {
         v.owner = owner;
         v.feeRecipient = feeRecipient;
         v.stake = uint128(stake);
+        v.recent = uint128(stake);
+        v.recentEpoch = _epoch();
         v.status = Status.Active;
         v.pk0 = bytes32(pubkey[0:32]);
         v.pk1 = bytes16(pubkey[32:48]);

@@ -1,18 +1,18 @@
 //! Genesis state: the user `alloc`, the Osaka protocol predeploys, and the Boltchain system
-//! contracts deployed at fixed addresses (ADR 0006 §7).
+//! contracts deployed at fixed addresses (ADR 0006 §7, ADR 0008: immutable, no governance).
 //!
 //! Deployment runs each contract's init code *at its final address* (the account's code is set to
 //! the init code and called as the system address), so `address(this)`, storage written by the
 //! constructor and immutables are all correct. The returned runtime code then replaces the init
-//! code. Initialisation calls (Safe setup, bootstrap validators, parameters) follow, also from the
-//! system address at block 0.
+//! code. Initialisation calls (dev-chain validators, supply) follow, also from the system address
+//! at block 0.
 
 use crate::{abi::*, addresses::*, artifacts};
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-use alloy_sol_types::{SolCall, SolValue};
+use alloy_sol_types::SolCall;
 use alloy_trie::root::state_root_unhashed;
-use bolt_primitives::{Genesis, genesis::GenesisAccount, params::MIN_COMMITTEE_SIZE};
+use bolt_primitives::{Genesis, genesis::GenesisAccount, params::WEI_PER_BOLT};
 use revm::{
     Context, MainBuilder, MainContext, SystemCallCommitEvm,
     bytecode::Bytecode,
@@ -148,90 +148,44 @@ fn build(g: &Genesis) -> Result<BTreeMap<Address, GenesisAccount>, GenesisBuildE
         }
     }
 
-    // Implementations, then their proxies.
-    b.deploy(STAKING_IMPL, &artifacts::staking_manager().bytecode, &[])?;
-    b.deploy(CONSENSUS_IMPL, &artifacts::consensus_registry().bytecode, &[])?;
-    b.deploy(REWARDS_IMPL, &artifacts::reward_distributor().bytecode, &[])?;
-    b.deploy(PARAMS_IMPL, &artifacts::param_registry().bytecode, &[])?;
-    b.deploy(HISTORY_IMPL, &artifacts::history_registry().bytecode, &[])?;
-    let proxy = &artifacts::system_proxy().bytecode;
-    for (p, i) in [
-        (STAKING, STAKING_IMPL),
-        (CONSENSUS, CONSENSUS_IMPL),
-        (REWARDS, REWARDS_IMPL),
-        (PARAMS, PARAMS_IMPL),
-        (HISTORY, HISTORY_IMPL),
-    ] {
-        b.deploy(p, proxy, &i.abi_encode())?;
-    }
+    b.deploy(STAKING, &artifacts::staking_manager().bytecode, &[])?;
+    b.deploy(CONSENSUS, &artifacts::consensus_registry().bytecode, &[])?;
+    b.deploy(REWARDS, &artifacts::reward_distributor().bytecode, &[])?;
+    b.deploy(HISTORY, &artifacts::history_registry().bytecode, &[])?;
 
-    // Governance: Safe (proxy -> 1.4.1 singleton) and two timelocks proposed by it.
-    b.deploy(SAFE_SINGLETON, &artifacts::safe().bytecode, &[])?;
-    b.deploy(SAFE_FALLBACK, &artifacts::safe_fallback().bytecode, &[])?;
-    b.deploy(SAFE, &artifacts::safe_proxy().bytecode, &SAFE_SINGLETON.abi_encode())?;
-    let gov = &g.governance;
-    b.call(
-        SAFE,
-        ISafe::setupCall {
-            owners: gov.owners.clone(),
-            threshold: U256::from(gov.threshold),
-            to: Address::ZERO,
-            data: Bytes::new(),
-            fallbackHandler: SAFE_FALLBACK,
-            paymentToken: Address::ZERO,
-            payment: U256::ZERO,
-            paymentReceiver: Address::ZERO,
-        },
-    )?;
-    let timelock = &artifacts::timelock().bytecode;
-    for (addr, delay) in
-        [(UPGRADE_TIMELOCK, gov.upgrade_delay_seconds), (PARAM_TIMELOCK, gov.param_delay_seconds)]
-    {
-        // proposers (and cancellers): the Safe; executors: anyone (address 0); no extra admin.
-        let args =
-            (U256::from(delay), vec![SAFE], vec![Address::ZERO], Address::ZERO).abi_encode_params();
-        b.deploy(addr, timelock, &args)?;
-    }
-
-    // Parameters, bootstrap validators and their committee (epochs 0 and 1), supply.
-    let floor = g.config.committee_size.min(MIN_COMMITTEE_SIZE);
-    // Locked bootstrap rewards weigh at most as much as an average staker at the exit threshold
-    // (mainnet: 10,000,000 / 128 = 78,125 BOLT).
-    let (exit_stakers, exit_stake_bolt) = g.config.bootstrap_exit();
-    let locked_cap = U256::from(exit_stake_bolt)
-        * U256::from(bolt_primitives::params::WEI_PER_BOLT)
-        / U256::from(exit_stakers.max(1));
-    let locked_cap = locked_cap.max(U256::from(bolt_primitives::params::MIN_STAKE_WEI));
-    b.call(
-        PARAMS,
-        IParamRegistry::initializeCall {
-            gasLimit: g.config.gas_limit,
-            minBaseFee: g.config.min_base_fee_wei,
-            committeeSize: g.config.committee_size,
-            floor,
-            lockedWeightCap: locked_cap.to::<u128>(),
-        },
-    )?;
-    let mut ids = Vec::new();
-    for v in &g.bootstrap_validators {
-        let id = b.call(
-            STAKING,
-            IStakingManager::registerBootstrapCall {
-                pubkey: Bytes::copy_from_slice(v.bls_pubkey.as_slice()),
-                feeRecipient: v.fee_recipient,
+    // Dev chains: validators staked at genesis and their committee for epoch 0 (one seat each);
+    // PoS from block 1. Their stake is part of the genesis supply.
+    if !g.dev_validators.is_empty() {
+        let mut ids = Vec::new();
+        let mut staked = U256::ZERO;
+        for v in &g.dev_validators {
+            let stake = U256::from(v.stake_bolt) * U256::from(WEI_PER_BOLT);
+            let id = b.call(
+                STAKING,
+                IStakingManager::registerGenesisCall {
+                    pubkey: Bytes::copy_from_slice(v.bls_pubkey.as_slice()),
+                    owner: v.owner,
+                    feeRecipient: v.fee_recipient,
+                    stake,
+                },
+            )?;
+            ids.push(id);
+            staked += stake;
+        }
+        let mut info = b.db.load_account(STAKING).map(|a| a.info.clone()).unwrap_or_default();
+        info.balance += staked;
+        b.db.insert_account_info(STAKING, info);
+        supply += staked;
+        let committee = crate::committee::Committee::equal(&ids);
+        b.call(
+            CONSENSUS,
+            IConsensusRegistry::initializeCall {
+                memberIds: committee.members.clone(),
+                weights: committee.weights.clone(),
+                seats: committee.seats_bytes(),
             },
         )?;
-        ids.push(id);
     }
-    let committee = crate::committee::Committee::equal(&ids);
-    b.call(
-        CONSENSUS,
-        IConsensusRegistry::initializeCall {
-            memberIds: committee.members.clone(),
-            weights: committee.weights.clone(),
-            seats: committee.seats_bytes(),
-        },
-    )?;
     b.call(REWARDS, IRewardDistributor::initializeCall { genesisSupply: supply })?;
     Ok(b.into_alloc())
 }

@@ -30,6 +30,9 @@ enum Command {
     Follow(follow::FollowArgs),
     /// Run a validator: take part in consensus, produce and finalize blocks.
     Validator(validator::ValidatorArgs),
+    /// Mine: follow the chain and seal blocks with RandomBOLT until PoS starts, then keep
+    /// following it (same as `validator --mine` without keys).
+    Mine(validator::ValidatorArgs),
     /// Print the peer id of a node key (creating the key if missing).
     NodeId {
         /// Node key file.
@@ -47,15 +50,16 @@ enum GenesisCmd {
         /// Path to genesis.json.
         path: PathBuf,
     },
-    /// Write a genesis whose validators use the insecure deterministic dev keys.
+    /// Write a dev-chain genesis. With validators (insecure deterministic dev keys, staked at
+    /// genesis) the chain runs PoS from block 1; with `--validators 0` it starts mined.
     MakeDev {
         /// Output file.
         #[arg(long)]
         out: PathBuf,
-        /// Chain id (8017 produces a mainnet-shaped test genesis without funded accounts).
+        /// Chain id (8017 produces a mainnet-shaped test genesis: no validators, no funds).
         #[arg(long, default_value_t = 1337)]
         chain_id: u64,
-        /// Number of validators.
+        /// Number of genesis validators (dev chains only).
         #[arg(long, default_value_t = 7)]
         validators: u32,
         /// Accounts to fund with 10,000 BOLT each (dev chains only).
@@ -89,6 +93,13 @@ fn main() -> Result<()> {
                 .build()?
                 .block_on(follow::run(args))?;
         }
+        Command::Mine(mut args) => {
+            args.mining.mine = true;
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(validator::run(args))?;
+        }
         Command::Validator(args) => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -114,12 +125,23 @@ fn main() -> Result<()> {
             println!("  block hash        {}", header.hash_slow());
             println!("  state root        {}", header.state_root);
             println!("  initial seed      {}", header.mix_hash);
-            println!("  bootstrap vals    {}", genesis.bootstrap_validators.len());
-            println!(
-                "  governance        {}-of-{} multisig",
-                genesis.governance.threshold,
-                genesis.governance.owners.len()
-            );
+            if genesis.starts_with_pow() {
+                let p = &genesis.config.pow;
+                let (stakers, stake, streak) = genesis.config.pos_thresholds();
+                println!(
+                    "  starts            mined ({:?}, difficulty {}, {}s blocks)",
+                    p.algorithm, p.initial_difficulty, p.block_seconds
+                );
+                println!(
+                    "  PoS when          {stakers} stakers and {stake} BOLT staked for {streak} epochs"
+                );
+            } else {
+                println!(
+                    "  starts            PoS ({} genesis validators)",
+                    genesis.dev_validators.len()
+                );
+            }
+            println!("  governance        none (rules change by hard fork only)");
         }
         Command::Params => {
             use bolt_primitives::params::*;
@@ -131,12 +153,19 @@ fn main() -> Result<()> {
             println!("supply cap        {SUPPLY_CAP_BOLT} BOLT");
             println!("min stake         {} BOLT", MIN_STAKE_WEI / WEI_PER_BOLT);
             println!("emission          half-life {EMISSION_HALF_LIFE_EPOCHS} epochs");
+            println!(
+                "mining            RandomBOLT, {POW_BLOCK_SECONDS}s blocks, ASERT half-life {POW_HALF_LIFE_SECONDS}s, reorgs <= {MAX_REORG_DEPTH}"
+            );
+            println!(
+                "PoS starts        {POS_MIN_STAKERS} stakers, {POS_MIN_TOTAL_STAKE_BOLT} BOLT, held {POS_STREAK_EPOCHS} epochs"
+            );
         }
     }
     Ok(())
 }
 
-/// Genesis with deterministic dev validator keys (BLS keys, PoPs and fee-recipient bindings).
+/// Dev genesis with deterministic validator keys staked at genesis (PoS from block 1), or a
+/// mined start without validators.
 fn make_dev_genesis(
     chain_id: u64,
     validators: u32,
@@ -145,29 +174,24 @@ fn make_dev_genesis(
 ) -> Result<Genesis> {
     use bolt_primitives::{bls, genesis::*, params::*};
     let dev = chain_id != CHAIN_ID;
-    if !dev && !fund.is_empty() {
-        anyhow::bail!("chain id {CHAIN_ID} genesis cannot fund accounts");
+    if !dev && (!fund.is_empty() || validators > 0) {
+        anyhow::bail!("chain id {CHAIN_ID} genesis cannot fund accounts or list validators");
     }
-    let bootstrap_validators = (0..validators)
+    let dev_validators = (0..validators)
         .map(|i| {
             let k = bls::dev_key(i);
-            let pk = k.public_key();
-            let (fee_recipient, sig) =
-                bls::sign_binding(&bls::dev_eth_key(i), chain_id, &pk).expect("valid dev key");
-            BootstrapValidator {
+            let sk = k256::ecdsa::SigningKey::from_slice(&bls::dev_eth_key(i)).expect("valid key");
+            let addr = alloy_primitives::Address::from_public_key(sk.verifying_key());
+            DevValidator {
                 name: format!("dev-{i}"),
-                bls_pubkey: pk,
+                bls_pubkey: k.public_key(),
                 proof_of_possession: k.proof_of_possession(),
-                fee_recipient,
-                binding_signature: Some(sig),
+                owner: addr,
+                fee_recipient: addr,
+                stake_bolt: 1_000,
             }
         })
         .collect();
-    let owner = |i: u32| {
-        let sk =
-            k256::ecdsa::SigningKey::from_slice(&bls::dev_eth_key(1000 + i)).expect("valid key");
-        alloy_primitives::Address::from_public_key(sk.verifying_key())
-    };
     let alloc = fund
         .iter()
         .map(|a| {
@@ -185,13 +209,7 @@ fn make_dev_genesis(
         config: ChainConfig { chain_id, ..ChainConfig::default() },
         timestamp: 0,
         extra_data: extra.as_bytes().to_vec().into(),
-        bootstrap_validators,
-        governance: Governance {
-            owners: (0..9).map(owner).collect(),
-            threshold: 5,
-            upgrade_delay_seconds: 16 * 86_400,
-            param_delay_seconds: 2 * 86_400,
-        },
+        dev_validators,
         alloc,
     };
     g.validate()?;

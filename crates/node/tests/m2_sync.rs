@@ -33,6 +33,8 @@ async fn start_net(
             listen: vec!["/ip4/127.0.0.1/udp/0/quic-v1".parse().unwrap()],
             bootnodes: boot,
             producer,
+            fork_id: chain.fork_id().unwrap().to_string(),
+            fork_check: None,
         },
         Arc::new(ChainBlocks(chain)),
     )

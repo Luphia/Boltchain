@@ -23,7 +23,12 @@ pub struct AsertParams {
 
 /// Difficulty of the child of a block with `parent_difficulty` mined `solve_time` seconds after
 /// its own parent. `parent_number` 0 or 1 gives `params.initial`.
-pub fn next_difficulty(params: &AsertParams, parent_number: u64, parent_difficulty: U256, solve_time: u64) -> U256 {
+pub fn next_difficulty(
+    params: &AsertParams,
+    parent_number: u64,
+    parent_difficulty: U256,
+    solve_time: u64,
+) -> U256 {
     if parent_number <= 1 {
         return params.initial.max(params.minimum);
     }
@@ -34,7 +39,9 @@ pub fn next_difficulty(params: &AsertParams, parent_number: u64, parent_difficul
     let frac = exponent.rem_euclid(65_536) as u128;
     // 2^(frac/65536) · 65536, aserti3-2d polynomial.
     let factor = 65_536u128
-        + ((195_766_423_245_049u128 * frac + 971_821_376u128 * frac * frac + 5_127u128 * frac * frac * frac
+        + ((195_766_423_245_049u128 * frac
+            + 971_821_376u128 * frac * frac
+            + 5_127u128 * frac * frac * frac
             + (1u128 << 47))
             >> 48);
     // difficulty scales with 2^(−exponent): divide by factor, shift right by `shifts`.

@@ -107,6 +107,10 @@ pub struct BlockParams {
     pub parent_beacon_root: B256,
     /// Header extra data.
     pub extra_data: Bytes,
+    /// Header difficulty: the PoW difficulty of a mined block, zero under PoS.
+    pub difficulty: U256,
+    /// Header nonce: the PoW seal of a mined block (chosen after execution), zero under PoS.
+    pub nonce: B64,
 }
 
 /// The output of executing a block, before the state root is known.
@@ -142,14 +146,14 @@ impl ExecutedBlock {
             transactions_root: calculate_transaction_root(&self.transactions),
             receipts_root: calculate_receipt_root(&self.receipts),
             logs_bloom: bloom,
-            difficulty: U256::ZERO,
+            difficulty: p.difficulty,
             number: p.input.number,
             gas_limit: p.input.gas_limit,
             gas_used: self.gas_used,
             timestamp: p.input.timestamp,
             extra_data: p.extra_data.clone(),
             mix_hash: p.input.prevrandao,
-            nonce: B64::ZERO,
+            nonce: p.nonce,
             base_fee_per_gas: Some(p.input.base_fee),
             withdrawals_root: Some(EMPTY_ROOT_HASH),
             blob_gas_used: Some(0),
@@ -262,6 +266,39 @@ where
     pub fn credit(&mut self, to: Address, amount: u128) -> Result<(), BlockError<D::Error>> {
         use revm::database_interface::DatabaseCommitExt;
         self.state.increment_balances([(to, amount)]).map_err(db_err)
+    }
+
+    /// Irregular state change of a hard fork (ADR 0008 §2): replaces `address`'s code and/or
+    /// writes storage slots, before the block's system calls. Recorded in the block's state
+    /// changes like any other write.
+    pub fn apply_irregular(
+        &mut self,
+        address: Address,
+        code: Option<Bytes>,
+        storage: &[(U256, U256)],
+    ) -> Result<(), BlockError<D::Error>> {
+        use revm::{
+            Database, DatabaseCommit,
+            state::{Account, EvmStorageSlot},
+        };
+        let mut info = self.state.basic(address).map_err(db_err)?.unwrap_or_default();
+        if let Some(code) = code {
+            let bytecode = revm::bytecode::Bytecode::new_raw(code);
+            info.code_hash = bytecode.hash_slow();
+            info.code = Some(bytecode);
+            info.nonce = info.nonce.max(1);
+        }
+        let mut account = Account::from(info);
+        for (slot, value) in storage {
+            let original = self.state.storage(address, *slot).map_err(db_err)?;
+            account.storage.insert(
+                *slot,
+                EvmStorageSlot::new_changed(original, *value, revm::state::TransactionId::ZERO),
+            );
+        }
+        account.mark_touch();
+        self.state.commit([(address, account)].into_iter().collect());
+        Ok(())
     }
 
     /// Block parameters.

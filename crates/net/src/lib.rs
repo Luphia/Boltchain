@@ -110,6 +110,31 @@ pub struct NetConfig {
     /// Only announcements authored by this peer are accepted and relayed (single-producer
     /// devnet). `None` accepts announcements from anyone (validation moves to consensus in M3).
     pub producer: Option<PeerId>,
+    /// This node's fork id (ADR 0008 §2), advertised in the identify agent string.
+    pub fork_id: String,
+    /// Judges a peer's fork id; peers on incompatible rules are disconnected.
+    pub fork_check: Option<ForkCheck>,
+}
+
+/// Verdict on a peer's fork id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeerRules {
+    /// Same rules.
+    Compatible,
+    /// The peer runs software with a fork this node does not know: the operator should upgrade.
+    Newer,
+    /// Different rules.
+    Incompatible,
+}
+
+/// Fork id checker: peer fork id string -> verdict.
+#[derive(Clone)]
+pub struct ForkCheck(pub std::sync::Arc<dyn Fn(&str) -> PeerRules + Send + Sync>);
+
+impl std::fmt::Debug for ForkCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ForkCheck")
+    }
 }
 
 /// Events delivered to the node.
@@ -285,6 +310,7 @@ pub async fn start(
 ) -> Result<(NetHandle, mpsc::Receiver<NetEvent>), NetError> {
     let setup = |e: &dyn std::fmt::Display| NetError::Setup(e.to_string());
     let chain_id = cfg.chain_id;
+    let fork_id = cfg.fork_id.clone();
     let kad_protocol = StreamProtocol::try_from_owned(format!("/bolt/{chain_id}/kad/1.0.0"))
         .map_err(|e| setup(&e))?;
     let tx_protocol = StreamProtocol::try_from_owned(format!("/bolt/{chain_id}/tx/1.0.0"))
@@ -329,7 +355,11 @@ pub async fn start(
                 Ok(Behaviour {
                     identify: identify::Behaviour::new(
                         identify::Config::new(format!("/bolt/{chain_id}/1.0.0"), key.public())
-                            .with_agent_version(format!("boltchain/{}", env!("CARGO_PKG_VERSION"))),
+                            .with_agent_version(format!(
+                                "boltchain/{} fork/{}",
+                                env!("CARGO_PKG_VERSION"),
+                                fork_id
+                            )),
                     ),
                     ping: ping::Behaviour::default(),
                     kad,
@@ -437,11 +467,31 @@ async fn run(
                 {
                     deliver(&ev_tx, NetEvent::Connected(peer_id));
                 }
-                SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. }))
-                    if info.protocols.contains(&kad_protocol) =>
-                {
-                    for addr in info.listen_addrs {
-                        swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received { peer_id, info, .. })) => {
+                    let remote = info.agent_version.split_whitespace().find_map(|t| t.strip_prefix("fork/"));
+                    let verdict = match (&cfg.fork_check, remote) {
+                        (None, _) => PeerRules::Compatible,
+                        (Some(check), Some(r)) => (check.0)(r),
+                        (Some(_), None) => PeerRules::Incompatible,
+                    };
+                    match verdict {
+                        PeerRules::Incompatible => {
+                            tracing::debug!(%peer_id, agent = %info.agent_version, "peer runs incompatible rules; disconnecting");
+                            swarm.behaviour_mut().kad.remove_peer(&peer_id);
+                            let _ = swarm.disconnect_peer_id(peer_id);
+                            continue;
+                        }
+                        PeerRules::Newer => tracing::warn!(
+                            %peer_id,
+                            agent = %info.agent_version,
+                            "a peer announces a hard fork this software does not know: upgrade the node"
+                        ),
+                        PeerRules::Compatible => {}
+                    }
+                    if info.protocols.contains(&kad_protocol) {
+                        for addr in info.listen_addrs {
+                            swarm.behaviour_mut().kad.add_address(&peer_id, addr);
+                        }
                     }
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {

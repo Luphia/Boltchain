@@ -1,5 +1,6 @@
-//! Follower node: syncs blocks from IPFS announcements, serves JSON-RPC, forwards transactions
-//! to the producer.
+//! Follower node: syncs blocks from IPFS announcements and serves JSON-RPC. With `--producer`
+//! (single-producer devnet) it trusts that peer's announcements and forwards transactions to it;
+//! without, it follows a public chain: mined blocks by their seals, PoS blocks by finality proofs.
 
 use crate::{devnet::load_genesis, p2p::P2pArgs};
 use alloy_primitives::B256;
@@ -24,9 +25,10 @@ pub struct FollowArgs {
     /// JSON-RPC listen address.
     #[arg(long, default_value = "127.0.0.1:8546")]
     pub rpc: SocketAddr,
-    /// Peer id of the block producer; only its announcements are accepted.
+    /// Peer id of the single block producer of a devnet; only its announcements are accepted.
+    /// Omit it to follow a public chain.
     #[arg(long)]
-    pub producer: PeerId,
+    pub producer: Option<PeerId>,
     /// P2P options.
     #[command(flatten)]
     pub p2p: P2pArgs,
@@ -47,10 +49,30 @@ impl TxForwarder for Forward {
 
 /// Runs a follower until Ctrl-C.
 pub async fn run(args: FollowArgs) -> Result<()> {
+    let Some(producer) = args.producer else {
+        return crate::validator::run(crate::validator::ValidatorArgs {
+            genesis: args.genesis,
+            datadir: args.datadir,
+            key: vec![],
+            rpc: args.rpc,
+            block_time: None,
+            timeout_ms: None,
+            mining: crate::miner::MiningArgs {
+                mine: false,
+                beneficiary: None,
+                mining_threads: 1,
+                randomx_fast: false,
+                extra_data: String::new(),
+                gas_target: None,
+            },
+            p2p: args.p2p,
+        })
+        .await;
+    };
     let genesis = load_genesis(&args.genesis)?;
     let chain = Arc::new(Chain::open(&args.datadir, &genesis)?);
     let cfg = chain.config().clone();
-    let (net, events) = args.p2p.start(&args.datadir, chain.clone(), Some(args.producer)).await?;
+    let (net, events) = args.p2p.start(&args.datadir, chain.clone(), Some(producer)).await?;
 
     let ctx = RpcContext {
         chain: chain.clone(),
@@ -62,7 +84,7 @@ pub async fn run(args: FollowArgs) -> Result<()> {
         client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
         forwarder: Some(Arc::new(Forward {
             net: net.clone(),
-            producer: args.producer,
+            producer,
             rt: tokio::runtime::Handle::current(),
         })),
     };

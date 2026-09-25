@@ -1,5 +1,5 @@
 // Compiles the system contracts with solc (solcjs from npm) and writes `out/<Name>.json` with the
-// ABI, init code and runtime code. Safe contracts are taken from the published npm artifacts.
+// ABI, init code and runtime code. There are no external dependencies besides the compiler.
 //
 //   npm ci && node build.mjs          # rebuild
 //   node build.mjs --check            # fail if out/ is not what the sources produce (CI)
@@ -18,16 +18,8 @@ const WANT = [
   'src/StakingManager.sol:StakingManager',
   'src/ConsensusRegistry.sol:ConsensusRegistry',
   'src/RewardDistributor.sol:RewardDistributor',
-  'src/ParamRegistry.sol:ParamRegistry',
   'src/HistoryRegistry.sol:HistoryRegistry',
-  'src/SystemProxy.sol:SystemProxy',
-  '@openzeppelin/contracts/governance/TimelockController.sol:TimelockController',
 ];
-const SAFE = {
-  Safe: 'Safe.sol/Safe.json',
-  SafeProxy: 'proxies/SafeProxy.sol/SafeProxy.json',
-  CompatibilityFallbackHandler: 'handler/CompatibilityFallbackHandler.sol/CompatibilityFallbackHandler.json',
-};
 
 const sources = {};
 for (const f of fs.readdirSync(path.join(here, 'src'))) {
@@ -37,9 +29,6 @@ for (const f of fs.readdirSync(path.join(here, 'src'))) {
 for (const f of fs.readdirSync(path.join(here, 'test'))) {
   if (f.endsWith('.sol')) sources[`test/${f}`] = { content: fs.readFileSync(path.join(here, 'test', f), 'utf8') };
 }
-sources['@openzeppelin/contracts/governance/TimelockController.sol'] = {
-  content: fs.readFileSync(require.resolve('@openzeppelin/contracts/governance/TimelockController.sol'), 'utf8'),
-};
 
 function findImports(p) {
   try {
@@ -88,11 +77,6 @@ for (const w of WANT) {
     deployedBytecode: '0x' + c.evm.deployedBytecode.object,
   };
 }
-const safeDir = path.join(path.dirname(require.resolve('@safe-global/safe-contracts/package.json')), 'build/artifacts/contracts');
-for (const [name, rel] of Object.entries(SAFE)) {
-  const a = JSON.parse(fs.readFileSync(path.join(safeDir, rel), 'utf8'));
-  artifacts[name] = { abi: a.abi, bytecode: a.bytecode, deployedBytecode: a.deployedBytecode };
-}
 
 let stale = false;
 for (const [name, a] of Object.entries(artifacts)) {
@@ -106,6 +90,18 @@ for (const [name, a] of Object.entries(artifacts)) {
   } else {
     fs.writeFileSync(file, text);
     console.log(`out/${name}.json  init ${(a.bytecode.length - 2) / 2} B, runtime ${(a.deployedBytecode.length - 2) / 2} B`);
+  }
+}
+// Artifacts of contracts that no longer exist.
+for (const f of fs.readdirSync(outDir)) {
+  if (f.endsWith('.json') && !(f.slice(0, -5) in artifacts)) {
+    if (check) {
+      console.error(`extra artifact: out/${f}`);
+      stale = true;
+    } else {
+      fs.rmSync(path.join(outDir, f));
+      console.log(`removed out/${f}`);
+    }
   }
 }
 if (stale) process.exit(1);

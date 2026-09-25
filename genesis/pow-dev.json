@@ -1,0 +1,42 @@
+{
+  "dev": true,
+  "config": {
+    "chainId": 1338,
+    "slotSeconds": 2,
+    "epochSlots": 32,
+    "committeeSize": 16,
+    "gasLimit": 30000000,
+    "minBaseFeeWei": 10000000,
+    "pow": {
+      "algorithm": "randombolt",
+      "initialDifficulty": "0x100",
+      "blockSeconds": 4,
+      "halfLifeSeconds": 120
+    },
+    "posMinStakers": 2,
+    "posMinStakeBolt": 128,
+    "posStreakEpochs": 2
+  },
+  "timestamp": 0,
+  "extraData": "0x426f6c74636861696e20706f77",
+  "alloc": {
+    "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc": {
+      "nonce": 0,
+      "balance": "0x21e19e0c9bab2400000",
+      "code": "0x",
+      "storage": {}
+    },
+    "0x70997970c51812dc3a010c7d01b50e0d17dc79c8": {
+      "nonce": 0,
+      "balance": "0x21e19e0c9bab2400000",
+      "code": "0x",
+      "storage": {}
+    },
+    "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
+      "nonce": 0,
+      "balance": "0x21e19e0c9bab2400000",
+      "code": "0x",
+      "storage": {}
+    }
+  }
+}

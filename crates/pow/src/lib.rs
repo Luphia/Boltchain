@@ -25,7 +25,11 @@ pub const SEED_LAG: u64 = 64;
 
 /// Height of the block whose hash keys RandomBOLT for block `height` (0 = genesis).
 pub fn seed_height(height: u64) -> u64 {
-    if height <= SEED_EPOCH + SEED_LAG { 0 } else { (height - SEED_LAG - 1) / SEED_EPOCH * SEED_EPOCH }
+    if height <= SEED_EPOCH + SEED_LAG {
+        0
+    } else {
+        (height - SEED_LAG - 1) / SEED_EPOCH * SEED_EPOCH
+    }
 }
 
 /// The header hash the miner commits to: everything but the nonce.
@@ -64,42 +68,105 @@ pub const BLOCK_EMISSION_RATE_E24: u128 = 65_938_656_555_113_079;
 /// Miner reward for one PoW block: the consensus share (80%) of the per-block issuance of the
 /// unissued pool `unissued`.
 pub fn block_reward(unissued: U256, consensus_bps: u32) -> U256 {
-    unissued * U256::from(BLOCK_EMISSION_RATE_E24) / U256::from(10u128.pow(24)) * U256::from(consensus_bps)
+    unissued * U256::from(BLOCK_EMISSION_RATE_E24) / U256::from(10u128.pow(24))
+        * U256::from(consensus_bps)
         / U256::from(10_000)
 }
 
-/// Searches nonces `start, start + step, …` (up to `tries` of them) for one whose RandomBOLT hash
-/// meets `difficulty`. Checks `stop` between batches. Returns (nonce, pow hash).
-#[allow(clippy::too_many_arguments)]
-pub fn search(
-    hasher: &Hasher,
-    key: &B256,
-    seal: &B256,
-    difficulty: U256,
-    start: u64,
-    step: u64,
-    tries: u64,
-    stop: &std::sync::atomic::AtomicBool,
-) -> Result<Option<(u64, B256)>, PowError> {
-    const BATCH: u64 = 16;
-    let mut n = start;
-    let mut done = 0;
-    while done < tries {
-        if stop.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(None);
-        }
-        let count = BATCH.min(tries - done);
-        let inputs: Vec<[u8; 40]> = (0..count).map(|i| pow_input(seal, n.wrapping_add(i * step))).collect();
-        let refs: Vec<&[u8]> = inputs.iter().map(|i| i.as_slice()).collect();
-        for (i, pow) in hasher.hash_batch(key, &refs)?.into_iter().enumerate() {
-            if meets(&pow, difficulty) {
-                return Ok(Some((n.wrapping_add(i as u64 * step), pow)));
-            }
-        }
-        n = n.wrapping_add(count * step);
-        done += count;
+/// Proof-of-work function of a chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Algorithm {
+    /// RandomBOLT (every public network).
+    RandomBolt,
+    /// keccak256(key ‖ input): a fast stand-in for tests on dev chains.
+    Keccak,
+}
+
+/// Hashes seals with a chain's algorithm.
+#[derive(Debug, Clone)]
+pub struct Pow {
+    algorithm: Algorithm,
+    hasher: Option<std::sync::Arc<Hasher>>,
+}
+
+impl Pow {
+    /// Verification: RandomBOLT in light mode, one hasher shared by the whole process (each
+    /// cached key costs 256 MiB).
+    pub fn light(algorithm: Algorithm) -> Self {
+        static LIGHT: std::sync::OnceLock<std::sync::Arc<Hasher>> = std::sync::OnceLock::new();
+        let hasher = (algorithm == Algorithm::RandomBolt)
+            .then(|| LIGHT.get_or_init(|| std::sync::Arc::new(Hasher::new(Mode::Light))).clone());
+        Self { algorithm, hasher }
     }
-    Ok(None)
+
+    /// Mining: RandomBOLT in `mode` with its own hasher (fast mode allocates 2 GiB per key).
+    pub fn with_mode(algorithm: Algorithm, mode: Mode) -> Self {
+        if mode == Mode::Light {
+            return Self::light(algorithm);
+        }
+        let hasher =
+            (algorithm == Algorithm::RandomBolt).then(|| std::sync::Arc::new(Hasher::new(mode)));
+        Self { algorithm, hasher }
+    }
+
+    /// Algorithm.
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    fn hash_batch(&self, key: &B256, inputs: &[&[u8]]) -> Result<Vec<B256>, PowError> {
+        match &self.hasher {
+            Some(h) => h.hash_batch(key, inputs),
+            None => Ok(inputs.iter().map(|i| keccak256([key.as_slice(), i].concat())).collect()),
+        }
+    }
+
+    /// The PoW hash of `seal` with `nonce`.
+    pub fn hash(&self, key: &B256, seal: &B256, nonce: u64) -> Result<B256, PowError> {
+        let input = pow_input(seal, nonce);
+        Ok(self.hash_batch(key, &[input.as_slice()])?.remove(0))
+    }
+
+    /// Whether `header`'s nonce seals it at its own difficulty under `key`.
+    pub fn verify(&self, key: &B256, header: &Header) -> Result<bool, PowError> {
+        let pow = self.hash(key, &seal_hash(header), u64::from_be_bytes(header.nonce.0))?;
+        Ok(meets(&pow, header.difficulty))
+    }
+
+    /// Searches nonces `start, start + step, …` (up to `tries` of them) for one whose hash meets
+    /// `difficulty`. Checks `stop` between batches. Returns (nonce, pow hash).
+    #[allow(clippy::too_many_arguments)]
+    pub fn search(
+        &self,
+        key: &B256,
+        seal: &B256,
+        difficulty: U256,
+        start: u64,
+        step: u64,
+        tries: u64,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<(u64, B256)>, PowError> {
+        const BATCH: u64 = 16;
+        let mut n = start;
+        let mut done = 0;
+        while done < tries {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(None);
+            }
+            let count = BATCH.min(tries - done);
+            let inputs: Vec<[u8; 40]> =
+                (0..count).map(|i| pow_input(seal, n.wrapping_add(i * step))).collect();
+            let refs: Vec<&[u8]> = inputs.iter().map(|i| i.as_slice()).collect();
+            for (i, pow) in self.hash_batch(key, &refs)?.into_iter().enumerate() {
+                if meets(&pow, difficulty) {
+                    return Ok(Some((n.wrapping_add(i as u64 * step), pow)));
+                }
+            }
+            n = n.wrapping_add(count * step);
+            done += count;
+        }
+        Ok(None)
+    }
 }
 
 /// Keccak of the RandomX key material for `seed_block` (domain-separated).
