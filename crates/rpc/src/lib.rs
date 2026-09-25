@@ -134,7 +134,9 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         Ok(c.chain.config().chain_id.to_string())
     });
     method!("net_listening", |_, _| -> RpcResult<bool> { Ok(true) });
-    method!("net_peerCount", |_, _| -> RpcResult<U64> { Ok(U64::ZERO) });
+    method!("net_peerCount", |_, _| -> RpcResult<U64> {
+        Ok(U64::from(bolt_primitives::metrics::PEERS.get()))
+    });
     method!("eth_syncing", |_, _| -> RpcResult<bool> { Ok(false) });
     method!("eth_accounts", |_, _| -> RpcResult<Vec<Address>> { Ok(vec![]) });
     method!("eth_chainId", |_, c| -> RpcResult<U64> { Ok(U64::from(c.chain.config().chain_id)) });
@@ -156,7 +158,7 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
     });
 
     method!("eth_getBalance", |p, c| -> RpcResult<U256> {
-        let (addr, id): (Address, Option<BlockId>) = p.parse()?;
+        let (addr, id): (Address, Option<BlockId>) = with_block(&p)?;
         let r = c.chain.store().reader().map_err(internal)?;
         let at = c.resolve(&r, id)?;
         let acc = match at {
@@ -169,7 +171,7 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         Ok(acc.map(|a| a.balance).unwrap_or_default())
     });
     method!("eth_getTransactionCount", |p, c| -> RpcResult<U64> {
-        let (addr, id): (Address, Option<BlockId>) = p.parse()?;
+        let (addr, id): (Address, Option<BlockId>) = with_block(&p)?;
         let pending = matches!(id, Some(BlockId::Number(BlockNumberOrTag::Pending)));
         let r = c.chain.store().reader().map_err(internal)?;
         let at = c.resolve(&r, id)?;
@@ -184,7 +186,7 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         Ok(U64::from(if pending { c.pool.pending_nonce(&addr, nonce) } else { nonce }))
     });
     method!("eth_getCode", |p, c| -> RpcResult<Bytes> {
-        let (addr, id): (Address, Option<BlockId>) = p.parse()?;
+        let (addr, id): (Address, Option<BlockId>) = with_block(&p)?;
         let r = c.chain.store().reader().map_err(internal)?;
         let at = c.resolve(&r, id)?;
         let acc = match at {
@@ -200,7 +202,9 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         }
     });
     method!("eth_getStorageAt", |p, c| -> RpcResult<B256> {
-        let (addr, slot, id): (Address, U256, Option<BlockId>) = p.parse()?;
+        let mut seq = p.sequence();
+        let (addr, slot): (Address, U256) = (seq.next()?, seq.next()?);
+        let id: Option<BlockId> = seq.optional_next()?;
         let r = c.chain.store().reader().map_err(internal)?;
         let at = c.resolve(&r, id)?;
         let slot = B256::from(slot);
@@ -215,11 +219,11 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
     });
 
     method!("eth_call", |p, c| -> RpcResult<Bytes> {
-        let (req, id): (TransactionRequest, Option<BlockId>) = p.parse()?;
+        let (req, id): (TransactionRequest, Option<BlockId>) = with_block(&p)?;
         call::eth_call(c, req, id)
     });
     method!("eth_estimateGas", |p, c| -> RpcResult<U64> {
-        let (req, id): (TransactionRequest, Option<BlockId>) = p.parse()?;
+        let (req, id): (TransactionRequest, Option<BlockId>) = with_block(&p)?;
         call::estimate_gas(c, req, id).map(U64::from)
     });
     method!("eth_sendRawTransaction", |p, c| -> RpcResult<B256> {
@@ -317,4 +321,12 @@ pub async fn start(
     let local = server.local_addr()?;
     let handle = server.start(module(ctx));
     Ok((local, handle))
+}
+
+/// Parses `[value, block?]`: the block parameter may be omitted (clients such as ethers and
+/// MetaMask leave it out of `eth_estimateGas`; geth treats a missing tag as `latest`).
+fn with_block<T: serde::de::DeserializeOwned>(p: &Params<'_>) -> RpcResult<(T, Option<BlockId>)> {
+    let mut seq = p.sequence();
+    let v: T = seq.next()?;
+    Ok((v, seq.optional_next()?))
 }

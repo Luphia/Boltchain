@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bolt-primitives.workspace = true
 bolt-ipld.workspace = true
 alloy-primitives.workspace = true
 libp2p.workspace = true

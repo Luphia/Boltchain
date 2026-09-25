@@ -340,6 +340,7 @@ impl Storage {
                     "storage audit certified"
                 );
                 st.certified.insert((vote.epoch, vote.task));
+                bolt_primitives::metrics::AUDITS_CERTIFIED.inc();
                 let epoch = vote.epoch;
                 st.votes.retain(|(e, _, _), _| *e + 2 > epoch);
                 drop(st);
@@ -403,6 +404,7 @@ impl Storage {
             for (m, k) in todo {
                 let vote = AuditVote::sign(&self.cfg.keys[k], chain_id, epoch, task16, passed, m);
                 self.state.lock().audited.insert((epoch, task16, m));
+                bolt_primitives::metrics::AUDIT_VOTES.inc();
                 let _ = self.net.publish_storage(StorageMsg::Audit(vote.clone()).encode()).await;
                 self.add_vote(vote)?;
             }
@@ -464,6 +466,7 @@ impl Storage {
                 let chain = self.chain.clone();
                 let n = tokio::task::spawn_blocking(move || chain.prune_epoch(e)).await??;
                 if n > 0 {
+                    bolt_primitives::metrics::BLOCKS_PRUNED.add(n);
                     tracing::info!(epoch = e, blocks = n, "pruned history");
                 }
                 self.state.lock().pruned.insert(e);

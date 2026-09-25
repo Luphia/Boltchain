@@ -1,0 +1,5 @@
+# name  ssh-target            public-address   threads  keys  public-rpc  randomx-fast
+# public-address is what other nodes dial (DNS name or IP).
+tn1     root@203.0.113.10     tn1.example.org  2        4     1           1
+tn2     ubuntu@203.0.113.11   203.0.113.11     2        4     0           1
+tn3     root@203.0.113.12     203.0.113.12     2        4     0           0

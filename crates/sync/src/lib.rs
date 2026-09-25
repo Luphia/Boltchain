@@ -66,6 +66,7 @@ pub fn announce_for(bundle: &BlockBundle) -> Announce {
         header: find(&bundle.envelope.header),
         inline,
         proof: Vec::new(),
+        at: 0,
     }
 }
 
@@ -87,7 +88,7 @@ pub fn announce_stored(chain: &Chain, number: u64, proof: Vec<u8>) -> Option<Ann
     if size > INLINE_BODY_BYTES {
         inline.clear();
     }
-    Some(Announce { height: number, root, envelope, header, inline, proof })
+    Some(Announce { height: number, root, envelope, header, inline, proof, at: 0 })
 }
 
 /// Publishes a freshly produced block.
@@ -173,6 +174,18 @@ impl Follower {
 
     /// Handles one announcement.
     pub async fn on_announce(&self, via: PeerId, a: Announce) -> Result<Outcome> {
+        let r = self.handle_announce(via, a).await;
+        match &r {
+            Ok(Outcome::Imported { count, .. }) => {
+                bolt_primitives::metrics::BLOCKS_IMPORTED.add(*count)
+            }
+            Err(_) => bolt_primitives::metrics::IMPORT_ERRORS.inc(),
+            _ => {}
+        }
+        r
+    }
+
+    async fn handle_announce(&self, via: PeerId, a: Announce) -> Result<Outcome> {
         let started = Instant::now();
         verify(&a.root, &a.envelope)?;
         let envelope = Envelope::decode(&a.envelope)?;

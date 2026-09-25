@@ -1,6 +1,6 @@
 //! Boltchain node binary.
 
-use boltchain::{bench, devnet, follow, keys, validator};
+use boltchain::{bench, devnet, follow, keys, validator, wallet};
 
 use anyhow::{Context, Result};
 use bolt_primitives::Genesis;
@@ -24,6 +24,9 @@ enum Command {
     /// Validator key tools.
     #[command(subcommand)]
     Keys(keys::KeysCmd),
+    /// Account wallet: create a key, check balances, send BOLT, stake, publish a history peer.
+    #[command(subcommand)]
+    Wallet(wallet::WalletCmd),
     /// Run a single-producer development network with JSON-RPC, announcing blocks over IPFS.
     Devnet(devnet::DevnetArgs),
     /// Follow a producer: sync blocks over IPFS, serve JSON-RPC, forward transactions.
@@ -110,6 +113,7 @@ fn main() -> Result<()> {
         }
         Command::Bench(args) => bench::run(args)?,
         Command::Keys(cmd) => keys::run(cmd)?,
+        Command::Wallet(cmd) => wallet::run(cmd)?,
         Command::Follow(args) => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

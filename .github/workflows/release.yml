@@ -1,0 +1,56 @@
+name: release
+
+# Push a tag like v0.2.0-testnet.1 to build binaries and attach them to a GitHub release.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Older glibc so the binaries run on most current distributions.
+          - { os: ubuntu-22.04, target: linux-x86_64 }
+          - { os: ubuntu-22.04-arm, target: linux-aarch64 }
+          - { os: macos-14, target: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95
+      - name: libclang for libmdbx bindgen
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev cmake
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p boltchain
+      - name: package
+        run: |
+          name=boltchain-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir -p "$name/genesis"
+          cp target/release/boltchain "$name/"
+          cp genesis/testnet.json genesis/mainnet.template.json "$name/genesis/"
+          cp LICENSE "$name/"
+          tar czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: boltchain-*.tar.gz*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: boltchain-*.tar.gz*
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

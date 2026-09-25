@@ -230,6 +230,7 @@ impl TxPool {
         inner.bytes += size;
         inner.by_sender.entry(sender).or_default().insert(nonce, hash);
         inner.by_hash.insert(hash, Arc::new(PooledTx { tx, sender, hash, size }));
+        bolt_primitives::metrics::TXS_ADMITTED.inc();
         Ok(hash)
     }
 

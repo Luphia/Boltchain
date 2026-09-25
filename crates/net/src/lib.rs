@@ -74,6 +74,11 @@ pub struct Announce {
     /// Finality proof (consensus networks): encoded `CommitProof` for this block.
     #[serde(default, with = "serde_bytes")]
     pub proof: Vec<u8>,
+    /// Sender's clock (unix ms) at publication, set by the network task: a re-announcement of
+    /// the same block is then a new gossip message (gossipsub drops repeats of recent messages
+    /// by content), so peers that joined since still receive it.
+    #[serde(default)]
+    pub at: u64,
 }
 
 impl Announce {
@@ -455,7 +460,11 @@ async fn run(
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    Command::Publish(a) => {
+                    Command::Publish(mut a) => {
+                        a.at = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), a.encode()) {
                             tracing::debug!("publish: {e}");
                         }
@@ -612,6 +621,7 @@ const EVENT_BUFFER: usize = 1024;
 /// of stalling Bitswap and every other protocol for all its peers.
 fn deliver(tx: &mpsc::Sender<NetEvent>, ev: NetEvent) {
     if let Err(mpsc::error::TrySendError::Full(ev)) = tx.try_send(ev) {
+        bolt_primitives::metrics::EVENTS_DROPPED.inc();
         tracing::warn!(event = ev.kind(), "node is not keeping up; dropped a network event");
     }
 }

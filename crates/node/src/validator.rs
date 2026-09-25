@@ -785,6 +785,7 @@ impl Validator {
                             let ok = match res {
                                 Ok(()) => true,
                                 Err(e) => {
+                                    bolt_primitives::metrics::PROPOSALS_REJECTED.inc();
                                     tracing::warn!(
                                         round = p.block.round,
                                         height = p.block.height,
@@ -956,6 +957,7 @@ impl Validator {
             header,
             inline: Vec::new(),
             proof: serde_ipld_dagcbor::to_vec(&proof).expect("proof serializes"),
+            at: 0,
         };
         tracing::info!(height = last.height, hash = %last.hash, round = last.round, "finalized");
         let _ = self.net.publish(announce).await;
@@ -1112,6 +1114,10 @@ pub struct ValidatorArgs {
     /// Storage options.
     #[command(flatten)]
     pub storage: StorageArgs,
+    /// Serve Prometheus metrics (`/metrics`) and a JSON status (`/health`), e.g.
+    /// `127.0.0.1:9017`.
+    #[arg(long)]
+    pub metrics: Option<std::net::SocketAddr>,
 }
 
 /// Storage-layer options (ADR 0009).
@@ -1172,6 +1178,10 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
     if let Some(addr) = args.storage.gateway {
         crate::gateway::start(addr, chain.clone()).await?;
     }
+    if let Some(addr) = args.metrics {
+        crate::metrics::start(addr, chain.clone(), Some(pool.clone())).await?;
+    }
+    crate::metrics::spawn_status(chain.clone(), net.clone(), Some(pool.clone()));
     let ctx = bolt_rpc::RpcContext {
         chain: chain.clone(),
         pool: pool.clone(),

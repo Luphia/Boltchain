@@ -113,7 +113,10 @@ pub async fn run(
                             let _ = tx.blocking_send(nonce);
                             return;
                         }
-                        Ok(None) => start = start.wrapping_add(64 * threads as u64),
+                        Ok(None) => {
+                            bolt_primitives::metrics::HASHES.add(64);
+                            start = start.wrapping_add(64 * threads as u64)
+                        }
                         Err(e) => {
                             tracing::error!("hashing failed: {e}");
                             stop.store(true, Ordering::Relaxed);
@@ -146,6 +149,7 @@ pub async fn run(
                 if outcome == MinedOutcome::Extended
                     || matches!(outcome, MinedOutcome::Reorged { .. })
                 {
+                    bolt_primitives::metrics::BLOCKS_MINED.inc();
                     tracing::info!(
                         number,
                         hash = %header.hash_slow(),

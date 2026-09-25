@@ -115,6 +115,7 @@ async fn announce_fetch_and_forward() {
         header: vec![2],
         inline: vec![],
         proof: vec![],
+        at: 0,
     };
     let got = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -130,7 +131,8 @@ async fn announce_fetch_and_forward() {
     .await
     .expect("announcement delivered");
     assert_eq!(got.0, a_id);
-    assert_eq!(got.1, ann);
+    assert!(got.1.at > 0, "the network stamps the publication time");
+    assert_eq!(Announce { at: 0, ..got.1 }, ann);
 
     // B fetches both blocks from A over bitswap.
     let t = std::time::Instant::now();
@@ -188,6 +190,7 @@ async fn announcements_from_other_authors_are_dropped() {
         header: vec![],
         inline: vec![],
         proof: vec![],
+        at: 0,
     };
     let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
     while tokio::time::Instant::now() < deadline {

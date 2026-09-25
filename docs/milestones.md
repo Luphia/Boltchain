@@ -10,7 +10,7 @@
 | M4.5 PoW 啟動 | RandomBOLT 挖礦、ASERT、分叉選擇與重組上限、移除治理、自動切換到 PoS | 5 礦工 + 10 跟隨節點；重組上限生效；從 genesis 同步驗證 PoW；自動切換到 PoS | 完成（本機驗收） |
 | M4.6 質押最終性 | 階段 B：委員會以 BFT 確認 PoW 檢查點；60/40 獎勵；完整 A → B → C | 多數算力攻擊被最終性擋下；小額質押無法啟動委員會；A → B → C 走完 | 完成（本機驗收） |
 | M5 儲存層 | 檢查點同步、CAR 快照、修剪、歷史分片與抽查 | 新節點從快照起步追上最新區塊 | 完成（本機驗收） |
-| M6 強化與測試網 | peer scoring、NAT 穿透、防罰沒、樹莓派基準 | 樹莓派驗證者 7 天參與率 > 99%，RSS < 1.5 GB | 未開始 |
+| M6 強化與測試網 | peer scoring、NAT 穿透、防罰沒、樹莓派基準 | 樹莓派驗證者 7 天參與率 > 99%，RSS < 1.5 GB | 進行中：公開測試網已上線（見 `docs/testnet.md`） |
 
 ## M1 結果（2026-09-25）
 
@@ -254,6 +254,21 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - 檢查點必須是節點仍保留的快照（約最近 2 個 epoch）；之後改成接受較新的快照，再回溯 header 驗證到檢查點
 - 儲存 topic（審計投票、快照公告）沒有 peer scoring 與速率限制；閘道沒有速率限制
 - 抽查只證明「被問時交得出來」；空區塊的抽查目標是人人都有的 envelope
+
+## M6 強化與測試網：進行中
+
+先開小型公開測試網，讓問題在真實環境中浮現，再依觀察做網路強化。
+
+- [x] 確認區塊資料完整存在 IPFS：以標準 IPFS 實作（Helia）只靠 Bitswap，從最新區塊沿 `parent` 一路下載到 genesis。157 塊、60 筆交易、12 個 body 分塊，與 RPC 逐塊比對零差異（`scripts/interop/helia-full-chain.mjs`）
+- [x] 修正：M4.5 的分叉 ID 檢查把沒有分叉 ID 的一般 IPFS 用戶端斷線，導致它們取不到區塊。現在保留連線，但不把它們當成鏈上的 peer
+- [x] 修正：交易池沒有檢查 intrinsic gas 與 EIP-7623 calldata 下限，這類交易 RPC 回應成功，之後卻在出塊時被默默丟掉
+- [x] 修正：`eth_estimateGas`、`eth_getBalance` 等方法省略區塊參數時回傳 Invalid params（ethers 與 MetaMask 會省略這個參數）
+- [x] 修正：同一個區塊的重播公告被 gossipsub 當成重複訊息丟掉，晚加入的節點收不到。公告加上發送時間 `at`
+- [x] 維運：`--metrics`（Prometheus `/metrics`、JSON `/health`）、每分鐘一行 status 日誌（含雜湊率）、`net_peerCount`
+- [x] 錢包：`boltchain wallet new|balance|send|stake|set-peer`，伺服器上不需要 MetaMask
+- [x] 測試網 genesis（chain 8018，從挖礦開始，門檻縮小）、部署腳本（systemd 與免 root 兩種）、release workflow、加入說明（`docs/testnet.md`）
+- [x] 公開測試網上線（2026-09-25）：211.22.118.149 上跑 4 個節點、16 把驗證者金鑰，公開 bootnode、RPC 與 IPFS 閘道
+- [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## M6 追加項目（ADR 0008）
 

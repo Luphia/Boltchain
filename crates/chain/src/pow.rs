@@ -184,7 +184,10 @@ impl Chain {
             return Ok(MinedOutcome::Side);
         }
         match self.reorg_to(&hash) {
-            Ok(depth) => Ok(MinedOutcome::Reorged { depth }),
+            Ok(depth) => {
+                bolt_primitives::metrics::REORGS.inc();
+                Ok(MinedOutcome::Reorged { depth })
+            }
             Err(e) => Err(e),
         }
     }

@@ -8,6 +8,7 @@
 - 開發方案：<https://claude.ai/code/artifact/cd491a00-a0a2-4e92-92f3-205aa77d55c5>
 - 設計決策紀錄：[`docs/adr/`](docs/adr/)
 - 里程碑進度：[`docs/milestones.md`](docs/milestones.md)
+- 公開測試網（chain 8018）：[`docs/testnet.md`](docs/testnet.md)
 
 ## 目前狀態：M5 儲存層
 

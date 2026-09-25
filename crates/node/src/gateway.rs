@@ -20,32 +20,45 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Starts the gateway; returns the bound address.
 pub async fn start(addr: SocketAddr, chain: Arc<Chain>) -> Result<SocketAddr> {
+    let bound = serve(addr, Arc::new(move |req: &str| respond(&chain, req))).await?;
+    tracing::info!(%bound, "IPFS gateway listening");
+    Ok(bound)
+}
+
+/// A request handler: raw request head in, (status, content type, body) out. Runs on a
+/// blocking thread.
+pub type Handler = Arc<dyn Fn(&str) -> Response + Send + Sync>;
+
+/// Minimal HTTP/1.1 server (one request per connection, GET only in practice) shared by the
+/// gateway and the metrics endpoint.
+pub async fn serve(addr: SocketAddr, handler: Handler) -> Result<SocketAddr> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tokio::spawn(async move {
         loop {
             let Ok((mut sock, _)) = listener.accept().await else { continue };
-            let chain = chain.clone();
+            let handler = handler.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 8192];
                 let mut n = 0;
                 while n < buf.len() {
-                    match sock.read(&mut buf[n..]).await {
-                        Ok(0) | Err(_) => break,
-                        Ok(k) => n += k,
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(10),
+                        sock.read(&mut buf[n..]),
+                    )
+                    .await
+                    {
+                        Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                        Ok(Ok(k)) => n += k,
                     }
                     if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
                         break;
                     }
                 }
                 let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                let chain2 = chain.clone();
-                let (status, ctype, body) =
-                    tokio::task::spawn_blocking(move || respond(&chain2, &req)).await.unwrap_or((
-                        500,
-                        "text/plain",
-                        b"internal error".to_vec(),
-                    ));
+                let (status, ctype, body) = tokio::task::spawn_blocking(move || handler(&req))
+                    .await
+                    .unwrap_or((500, "text/plain", b"internal error".to_vec()));
                 let head = format!(
                     "HTTP/1.1 {status} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
                     reason(status),
@@ -57,7 +70,6 @@ pub async fn start(addr: SocketAddr, chain: Arc<Chain>) -> Result<SocketAddr> {
             });
         }
     });
-    tracing::info!(%bound, "IPFS gateway listening");
     Ok(bound)
 }
 
@@ -71,9 +83,11 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-type Response = (u16, &'static str, Vec<u8>);
+/// (status, content type, body).
+pub type Response = (u16, &'static str, Vec<u8>);
 
-fn text(status: u16, msg: impl Into<String>) -> Response {
+/// A plain-text response.
+pub fn text(status: u16, msg: impl Into<String>) -> Response {
     (status, "text/plain; charset=utf-8", msg.into().into_bytes())
 }
 

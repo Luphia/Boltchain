@@ -35,6 +35,9 @@ pub struct FollowArgs {
     /// Storage options (public chains only).
     #[command(flatten)]
     pub storage: crate::validator::StorageArgs,
+    /// Serve Prometheus metrics and `/health` on this address.
+    #[arg(long)]
+    pub metrics: Option<SocketAddr>,
 }
 
 #[derive(Debug)]
@@ -70,6 +73,7 @@ pub async fn run(args: FollowArgs) -> Result<()> {
             },
             p2p: args.p2p,
             storage: args.storage,
+            metrics: args.metrics,
         })
         .await;
     };

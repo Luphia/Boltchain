@@ -258,6 +258,7 @@ impl Bitswap {
                     _ => {}
                 }
             }
+            bolt_primitives::metrics::BITSWAP_SERVED.add(reply.payload.len() as u64);
             if !reply.payload.is_empty() || !reply.block_presences.is_empty() {
                 // Split so no single message exceeds the limit.
                 for part in split(reply) {
@@ -397,6 +398,7 @@ impl Bitswap {
         if todo.is_empty() {
             Ok(got)
         } else {
+            bolt_primitives::metrics::BITSWAP_FETCH_FAILURES.inc();
             Err(FetchError { missing: todo.into_iter().collect() })
         }
     }

@@ -1,0 +1,19 @@
+[Unit]
+Description=Boltchain testnet node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=boltchain
+Group=boltchain
+EnvironmentFile=/etc/boltchain/boltchain.env
+Environment=RUST_LOG=info,libmdbx=warn,libp2p=warn
+ExecStart=/opt/boltchain/boltchain validator $BOLT_ARGS
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+# Keep a crash from filling the disk with core dumps.
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

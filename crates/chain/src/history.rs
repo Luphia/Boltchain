@@ -136,6 +136,7 @@ impl Chain {
         }
         w.set_snapshot_roots(&roots)?;
         w.commit()?;
+        bolt_primitives::metrics::SNAPSHOTS.inc();
         tracing::info!(
             number,
             %root,

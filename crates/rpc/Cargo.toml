@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+bolt-primitives.workspace = true
 bolt-chain.workspace = true
 bolt-exec.workspace = true
 bolt-store.workspace = true

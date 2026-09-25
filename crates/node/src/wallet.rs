@@ -1,0 +1,300 @@
+//! Minimal wallet for operators (no MetaMask needed on a server): create an account key, check
+//! balances, send BOLT, stake a validator key and publish a validator's history peer, through
+//! any node's JSON-RPC.
+
+use crate::keys;
+use alloy_consensus::{SignableTransaction, TxEip1559, TxEnvelope};
+use alloy_eips::eip2718::Encodable2718;
+use alloy_network::TxSignerSync;
+use alloy_primitives::{Address, B256, Bytes, TxKind, U256, hex};
+use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::SolCall;
+use anyhow::{Context, Result, bail};
+use bolt_primitives::params::WEI_PER_BOLT;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::{
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+/// Wallet commands.
+#[derive(Debug, clap::Subcommand)]
+pub enum WalletCmd {
+    /// Create a new account key file (0600; refuses to overwrite).
+    New {
+        /// Output file.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Print an account's address and balance.
+    Balance {
+        /// Account key file (or use --address).
+        #[arg(long)]
+        wallet: Option<PathBuf>,
+        /// Address.
+        #[arg(long)]
+        address: Option<Address>,
+        /// JSON-RPC endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+    /// Send BOLT (and optionally call data).
+    Send {
+        /// Account key file.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Recipient.
+        #[arg(long)]
+        to: Address,
+        /// Amount in BOLT (decimals allowed).
+        #[arg(long, default_value = "0")]
+        value: String,
+        /// Call data (hex).
+        #[arg(long)]
+        data: Option<Bytes>,
+        /// JSON-RPC endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+    /// Register a validator key with a stake (at least 64 BOLT) paid by this account, which
+    /// becomes the validator's owner.
+    Stake {
+        /// Account key file (owner; pays the stake).
+        #[arg(long)]
+        wallet: PathBuf,
+        /// BLS validator key file.
+        #[arg(long)]
+        key: PathBuf,
+        /// Stake in BOLT.
+        #[arg(long)]
+        amount: String,
+        /// Receives rewards and tips (defaults to the owner).
+        #[arg(long)]
+        fee_recipient: Option<Address>,
+        /// JSON-RPC endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+    /// Publish the node a validator serves history from (ADR 0009); send from the owner.
+    SetPeer {
+        /// Owner account key file.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// BLS validator key file (its id is looked up on chain).
+        #[arg(long)]
+        key: PathBuf,
+        /// The node's identity key (`<datadir>/node.key`).
+        #[arg(long)]
+        node_key: PathBuf,
+        /// JSON-RPC endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WalletFile {
+    address: Address,
+    private_key: String,
+}
+
+/// Loads an account key file.
+pub fn load_wallet(path: &Path) -> Result<PrivateKeySigner> {
+    let f: WalletFile = serde_json::from_str(
+        &std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
+    )?;
+    let s: PrivateKeySigner = f.private_key.parse().context("invalid private key")?;
+    if s.address() != f.address {
+        bail!("wallet file address does not match its key");
+    }
+    Ok(s)
+}
+
+/// Parses a decimal BOLT amount into wei.
+pub fn parse_bolt(s: &str) -> Result<U256> {
+    let (int, frac) = s.split_once('.').unwrap_or((s, ""));
+    if frac.len() > 18 || int.is_empty() && frac.is_empty() {
+        bail!("invalid amount {s}");
+    }
+    let frac = format!("{frac:0<18}");
+    let int = if int.is_empty() { U256::ZERO } else { U256::from_str_radix(int, 10)? };
+    Ok(int * U256::from(WEI_PER_BOLT) + U256::from_str_radix(&frac, 10)?)
+}
+
+/// Formats wei as BOLT.
+pub fn format_bolt(wei: U256) -> String {
+    let w = U256::from(WEI_PER_BOLT);
+    let frac = format!("{:018}", wei % w).trim_end_matches('0').to_string();
+    if frac.is_empty() { format!("{}", wei / w) } else { format!("{}.{frac}", wei / w) }
+}
+
+/// One JSON-RPC call over plain HTTP (`http://host:port[/path]`).
+pub fn rpc(url: &str, method: &str, params: Value) -> Result<Value> {
+    let rest = url.strip_prefix("http://").context("only http:// endpoints are supported")?;
+    let (host, path) =
+        rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
+    let mut s =
+        std::net::TcpStream::connect(host).with_context(|| format!("connecting to {host}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(30)))?;
+    write!(
+        s,
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut resp = String::new();
+    s.read_to_string(&mut resp)?;
+    let json_body = resp.split_once("\r\n\r\n").map(|(_, b)| b).context("bad HTTP response")?;
+    // Chunked responses: take the JSON object between the first '{' and the last '}'.
+    let start = json_body.find('{').context("no JSON in response")?;
+    let end = json_body.rfind('}').context("no JSON in response")?;
+    let v: Value = serde_json::from_str(&json_body[start..=end])?;
+    if let Some(e) = v.get("error") {
+        bail!("{method}: {}", e.get("message").and_then(|m| m.as_str()).unwrap_or("error"));
+    }
+    Ok(v["result"].clone())
+}
+
+fn quantity(v: &Value) -> Result<U256> {
+    let s = v.as_str().context("expected a hex quantity")?;
+    Ok(U256::from_str_radix(s.trim_start_matches("0x"), 16)?)
+}
+
+/// Signs and sends a transaction; waits for its receipt. Returns the hash.
+pub fn send_tx(
+    rpc_url: &str,
+    signer: &PrivateKeySigner,
+    to: Address,
+    value: U256,
+    data: Bytes,
+) -> Result<B256> {
+    let from = signer.address();
+    let chain_id = quantity(&rpc(rpc_url, "eth_chainId", json!([]))?)?.to::<u64>();
+    let nonce =
+        quantity(&rpc(rpc_url, "eth_getTransactionCount", json!([from, "pending"]))?)?.to::<u64>();
+    let gas_price = quantity(&rpc(rpc_url, "eth_gasPrice", json!([]))?)?.to::<u128>();
+    let tip = quantity(&rpc(rpc_url, "eth_maxPriorityFeePerGas", json!([]))?)
+        .map(|t| t.to::<u128>())
+        .unwrap_or(1_000_000);
+    let call = json!({"from": from, "to": to, "value": format!("0x{value:x}"), "data": data});
+    let gas = quantity(&rpc(rpc_url, "eth_estimateGas", json!([call, "latest"]))?)?.to::<u64>();
+    let mut tx = TxEip1559 {
+        chain_id,
+        nonce,
+        gas_limit: gas + gas / 5,
+        max_fee_per_gas: gas_price * 2 + tip,
+        max_priority_fee_per_gas: tip,
+        to: TxKind::Call(to),
+        value,
+        input: data,
+        ..Default::default()
+    };
+    let sig = signer.sign_transaction_sync(&mut tx)?;
+    let env: TxEnvelope = tx.into_signed(sig).into();
+    let raw = hex::encode_prefixed(env.encoded_2718());
+    let hash: B256 = serde_json::from_value(rpc(rpc_url, "eth_sendRawTransaction", json!([raw]))?)?;
+    println!("sent {hash}; waiting for inclusion…");
+    for _ in 0..180 {
+        let r = rpc(rpc_url, "eth_getTransactionReceipt", json!([hash]))?;
+        if !r.is_null() {
+            let ok = r["status"].as_str() == Some("0x1");
+            let block = r["blockNumber"].as_str().unwrap_or("?");
+            if !ok {
+                bail!("transaction {hash} reverted in block {block}");
+            }
+            println!("included in block {block}");
+            return Ok(hash);
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+    bail!("transaction {hash} not included after 6 minutes (still pending)")
+}
+
+/// Runs a wallet command.
+pub fn run(cmd: WalletCmd) -> Result<()> {
+    match cmd {
+        WalletCmd::New { out } => {
+            if out.exists() {
+                bail!("{} already exists; refusing to overwrite a key", out.display());
+            }
+            if let Some(dir) = out.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let s = PrivateKeySigner::random();
+            let f = WalletFile {
+                address: s.address(),
+                private_key: hex::encode_prefixed(s.to_bytes()),
+            };
+            std::fs::write(&out, serde_json::to_string_pretty(&f)? + "\n")?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
+            }
+            println!("address {}", s.address());
+            println!("saved to {} (keep it secret; back it up)", out.display());
+        }
+        WalletCmd::Balance { wallet, address, rpc: url } => {
+            let a = match (wallet, address) {
+                (Some(w), _) => load_wallet(&w)?.address(),
+                (None, Some(a)) => a,
+                (None, None) => bail!("give --wallet or --address"),
+            };
+            let b = quantity(&rpc(&url, "eth_getBalance", json!([a, "latest"]))?)?;
+            println!("{a} {} BOLT", format_bolt(b));
+        }
+        WalletCmd::Send { wallet, to, value, data, rpc: url } => {
+            let s = load_wallet(&wallet)?;
+            send_tx(&url, &s, to, parse_bolt(&value)?, data.unwrap_or_default())?;
+        }
+        WalletCmd::Stake { wallet, key, amount, fee_recipient, rpc: url } => {
+            let s = load_wallet(&wallet)?;
+            let k = keys::load_key(&key)?;
+            let tx = keys::register_tx(&k, fee_recipient.unwrap_or(s.address()))?;
+            let data: Bytes = tx["data"].as_str().context("data")?.parse()?;
+            send_tx(&url, &s, bolt_system::addresses::STAKING, parse_bolt(&amount)?, data)?;
+            println!(
+                "validator {} registered; it joins committees once its stake matures",
+                k.public_key()
+            );
+        }
+        WalletCmd::SetPeer { wallet, key, node_key, rpc: url } => {
+            let s = load_wallet(&wallet)?;
+            let k = keys::load_key(&key)?;
+            let h = alloy_primitives::keccak256(k.public_key().as_slice());
+            let call = bolt_system::abi::IStakingManager::idOfPubkeyCall { h }.abi_encode();
+            let out = rpc(
+                &url,
+                "eth_call",
+                json!([{"to": bolt_system::addresses::STAKING, "data": hex::encode_prefixed(call)}, "latest"]),
+            )?;
+            let id = quantity(&out)?.to::<u32>();
+            if id == 0 {
+                bail!("this BLS key is not registered yet (run `wallet stake` first)");
+            }
+            let peer = bolt_net::load_or_create_key(&node_key)?.public().to_peer_id();
+            let tx = keys::set_peer_tx(id, &peer);
+            let data: Bytes = tx["data"].as_str().context("data")?.parse()?;
+            send_tx(&url, &s, bolt_system::addresses::HISTORY, U256::ZERO, data)?;
+            println!("validator {id} serves history from {peer}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bolt_amounts() {
+        assert_eq!(parse_bolt("64").unwrap(), U256::from(64u128 * WEI_PER_BOLT));
+        assert_eq!(parse_bolt("0.5").unwrap(), U256::from(WEI_PER_BOLT / 2));
+        assert_eq!(format_bolt(parse_bolt("1.25").unwrap()), "1.25");
+        assert_eq!(format_bolt(U256::from(3u128 * WEI_PER_BOLT)), "3");
+        assert!(parse_bolt("1.0000000000000000001").is_err());
+    }
+}
