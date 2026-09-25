@@ -60,6 +60,7 @@ pub(crate) mod t {
 
 const META_HEAD: &[u8] = b"head";
 const META_FINALIZED: &[u8] = b"finalized";
+pub(crate) const META_BASE: &[u8] = b"base";
 
 /// Storage error.
 #[derive(Debug, thiserror::Error)]
@@ -294,7 +295,13 @@ impl<'e, K: TransactionKind> Tx<'e, K> {
     /// Full block by number.
     pub fn block(&self, number: u64) -> Result<Option<StoredBlock>> {
         let Some(header) = self.header(number)? else { return Ok(None) };
-        let raw = self.get_raw(t::BODIES, &num_key(number))?.unwrap_or_default();
+        let Some(raw) = self.get_raw(t::BODIES, &num_key(number))? else {
+            // Pruned, or before a snapshot base: only a block without transactions is complete.
+            if header.transactions_root != alloy_trie::EMPTY_ROOT_HASH {
+                return Ok(None);
+            }
+            return Ok(Some(StoredBlock { header, transactions: vec![], senders: vec![] }));
+        };
         let items: Vec<Bytes> = if raw.is_empty() {
             Vec::new()
         } else {
@@ -412,7 +419,7 @@ impl<'e, K: TransactionKind> Tx<'e, K> {
     /// Whether state as of block `number` can be reconstructed.
     pub fn history_covers(&self, number: u64) -> Result<bool> {
         let head = self.head()?.unwrap_or(0);
-        Ok(number <= head && head - number <= crate::HISTORY_BLOCKS)
+        Ok(number <= head && head - number <= crate::HISTORY_BLOCKS && number >= self.base()?)
     }
 }
 
@@ -420,6 +427,12 @@ impl<'e> Tx<'e, RW> {
     pub(crate) fn put_raw(&self, table: &str, key: &[u8], value: &[u8]) -> Result<()> {
         let tbl = self.table(table)?;
         Ok(self.txn.put(&tbl, key, value, WriteFlags::UPSERT)?)
+    }
+
+    /// Deletes every entry of `table`.
+    pub(crate) fn clear_table(&self, table: &str) -> Result<()> {
+        let tbl = self.table(table)?;
+        Ok(self.txn.clear_table(&tbl)?)
     }
 
     pub(crate) fn del_raw(&self, table: &str, key: &[u8]) -> Result<()> {

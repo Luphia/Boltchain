@@ -13,6 +13,7 @@
 //! so the body needs no trie structure of its own and can be fetched in one bitswap round trip.
 
 pub mod car;
+pub mod history;
 
 use alloy_consensus::{Header, TxEnvelope};
 use alloy_eips::eip2718::{Decodable2718, Encodable2718};
@@ -108,6 +109,10 @@ pub struct Envelope {
     /// Quorum certificate for the parent (from M3; empty before).
     #[serde(with = "serde_bytes")]
     pub qc: Vec<u8>,
+    /// Storage-audit certificates the producer included (ADR 0009). Absent when empty, so
+    /// envelopes without audits encode exactly as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audits: Vec<serde_bytes::ByteBuf>,
 }
 
 impl Envelope {
@@ -186,6 +191,17 @@ pub fn bundle(
     parent: Option<Cid>,
     qc: Vec<u8>,
 ) -> BlockBundle {
+    bundle_with_audits(header, txs, parent, qc, Vec::new())
+}
+
+/// [`bundle`] for a block that carries storage-audit certificates.
+pub fn bundle_with_audits(
+    header: &Header,
+    txs: &[TxEnvelope],
+    parent: Option<Cid>,
+    qc: Vec<u8>,
+    audits: Vec<Vec<u8>>,
+) -> BlockBundle {
     let mut header_rlp = Vec::new();
     header.encode(&mut header_rlp);
     let hcid = header_cid(keccak256(&header_rlp));
@@ -200,8 +216,16 @@ pub fn bundle(
             blocks.push((c, piece.to_vec()));
         }
     }
-    let envelope =
-        Envelope { v: ENVELOPE_VERSION, height: header.number, header: hcid, parent, chunks, qc };
+    let audits = audits.into_iter().map(serde_bytes::ByteBuf::from).collect();
+    let envelope = Envelope {
+        v: ENVELOPE_VERSION,
+        height: header.number,
+        header: hcid,
+        parent,
+        chunks,
+        qc,
+        audits,
+    };
     let bytes = envelope.encode();
     let root = sha256_cid(DAG_CBOR, &bytes);
     blocks.push((root, bytes));

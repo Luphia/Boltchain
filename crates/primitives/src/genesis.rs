@@ -79,6 +79,10 @@ pub struct ChainConfig {
     /// Dev chains only: depth at which mined blocks become checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_depth: Option<u64>,
+    /// Dev chains only: epochs of history every validator keeps (older ones are sharded and
+    /// audited).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_recent_epochs: Option<u64>,
     /// Dev chains only: PoS threshold on the number of stakers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pos_min_stakers: Option<u32>,
@@ -103,6 +107,7 @@ impl Default for ChainConfig {
             checkpoint_min_stakers: None,
             checkpoint_min_stake_bolt: None,
             checkpoint_depth: None,
+            history_recent_epochs: None,
             pos_min_stakers: None,
             pos_min_stake_bolt: None,
             pos_streak_epochs: None,
@@ -117,6 +122,11 @@ impl ChainConfig {
             self.checkpoint_min_stakers.unwrap_or(CHECKPOINT_MIN_STAKERS),
             self.checkpoint_min_stake_bolt.unwrap_or(CHECKPOINT_MIN_TOTAL_STAKE_BOLT),
         )
+    }
+
+    /// Epochs of history every validator keeps.
+    pub fn history_recent_epochs(&self) -> u64 {
+        self.history_recent_epochs.unwrap_or(RECENT_PINNED_EPOCHS)
     }
 
     /// Checkpoint depth.
@@ -309,6 +319,7 @@ impl Genesis {
                 || c.checkpoint_min_stakers.is_some()
                 || c.checkpoint_min_stake_bolt.is_some()
                 || c.checkpoint_depth.is_some()
+                || c.history_recent_epochs.is_some()
                 || c.pos_streak_epochs.is_some()
                 || !self.dev_validators.is_empty()
             {

@@ -7,12 +7,13 @@ pub mod artifacts;
 pub mod committee;
 pub mod evidence;
 pub mod genesis;
+pub mod history;
 pub mod hooks;
 pub mod queries;
 
 pub use committee::Committee;
 pub use genesis::{genesis_alloc, genesis_hash, genesis_header, genesis_state_root};
-pub use hooks::{CertVotes, EpochRules, Phase, Producer, pre_block};
+pub use hooks::{AuditResult, CertVotes, EpochRules, HistoryInputs, Phase, Producer, pre_block};
 
 #[cfg(test)]
 mod tests;

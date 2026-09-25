@@ -24,6 +24,7 @@ sol! {
         function pubkeyOf(uint32 id) external view returns (bytes);
         function totalActiveStake() external view returns (uint256);
         function deadStake() external view returns (uint256);
+        function penalize(uint32 id, uint256 bps, address reporter) external returns (uint256);
         function count() external view returns (uint32);
         function idOfPubkey(bytes32 h) external view returns (uint32);
         function validator(uint32 id) external view returns (
@@ -56,6 +57,22 @@ sol! {
         function rewards(uint32 id) external view returns (uint256);
         function votesOf(uint64 epoch, uint256 index) external view returns (uint256);
         function lastRecordedRound(uint64 epoch) external view returns (uint64);
+        function settleStorage(uint64 epoch, uint256 emission) external returns (uint256 paid);
+        function previewStorage(uint64 epoch, uint256 emission) external view returns (uint256);
+    }
+
+    interface IHistoryRegistry {
+        function recordEpoch(uint64 epoch, bytes cid) external;
+        function epochIndex(uint64 epoch) external view returns (bytes);
+        function indexedEpochs() external view returns (uint64);
+        function setPeer(uint32 id, bytes peerId) external;
+        function peerOf(uint32 id) external view returns (bytes);
+        function beginAudits(uint64 epoch, uint32[] panel, uint32[] providers, uint64[] targets, uint64[] heights)
+            external;
+        function recordAudit(uint64 epoch, uint16 task, bool ok) external returns (bool);
+        function audits(uint64 epoch) external view returns (uint32[] panel, uint32[] providers,
+            uint64[] targets, uint64[] heights, uint8[] states);
+        function passed(uint64 epoch) external view returns (uint32[]);
     }
 
     interface IBLSHarness {

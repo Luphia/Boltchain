@@ -303,3 +303,98 @@ fn unwind_restores_state_blocks_and_total_difficulty() {
     let w = store.writer().unwrap();
     assert!(w.unwind_head().is_err(), "genesis cannot be undone");
 }
+
+#[test]
+fn snapshot_roundtrip_rebuilds_the_same_state() {
+    use alloy_consensus::Header;
+    use std::collections::HashMap;
+    let (_d, store) = open();
+    let mut alloc = BTreeMap::new();
+    // One contract with enough storage to span several chunks, plus plain accounts.
+    let mut big = BTreeMap::new();
+    for i in 0..20_000u64 {
+        big.insert(B256::from(U256::from(i * 7 + 1)), U256::from(i + 1));
+    }
+    alloc.insert(
+        Address::repeat_byte(0x10),
+        InitAccount {
+            nonce: 1,
+            balance: U256::from(3),
+            code: Bytes::from_static(&[0x60, 0x01, 0x00]),
+            storage: big,
+        },
+    );
+    for i in 0..300u16 {
+        let mut a = [0u8; 20];
+        a[..2].copy_from_slice(&i.to_be_bytes());
+        a[19] = 1;
+        alloc.insert(
+            Address::from(a),
+            InitAccount {
+                nonce: i as u64,
+                balance: U256::from(i) * U256::from(1u64 << 40),
+                ..Default::default()
+            },
+        );
+    }
+    let w = store.writer().unwrap();
+    let root = w.init_state(&alloc).unwrap();
+    let header =
+        Header { number: 5, state_root: root, difficulty: U256::from(9), ..Default::default() };
+    let block = StoredBlock { header: header.clone(), transactions: vec![], senders: vec![] };
+    w.put_block(&block, &[]).unwrap();
+    w.commit().unwrap();
+
+    let env = bolt_ipld::sha256_cid(bolt_ipld::DAG_CBOR, b"envelope");
+    let mut blocks = HashMap::new();
+    let r = store.reader().unwrap();
+    let cid = build_snapshot(&r, 8017, &header, env, U256::from(77), |c, b| {
+        assert!(b.len() < 1 << 20);
+        blocks.insert(c, b);
+        Ok(())
+    })
+    .unwrap();
+    drop(r);
+    // Deterministic.
+    let r = store.reader().unwrap();
+    assert_eq!(build_snapshot(&r, 8017, &header, env, U256::from(77), |_, _| Ok(())).unwrap(), cid);
+    drop(r);
+
+    let snap = bolt_ipld::history::SnapshotRoot::decode(&blocks[&cid]).unwrap();
+    assert!(snap.accounts.len() >= 3, "{} chunks", snap.accounts.len());
+    assert_eq!(snap.codes.len(), 1);
+
+    let (_d2, fresh) = open();
+    let w = fresh.writer().unwrap();
+    w.reset_state().unwrap();
+    let mut got = B256::ZERO;
+    for c in &snap.accounts {
+        got = w.apply_snapshot_accounts(&blocks[c]).unwrap();
+    }
+    for c in &snap.codes {
+        w.apply_snapshot_codes(&blocks[c]).unwrap();
+    }
+    assert_eq!(got, root);
+    assert_eq!(full_state_root(&w).unwrap(), root);
+    w.put_checkpoint_block(&block, &env, U256::from(77)).unwrap();
+    w.commit().unwrap();
+    let r = fresh.reader().unwrap();
+    assert_eq!(r.head().unwrap(), Some(5));
+    assert_eq!(r.base().unwrap(), 5);
+    assert_eq!(r.total_difficulty(5).unwrap(), Some(U256::from(77)));
+    assert_eq!(r.envelope_root(5).unwrap(), Some(env));
+    assert!(r.history_covers(5).unwrap() && !r.history_covers(4).unwrap());
+    assert!(r.code(&alloy_primitives::keccak256([0x60, 0x01, 0x00])).unwrap().is_some());
+    assert_eq!(
+        r.storage(&Address::repeat_byte(0x10), &B256::from(U256::from(7 * 19_999 + 1))).unwrap(),
+        U256::from(20_000)
+    );
+    assert!(r.has_body(5).unwrap());
+    drop(r);
+
+    let w = fresh.writer().unwrap();
+    assert!(w.prune_block(5).unwrap());
+    assert!(!w.prune_block(5).unwrap());
+    assert!(!w.has_body(5).unwrap());
+    assert!(w.header(5).unwrap().is_some());
+}

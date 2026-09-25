@@ -5,11 +5,13 @@
 //! is committed, and only along the paths that block changed.
 
 pub mod db;
+pub mod snapshot;
 pub mod state;
 pub mod trie;
 
 pub use db::{Account, Result, Store, StoreError, StoredBlock, Tx};
 pub use libmdbx::{RO, RW};
+pub use snapshot::build_snapshot;
 pub use state::{InitAccount, StateView, full_state_root};
 
 /// Blocks of state history kept for historical `eth_call` and friends.

@@ -7,6 +7,10 @@ interface IRegistry {
     function members(uint64 epoch) external view returns (uint32[] memory ids, uint16[] memory weights);
 }
 
+interface IHistoryRewards {
+    function passed(uint64 epoch) external view returns (uint32[] memory);
+}
+
 interface IStakingRewards {
     function validator(uint32 id) external view returns (address, address, uint256, uint8, uint64, bytes memory);
 }
@@ -30,6 +34,7 @@ contract RewardDistributor is SystemContract {
     uint64 public settledUpTo;
 
     event Settled(uint64 indexed epoch, uint256 emission, uint256 paid);
+    event StorageSettled(uint64 indexed epoch, uint256 emission, uint256 paid);
     event Claimed(uint32 indexed id, address to, uint256 amount);
 
     error TooManyMembers();
@@ -82,6 +87,27 @@ contract RewardDistributor is SystemContract {
         if (epoch + 1 > settledUpTo) settledUpTo = epoch + 1;
         supply += paid;
         emit Settled(epoch, emission, paid);
+    }
+
+    /// First block of epoch `epoch + 1`: the storage share of the emission, split equally among
+    /// the audit passes of epoch `epoch` (a provider that passed two audits gets two shares). The
+    /// node credits exactly `previewStorage` first; nothing is paid without passes.
+    function settleStorage(uint64 epoch, uint256 emission) external onlySystem returns (uint256 paid) {
+        uint32[] memory ids = IHistoryRewards(Sys.HISTORY).passed(epoch);
+        if (ids.length == 0) return 0;
+        uint256 share = emission / ids.length;
+        for (uint256 i = 0; i < ids.length; i++) {
+            rewards[ids[i]] += share;
+        }
+        paid = share * ids.length;
+        supply += paid;
+        emit StorageSettled(epoch, emission, paid);
+    }
+
+    /// Amount `settleStorage(epoch, emission)` would pay.
+    function previewStorage(uint64 epoch, uint256 emission) external view returns (uint256) {
+        uint256 n = IHistoryRewards(Sys.HISTORY).passed(epoch).length;
+        return n == 0 ? 0 : emission / n * n;
     }
 
     /// Amount `settle(epoch, emission)` would pay.

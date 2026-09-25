@@ -6,7 +6,8 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
 use bolt_exec::{BlockExecutor, block::BlockError};
 use bolt_primitives::params::{
-    CHECKPOINT_MINER_BPS, CONSENSUS_REWARD_BPS, SUPPLY_CAP_WEI, WEI_PER_BOLT, epoch_emission,
+    CHECKPOINT_MINER_BPS, CONSENSUS_REWARD_BPS, STORAGE_REWARD_BPS, SUPPLY_CAP_WEI, WEI_PER_BOLT,
+    epoch_emission,
 };
 use revm::DatabaseRef;
 
@@ -23,6 +24,8 @@ pub struct EpochRules {
     pub checkpoint_min_stake: U256,
     /// Blocks that must bury a mined block before it is proposed as a checkpoint.
     pub checkpoint_depth: u64,
+    /// Epochs of history every validator keeps; older ones are sharded and audited.
+    pub history_recent_epochs: u64,
     /// PoS threshold: minimum number of stakers.
     pub pos_min_stakers: u64,
     /// PoS threshold: minimum total stake, in wei.
@@ -42,6 +45,7 @@ impl EpochRules {
             checkpoint_min_stakers: cp_stakers as u64,
             checkpoint_min_stake: U256::from(cp_stake) * U256::from(WEI_PER_BOLT),
             checkpoint_depth: c.checkpoint_depth(),
+            history_recent_epochs: c.history_recent_epochs(),
             pos_min_stakers: stakers as u64,
             pos_min_stake: U256::from(stake) * U256::from(WEI_PER_BOLT),
             pos_streak: streak,
@@ -148,6 +152,26 @@ where
     C::abi_decode_returns(&out).map_err(|e| BlockError::Evm(format!("decode {to}: {e}")))
 }
 
+/// A storage audit decided by a panel certificate the chain verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuditResult {
+    /// Epoch of the task.
+    pub epoch: u64,
+    /// Task index.
+    pub task: u16,
+    /// Whether the provider served the data.
+    pub passed: bool,
+}
+
+/// History data the node computes for a block's system calls (ADR 0009).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HistoryInputs {
+    /// First block of an epoch: the previous epoch's index CID (binary).
+    pub epoch_index: Option<Vec<u8>>,
+    /// Verified audit certificates carried by the block.
+    pub audits: Vec<AuditResult>,
+}
+
 /// How the block being executed is produced (for rewards).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Producer {
@@ -166,6 +190,7 @@ pub fn pre_block<D: DatabaseRef>(
     parent: &Header,
     votes: &CertVotes,
     producer: Producer,
+    history: &HistoryInputs,
 ) -> Result<(), BlockError<D::Error>>
 where
     D::Error: std::error::Error + Send + Sync + 'static,
@@ -198,7 +223,7 @@ where
         },
     )?;
     if !rules.is_epoch_start(number) {
-        return Ok(());
+        return record_audits(exec, history);
     }
     let epoch = rules.epoch_of(number);
 
@@ -223,6 +248,35 @@ where
         if paid != payout {
             return Err(BlockError::Evm(format!("settle paid {paid}, preview said {payout}")));
         }
+        // Storage share: equal parts per audit pass of the previous epoch (ADR 0009).
+        let storage =
+            epoch_emission(unissued) * U256::from(STORAGE_REWARD_BPS) / U256::from(10_000);
+        let payout = view(
+            exec,
+            REWARDS,
+            IRewardDistributor::previewStorageCall { epoch: epoch - 1, emission: storage },
+        )?;
+        if !payout.is_zero() {
+            exec.credit(REWARDS, payout.to::<u128>())?;
+        }
+        let paid = sys(
+            exec,
+            REWARDS,
+            IRewardDistributor::settleStorageCall { epoch: epoch - 1, emission: storage },
+        )?;
+        if paid != payout {
+            return Err(BlockError::Evm(format!("storage paid {paid}, preview said {payout}")));
+        }
+        // The previous epoch's index: the node built it from the envelopes of that epoch.
+        let cid = history
+            .epoch_index
+            .clone()
+            .ok_or_else(|| BlockError::Evm(format!("missing index of epoch {}", epoch - 1)))?;
+        sys(
+            exec,
+            HISTORY,
+            IHistoryRegistry::recordEpochCall { epoch: epoch - 1, cid: Bytes::from(cid) },
+        )?;
     }
 
     // 3. Phase: count the epochs the thresholds have held (T1: checkpoints, T2: PoS).
@@ -242,9 +296,16 @@ where
         },
     )?;
 
-    // 4. Committee of the next epoch, from the first checkpoint epoch on. The first committee of
+    // Committee of the next epoch, from the first checkpoint epoch on. The first committee of
     // each phase (B and C) is drawn only from stake at least `pos_streak` epochs old (ADR 0007
     // §5), so nobody can buy a seat right before a phase starts.
+    // 4. Storage audits of this epoch, once a committee exists to form the panel.
+    if phase.cpScheduled && epoch >= phase.firstCheckpointEpoch {
+        begin_audits(exec, rules, parent, epoch)?;
+    }
+    record_audits(exec, history)?;
+
+    // 5. Committee of the next epoch.
     let next = epoch + 1;
     if !phase.cpScheduled || next < phase.firstCheckpointEpoch {
         return Ok(());
@@ -271,6 +332,68 @@ where
             seats: committee.seats_bytes(),
         },
     )?;
+    Ok(())
+}
+
+/// Draws the audit panel (from the epoch's committee) and tasks (old epochs, their assignees,
+/// a block each) and records them.
+fn begin_audits<D: DatabaseRef>(
+    exec: &mut BlockExecutor<D>,
+    rules: &EpochRules,
+    parent: &Header,
+    epoch: u64,
+) -> Result<(), BlockError<D::Error>>
+where
+    D::Error: std::error::Error + Send + Sync + 'static,
+{
+    use crate::history::{assignees, draw_panel, draw_targets, draw_task};
+    let Some(last_old) = epoch.checked_sub(rules.history_recent_epochs + 1) else { return Ok(()) };
+    let indexed = view(exec, HISTORY, IHistoryRegistry::indexedEpochsCall {})?;
+    if indexed <= last_old {
+        return Ok(());
+    }
+    let c = view(exec, CONSENSUS, IConsensusRegistry::committeeCall { epoch })?;
+    if c.ids.is_empty() {
+        return Ok(());
+    }
+    let seed = seed(parent);
+    let panel = draw_panel(&seed, epoch, &c.ids);
+    let snap = view(exec, STAKING, IStakingManager::snapshotCall { minAge: 0 })?;
+    let mut validators = snap.ids;
+    validators.sort_unstable();
+    let (mut providers, mut targets, mut heights) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, target) in draw_targets(&seed, epoch, last_old).into_iter().enumerate() {
+        let cid = view(exec, HISTORY, IHistoryRegistry::epochIndexCall { epoch: target })?;
+        let who = assignees(&cid, &validators);
+        let first = target * rules.epoch_slots + 1;
+        if let Some(t) = draw_task(&seed, epoch, i as u32, target, &who, first, rules.epoch_slots) {
+            providers.push(t.provider);
+            targets.push(t.target);
+            heights.push(t.height);
+        }
+    }
+    sys(
+        exec,
+        HISTORY,
+        IHistoryRegistry::beginAuditsCall { epoch, panel, providers, targets, heights },
+    )?;
+    Ok(())
+}
+
+fn record_audits<D: DatabaseRef>(
+    exec: &mut BlockExecutor<D>,
+    history: &HistoryInputs,
+) -> Result<(), BlockError<D::Error>>
+where
+    D::Error: std::error::Error + Send + Sync + 'static,
+{
+    for a in &history.audits {
+        sys(
+            exec,
+            HISTORY,
+            IHistoryRegistry::recordAuditCall { epoch: a.epoch, task: a.task, ok: a.passed },
+        )?;
+    }
     Ok(())
 }
 

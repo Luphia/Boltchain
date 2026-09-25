@@ -3,9 +3,11 @@
 //! See [`engine`] for the rules. The engine is a pure state machine generic over a signature
 //! [`Scheme`]: [`BlsScheme`] (BLS12-381, production) or [`MockScheme`] (simulation).
 
+pub mod audit;
 pub mod engine;
 pub mod types;
 
+pub use audit::{AuditCert, AuditVote, audit_msg};
 pub use engine::{Action, Config, Engine, Persisted};
 pub use types::*;
 

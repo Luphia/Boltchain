@@ -45,7 +45,8 @@ fn now() -> u64 {
         .unwrap_or_default()
 }
 
-pub(crate) fn load_genesis(path: &std::path::Path) -> Result<Genesis> {
+/// Loads and validates a genesis file.
+pub fn load_genesis(path: &std::path::Path) -> Result<Genesis> {
     let json =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     Ok(Genesis::from_json(&json)?)

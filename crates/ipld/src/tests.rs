@@ -95,3 +95,106 @@ fn car_roundtrip() {
     bad[last] ^= 0xff;
     assert!(car::read(&bad).is_err());
 }
+
+#[test]
+fn epoch_index_groups_envelopes() {
+    use crate::history::*;
+    let envs: Vec<Cid> = (0..2500u32).map(|i| sha256_cid(DAG_CBOR, &i.to_be_bytes())).collect();
+    let (root, blocks) = epoch_index(3, 7201, &envs);
+    assert_eq!(blocks.len(), 4, "3 groups + root");
+    for (c, b) in &blocks {
+        verify(c, b).unwrap();
+    }
+    let idx = EpochIndex::decode(&blocks.last().unwrap().1).unwrap();
+    assert_eq!(blocks.last().unwrap().0, root);
+    assert_eq!((idx.epoch, idx.first, idx.count, idx.groups.len()), (3, 7201, 2500, 3));
+    let g1 = decode_group(&blocks[1].1).unwrap();
+    assert_eq!(g1.len(), EPOCH_GROUP);
+    assert_eq!(g1[0], envs[EPOCH_GROUP]);
+    assert_eq!(epoch_index(3, 7201, &envs).0, root, "deterministic");
+}
+
+#[test]
+fn snapshot_chunks_are_deterministic_and_split_big_storage() {
+    use crate::history::*;
+    let build = || {
+        let mut b = SnapshotBuilder::default();
+        let mut blocks = Vec::new();
+        for i in 0..50u8 {
+            let slots: Vec<([u8; 32], [u8; 32])> = if i == 7 {
+                // an account with more storage than one chunk holds
+                (0..20_000u32)
+                    .map(|k| {
+                        let mut s = [0u8; 32];
+                        s[28..].copy_from_slice(&k.to_be_bytes());
+                        (s, [i; 32])
+                    })
+                    .collect()
+            } else {
+                vec![([1; 32], [i; 32])]
+            };
+            blocks.extend(b.account([i; 20], i as u64, [i; 32], [0xc0; 32], slots));
+            blocks.extend(b.code(&[i; 100]));
+        }
+        blocks.extend(b.finish());
+        (b.accounts.clone(), b.code_chunks.clone(), blocks)
+    };
+    let (a1, c1, blocks) = build();
+    let (a2, c2, _) = build();
+    assert_eq!((a1.clone(), c1.clone()), (a2, c2), "deterministic");
+    assert!(a1.len() >= 3, "big account split: {} chunks", a1.len());
+    let mut entries = Vec::new();
+    for (cid, bytes) in &blocks {
+        verify(cid, bytes).unwrap();
+        assert!(bytes.len() <= bolt_primitives::params::MAX_IPLD_BLOCK_BYTES);
+        if a1.contains(cid) {
+            entries.extend(decode_accounts(bytes).unwrap());
+        }
+    }
+    let slots_of_7: usize =
+        entries.iter().filter(|e| e.a.as_ref() == [7u8; 20]).map(|e| e.s.len()).sum();
+    assert_eq!(slots_of_7, 20_000);
+    assert_eq!(entries.iter().filter(|e| !e.x).count(), 50);
+    let codes: Vec<_> = blocks
+        .iter()
+        .filter(|(c, _)| c1.contains(c))
+        .flat_map(|(_, b)| decode_codes(b).unwrap())
+        .collect();
+    assert_eq!(codes.len(), 50);
+}
+
+#[test]
+fn envelopes_without_audits_encode_as_before() {
+    let e = Envelope {
+        v: ENVELOPE_VERSION,
+        height: 1,
+        header: header_cid(B256::repeat_byte(1)),
+        parent: None,
+        chunks: vec![],
+        qc: vec![],
+        audits: vec![],
+    };
+    let bytes = e.encode();
+    #[derive(serde::Serialize)]
+    struct Old {
+        v: u8,
+        height: u64,
+        header: Cid,
+        parent: Option<Cid>,
+        chunks: Vec<Cid>,
+        #[serde(with = "serde_bytes")]
+        qc: Vec<u8>,
+    }
+    let old = serde_ipld_dagcbor::to_vec(&Old {
+        v: e.v,
+        height: 1,
+        header: e.header,
+        parent: None,
+        chunks: vec![],
+        qc: vec![],
+    })
+    .unwrap();
+    assert_eq!(bytes, old);
+    let with = Envelope { audits: vec![serde_bytes::ByteBuf::from(vec![1, 2])], ..e };
+    assert_eq!(Envelope::decode(&with.encode()).unwrap(), with);
+}

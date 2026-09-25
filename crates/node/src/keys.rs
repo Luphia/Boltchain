@@ -60,6 +60,16 @@ pub enum KeysCmd {
         #[arg(long)]
         fee_recipient: Address,
     },
+    /// Print the `HistoryRegistry.setPeer` transaction that publishes the node a validator
+    /// serves its history shards from (send it from the validator's owner wallet).
+    SetPeerTx {
+        /// Validator id.
+        #[arg(long)]
+        id: u32,
+        /// The node's identity key (`<datadir>/node.key`).
+        #[arg(long)]
+        node_key: PathBuf,
+    },
 }
 
 fn write_key(path: &Path, key: &BlsSecretKey) -> Result<()> {
@@ -119,6 +129,10 @@ pub fn run(cmd: KeysCmd) -> Result<()> {
             let k = load_key(&key)?;
             println!("{}", serde_json::to_string_pretty(&register_tx(&k, fee_recipient)?)?);
         }
+        KeysCmd::SetPeerTx { id, node_key } => {
+            let peer = bolt_net::load_or_create_key(&node_key)?.public().to_peer_id();
+            println!("{}", serde_json::to_string_pretty(&set_peer_tx(id, &peer))?);
+        }
     }
     Ok(())
 }
@@ -141,4 +155,18 @@ pub fn register_tx(key: &BlsSecretKey, fee_recipient: Address) -> Result<serde_j
         "minValueWei": MIN_STAKE_WEI.to_string(),
         "minValueBolt": (MIN_STAKE_WEI / WEI_PER_BOLT).to_string(),
     }))
+}
+
+/// The `setPeer` transaction (to, data) publishing `peer` for validator `id`.
+pub fn set_peer_tx(id: u32, peer: &libp2p::PeerId) -> serde_json::Value {
+    let data = bolt_system::abi::IHistoryRegistry::setPeerCall {
+        id,
+        peerId: Bytes::copy_from_slice(&peer.to_bytes()),
+    }
+    .abi_encode();
+    serde_json::json!({
+        "to": bolt_system::addresses::HISTORY,
+        "data": hex::encode_prefixed(data),
+        "peerId": peer.to_string(),
+    })
 }

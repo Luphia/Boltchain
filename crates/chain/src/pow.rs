@@ -27,8 +27,8 @@ pub struct SideBlock {
     pub root: Option<Cid>,
     /// Total difficulty up to and including this block.
     pub td: U256,
-    /// Checkpoint QC its envelope carries (phase B), or empty.
-    pub cert: Vec<u8>,
+    /// Certificates its envelope carries (phase B checkpoint QC, audit certificates).
+    pub cert: crate::Certs,
 }
 
 /// What importing a mined block did.
@@ -125,7 +125,7 @@ impl Chain {
         transactions: Vec<TxEnvelope>,
         root: Option<Cid>,
     ) -> Result<MinedOutcome> {
-        self.import_mined_with_cert(header, transactions, root, Vec::new())
+        self.import_mined_with_cert(header, transactions, root, crate::Certs::default())
     }
 
     /// [`Chain::import_mined`] for a block whose envelope carries a checkpoint QC (phase B).
@@ -134,8 +134,9 @@ impl Chain {
         header: &Header,
         transactions: Vec<TxEnvelope>,
         root: Option<Cid>,
-        cert: Vec<u8>,
+        cert: impl Into<crate::Certs>,
     ) -> Result<MinedOutcome> {
+        let cert = cert.into();
         let _guard = self.import_lock.lock();
         let hash = header.hash_slow();
         if self.locate(&hash)?.is_some() {
@@ -281,9 +282,9 @@ impl Chain {
                 Some(r) => w
                     .ipld(&r)?
                     .and_then(|b| bolt_ipld::Envelope::decode(&b).ok())
-                    .map(|e| e.qc)
+                    .map(|e| crate::Certs::of(&e))
                     .unwrap_or_default(),
-                None => Vec::new(),
+                None => crate::Certs::default(),
             };
             let (block, state_root) = w.unwind_head()?;
             let parent_root = w.header(head - 1)?.map(|h| h.state_root);
@@ -347,7 +348,7 @@ impl Chain {
         timestamp: u64,
         beneficiary: alloy_primitives::Address,
         extra_data: alloy_primitives::Bytes,
-        cert: Vec<u8>,
+        cert: impl Into<crate::Certs>,
     ) -> Result<BuiltBlock> {
         let head = self.head()?.hash_slow();
         let built = self.build_on(&head, candidates, timestamp, beneficiary, extra_data, cert)?;
@@ -373,7 +374,7 @@ impl Chain {
         self.pending.lock().remove(&template.hash);
         let p = p.ok_or(ChainError::UnknownParent(template.hash))?;
         let txs = p.executed.transactions.clone();
-        let cert = p.bundle.envelope.qc.clone();
+        let cert = crate::Certs::of(&p.bundle.envelope);
         let mut header = template.header.clone();
         header.nonce = B64::from(nonce);
         let outcome = self.import_mined_with_cert(&header, txs, None, cert)?;

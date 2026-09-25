@@ -22,12 +22,13 @@ bolt-ipld.workspace = true
 revm.workspace = true
 parking_lot.workspace = true
 bolt-pow.workspace = true
+alloy-rlp.workspace = true
+alloy-trie.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
 alloy-signer-local = "2.5"
 alloy-network = "2.5"
-alloy-trie.workspace = true
 alloy-sol-types.workspace = true
 
 [lints]

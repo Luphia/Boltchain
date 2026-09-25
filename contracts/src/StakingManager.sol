@@ -51,6 +51,7 @@ contract StakingManager is SystemContract {
     event Withdrawn(uint32 indexed id, uint256 amount);
     event Slashed(uint32 indexed id, uint256 amount, address reporter, uint256 reward);
     event FeeRecipientChanged(uint32 indexed id, address feeRecipient);
+    event Penalized(uint32 indexed id, uint256 amount, address reporter, uint256 reward);
 
     error BelowMinimum();
     error BadKey();
@@ -160,6 +161,26 @@ contract StakingManager is SystemContract {
         if (reward > 0) {
             (bool ok,) = reporter.call{value: reward}("");
             if (!ok) revert TransferFailed();
+        }
+    }
+
+    /// A storage-audit failure (ADR 0009): `bps` of the stake is burned (1% of it to the reporter),
+    /// without forcing an exit. Only HistoryRegistry may call.
+    function penalize(uint32 id, uint256 bps, address reporter) external returns (uint256 amount) {
+        if (msg.sender != Sys.HISTORY) revert Unauthorized();
+        Validator storage v = validators[id];
+        if (v.status != Status.Active && v.status != Status.Exiting) revert BadStatus();
+        amount = uint256(v.stake) * bps / 10_000;
+        uint256 reward = amount / 100;
+        v.stake -= uint128(amount);
+        if (v.recent > v.stake) v.recent = v.stake;
+        if (v.status == Status.Active) totalActiveStake -= amount;
+        deadStake += amount - reward;
+        IRewardDistributor(Sys.REWARDS).burnSupply(amount - reward);
+        emit Penalized(id, amount, reporter, reward);
+        if (reward > 0) {
+            (bool ok,) = reporter.call{value: reward}("");
+            if (!ok) deadStake += reward; // an unpayable reporter forfeits its share
         }
     }
 

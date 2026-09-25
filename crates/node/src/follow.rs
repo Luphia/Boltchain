@@ -32,6 +32,9 @@ pub struct FollowArgs {
     /// P2P options.
     #[command(flatten)]
     pub p2p: P2pArgs,
+    /// Storage options (public chains only).
+    #[command(flatten)]
+    pub storage: crate::validator::StorageArgs,
 }
 
 #[derive(Debug)]
@@ -66,6 +69,7 @@ pub async fn run(args: FollowArgs) -> Result<()> {
                 gas_target: None,
             },
             p2p: args.p2p,
+            storage: args.storage,
         })
         .await;
     };

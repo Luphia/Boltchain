@@ -181,7 +181,7 @@ pub struct FetchError {
 /// Something a waiting fetch may care about.
 #[derive(Debug, Clone)]
 enum Arrival {
-    Block(Cid, Arc<Vec<u8>>),
+    Block(PeerId, Cid, Arc<Vec<u8>>),
     DontHave(PeerId, Cid),
 }
 
@@ -280,7 +280,7 @@ impl Bitswap {
             if !self.wanted.lock().contains(&cid) || verify(&cid, &b.data).is_err() {
                 continue;
             }
-            let _ = self.arrivals.send(Arrival::Block(cid, Arc::new(b.data)));
+            let _ = self.arrivals.send(Arrival::Block(peer, cid, Arc::new(b.data)));
         }
     }
 
@@ -362,7 +362,7 @@ impl Bitswap {
         let mut next_round = tokio::time::Instant::now() + fan_out_after;
         while !todo.is_empty() {
             match tokio::time::timeout_at(next_round.min(deadline), rx.recv()).await {
-                Ok(Ok(Arrival::Block(cid, data))) => {
+                Ok(Ok(Arrival::Block(_, cid, data))) => {
                     if todo.remove(&cid) {
                         got.insert(cid, data.as_ref().clone());
                     }
@@ -399,6 +399,46 @@ impl Bitswap {
         } else {
             Err(FetchError { missing: todo.into_iter().collect() })
         }
+    }
+}
+
+impl Bitswap {
+    /// Asks `peer` alone for `cid`, ignoring the local blockstore (storage audits: did this
+    /// provider serve the data?). Returns the verified block, or an error on DONT_HAVE or
+    /// timeout.
+    pub async fn probe(
+        &self,
+        cid: Cid,
+        peer: PeerId,
+        timeout: Duration,
+    ) -> Result<Vec<u8>, FetchError> {
+        let mut rx = self.arrivals.subscribe();
+        self.wanted.lock().insert(cid);
+        let msg = Self::want_message(&[cid]);
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut next = tokio::time::Instant::now();
+        let mut result = None;
+        loop {
+            if tokio::time::Instant::now() >= next {
+                let this = self.clone();
+                let msg = msg.clone();
+                tokio::spawn(async move { this.send(peer, &msg).await });
+                next = tokio::time::Instant::now() + Duration::from_secs(2);
+            }
+            match tokio::time::timeout_at(next.min(deadline), rx.recv()).await {
+                Ok(Ok(Arrival::Block(p, c, data))) if p == peer && c == cid => {
+                    result = Some(data.as_ref().clone());
+                    break;
+                }
+                Ok(Ok(Arrival::DontHave(p, c))) if p == peer && c == cid => break,
+                Ok(Ok(_)) | Ok(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                Ok(Err(broadcast::error::RecvError::Closed)) => break,
+                Err(_) if tokio::time::Instant::now() < deadline => {}
+                Err(_) => break,
+            }
+        }
+        self.wanted.lock().remove(&cid);
+        result.ok_or(FetchError { missing: vec![cid] })
     }
 }
 

@@ -13,22 +13,22 @@ use bolt_system::{abi::*, addresses::*, queries};
 
 const L: u64 = 4;
 
-fn genesis() -> Genesis {
+pub(crate) fn genesis() -> Genesis {
     let mut g = Genesis::from_json(include_str!("../../../genesis/dev.json")).unwrap();
     g.config.epoch_slots = L;
     g.config.committee_size = 8;
     g
 }
 
-fn bolt(n: u64) -> U256 {
+pub(crate) fn bolt(n: u64) -> U256 {
     U256::from(n) * U256::from(10u64).pow(U256::from(18))
 }
 
-fn signer() -> PrivateKeySigner {
+pub(crate) fn signer() -> PrivateKeySigner {
     "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".parse().unwrap()
 }
 
-fn call_tx(
+pub(crate) fn call_tx(
     s: &PrivateKeySigner,
     nonce: u64,
     to: Address,
@@ -64,7 +64,7 @@ fn register_tx(s: &PrivateKeySigner, nonce: u64, key: u32) -> TxEnvelope {
 }
 
 /// A certificate for `parent` in which every member of its epoch's committee voted.
-fn cert_for(chain: &Chain, parent: &Header) -> Vec<u8> {
+pub(crate) fn cert_for(chain: &Chain, parent: &Header) -> Vec<u8> {
     if parent.number == 0 {
         return Vec::new();
     }
@@ -97,7 +97,7 @@ fn cert_for(chain: &Chain, parent: &Header) -> Vec<u8> {
     bolt_consensus::encode_cert(&cert)
 }
 
-fn produce(chain: &Chain, txs: Vec<TxEnvelope>) -> Header {
+pub(crate) fn produce(chain: &Chain, txs: Vec<TxEnvelope>) -> Header {
     let head = chain.head().unwrap();
     let qc = cert_for(chain, &head);
     let candidates: Vec<_> = txs
@@ -122,12 +122,12 @@ fn produce(chain: &Chain, txs: Vec<TxEnvelope>) -> Header {
     chain.commit_pending(&built.hash).unwrap()
 }
 
-fn view<C: SolCall>(chain: &Chain, to: Address, c: C) -> C::Return {
+pub(crate) fn view<C: SolCall>(chain: &Chain, to: Address, c: C) -> C::Return {
     let r = chain.store().reader().unwrap();
     queries::call(&StateView::latest(&r), 1337, to, c).unwrap()
 }
 
-fn balance(chain: &Chain, a: Address) -> U256 {
+pub(crate) fn balance(chain: &Chain, a: Address) -> U256 {
     let r = chain.store().reader().unwrap();
     revm::DatabaseRef::basic_ref(&StateView::latest(&r), a)
         .unwrap()

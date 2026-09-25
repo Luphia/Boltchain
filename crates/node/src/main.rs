@@ -41,6 +41,29 @@ enum Command {
     },
     /// Benchmark block execution (transfers and the worst-case pairing block).
     Bench(bench::BenchArgs),
+    /// History tools.
+    #[command(subcommand)]
+    History(HistoryCmd),
+}
+
+#[derive(Debug, Subcommand)]
+enum HistoryCmd {
+    /// Export one epoch's blocks (index, envelopes, headers, bodies) as a CAR file, e.g. for
+    /// `ipfs dag import` or long-term archiving.
+    Export {
+        /// Genesis file.
+        #[arg(long, default_value = "genesis/dev.json")]
+        genesis: PathBuf,
+        /// Data directory (the node must be stopped).
+        #[arg(long)]
+        datadir: PathBuf,
+        /// Epoch.
+        #[arg(long)]
+        epoch: u64,
+        /// Output file.
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -105,6 +128,13 @@ fn main() -> Result<()> {
                 .enable_all()
                 .build()?
                 .block_on(validator::run(args))?;
+        }
+        Command::History(HistoryCmd::Export { genesis, datadir, epoch, out }) => {
+            let genesis = devnet::load_genesis(&genesis)?;
+            let chain = bolt_chain::Chain::open(&datadir, &genesis)?;
+            let car = boltchain::gateway::export_epoch(&chain, epoch)?;
+            std::fs::write(&out, &car)?;
+            println!("wrote epoch {epoch} ({} bytes) to {}", car.len(), out.display());
         }
         Command::NodeId { node_key } => {
             let key = bolt_net::load_or_create_key(&node_key)?;

@@ -276,7 +276,7 @@ impl Follower {
                 .is_some_and(|h| !h.difficulty.is_zero());
             if header_mined && self.finality.is_some() {
                 // Mined ancestors of a PoS block: checked by their seals.
-                let cert = env.qc.clone();
+                let cert = bolt_chain::Certs::of(&env);
                 let block = decode_block(env, |c| have.get(c).cloned())?;
                 let chain = self.chain.clone();
                 height = block.header.number;
@@ -319,7 +319,7 @@ impl Follower {
                     }
                 }
             }
-            let qc = env.qc.clone();
+            let qc = bolt_chain::Certs::of(&env);
             let block = decode_block(env, |c| have.get(c).cloned())?;
             let chain = self.chain.clone();
             height = block.header.number;
@@ -401,7 +401,7 @@ impl Follower {
         let count = branch.len() as u64;
         let mut height = head;
         for (root, env) in branch.into_iter().rev() {
-            let cert = env.qc.clone();
+            let cert = bolt_chain::Certs::of(&env);
             let block = decode_block(env, |c| have.get(c).cloned())?;
             let chain = self.chain.clone();
             height = block.header.number;
@@ -472,7 +472,7 @@ pub async fn run_follower(
                 let _ = reply.send(Err("this node is not a block producer".into()));
             }
             NetEvent::Connected(peer) => tracing::debug!(%peer, "peer connected"),
-            NetEvent::Consensus { .. } => {}
+            NetEvent::Consensus { .. } | NetEvent::Storage { .. } => {}
         }
     }
 }

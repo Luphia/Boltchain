@@ -458,7 +458,7 @@ impl Validator {
                         let _ = reply.send(res);
                         vec![]
                     }
-                    Some(NetEvent::Connected(_)) => vec![],
+                    Some(NetEvent::Connected(_) | NetEvent::Storage { .. }) => vec![],
                 },
                 i = irx.recv() => match i {
                     None => break,
@@ -527,7 +527,7 @@ impl Validator {
                         };
                         let _ = reply.send(res);
                     }
-                    Some(NetEvent::Connected(_)) => {}
+                    Some(NetEvent::Connected(_) | NetEvent::Storage { .. }) => {}
                 },
                 _ = irx.recv() => {
                     if let Ok(r) = self.chain.store().reader() {
@@ -1063,7 +1063,7 @@ async fn validate(
         peers.extend(net.peers().await.into_iter().filter(|x| Some(*x) != via));
         have.extend(net.fetch(&missing, &peers).await?);
     }
-    let qc = env.qc.clone();
+    let qc = bolt_chain::Certs::of(&env);
     let block = decode_block(env, |c| have.get(c).cloned())?;
     let h = &block.header;
     anyhow::ensure!(h.parent_hash == p.block.parent, "header parent differs");
@@ -1109,6 +1109,32 @@ pub struct ValidatorArgs {
     /// P2P options.
     #[command(flatten)]
     pub p2p: crate::p2p::P2pArgs,
+    /// Storage options.
+    #[command(flatten)]
+    pub storage: StorageArgs,
+}
+
+/// Storage-layer options (ADR 0009).
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct StorageArgs {
+    /// Start a fresh datadir from the state snapshot of this block instead of genesis:
+    /// `<number>:<hash>` of a recent epoch-end block you trust (from another node, an explorer
+    /// or a friend). The snapshot is taken from the network and checked against it.
+    #[arg(long)]
+    pub checkpoint: Option<String>,
+    /// Snapshot root CID for `--checkpoint` (otherwise the first matching announcement is used).
+    #[arg(long)]
+    pub snapshot: Option<String>,
+    /// Keep every block body (no pruning). Default: bodies older than the recent window are
+    /// dropped, except the epochs assigned to this node's validators.
+    #[arg(long)]
+    pub archive: bool,
+    /// Do not take or announce state snapshots.
+    #[arg(long)]
+    pub no_snapshots: bool,
+    /// Serve the blockstore over HTTP as a trustless IPFS gateway, e.g. `127.0.0.1:8080`.
+    #[arg(long)]
+    pub gateway: Option<std::net::SocketAddr>,
 }
 
 /// Runs a validator node until Ctrl-C.
@@ -1126,6 +1152,26 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
         chain.set_gas_target(g);
     }
     let (net, events) = args.p2p.start(&args.datadir, chain.clone(), None).await?;
+    let (events, mut storage_rx) = crate::storage::split(events);
+    if let Some(cp) = &args.storage.checkpoint {
+        let (number, hash) = crate::storage::parse_checkpoint(cp)?;
+        let root = args.storage.snapshot.as_deref().map(bolt_ipld::Cid::try_from).transpose()?;
+        crate::storage::checkpoint_sync(&chain, &net, number, hash, root, &mut storage_rx).await?;
+    }
+    let storage = crate::storage::Storage::new(
+        chain.clone(),
+        net.clone(),
+        crate::storage::StorageConfig {
+            snapshots: !args.storage.no_snapshots,
+            prune: !args.storage.archive,
+            keys: keys.clone(),
+            ..Default::default()
+        },
+    );
+    let storage_task = tokio::spawn(storage.run(storage_rx));
+    if let Some(addr) = args.storage.gateway {
+        crate::gateway::start(addr, chain.clone()).await?;
+    }
     let ctx = bolt_rpc::RpcContext {
         chain: chain.clone(),
         pool: pool.clone(),
@@ -1151,6 +1197,7 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
     let task = tokio::spawn(v.run(events));
     tokio::signal::ctrl_c().await?;
     task.abort();
+    storage_task.abort();
     handle.stop()?;
     Ok(())
 }

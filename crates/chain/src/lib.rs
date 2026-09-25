@@ -10,6 +10,7 @@
 use alloy_consensus::{Header, Transaction as _, TxEnvelope, transaction::SignerRecoverable};
 use alloy_eips::eip2718::Encodable2718;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+pub mod history;
 mod overlay;
 pub mod pow;
 
@@ -92,6 +93,8 @@ pub struct Chain {
     import_lock: Mutex<()>,
     /// Gas limit this node's blocks move towards (0: keep the parent's).
     gas_target: std::sync::atomic::AtomicU64,
+    /// Storage-audit certificates to include in this node's next blocks.
+    audit_queue: Mutex<Vec<Vec<u8>>>,
 }
 
 /// A pending block, the included transaction hashes and the skipped ones (hash, reason, drop).
@@ -171,6 +174,7 @@ impl Chain {
             side: Mutex::new(HashMap::new()),
             import_lock: Mutex::new(()),
             gas_target: std::sync::atomic::AtomicU64::new(0),
+            audit_queue: Mutex::new(Vec::new()),
         })
     }
 
@@ -303,6 +307,111 @@ impl Chain {
         })
     }
 
+    /// Queues a storage-audit certificate for this node's next blocks (kept until recorded).
+    pub fn add_audit_cert(&self, cert: Vec<u8>) {
+        let mut q = self.audit_queue.lock();
+        if !q.contains(&cert) {
+            q.push(cert);
+        }
+        if q.len() > 64 {
+            q.remove(0);
+        }
+    }
+
+    /// The index of the epoch that ends just before block `number` (the first block of the next
+    /// epoch), built from the envelopes of this block's own chain. Its IPFS blocks are stored so
+    /// the node serves them.
+    fn epoch_index_before(&self, number: u64, ancestors: &[Arc<PendingBlock>]) -> Result<Vec<u8>> {
+        let epoch = self.rules.epoch_of(number - 1);
+        let first = epoch * self.rules.epoch_slots + 1;
+        let r = self.store.reader()?;
+        let mut envelopes = Vec::with_capacity((number - first) as usize);
+        for h in first..number {
+            let cid = match ancestors.iter().find(|a| a.header.number == h) {
+                Some(a) => a.bundle.root,
+                None => r.envelope_root(h)?.ok_or_else(|| {
+                    ChainError::Exec(format!("missing envelope of block {h} for the epoch index"))
+                })?,
+            };
+            envelopes.push(cid);
+        }
+        drop(r);
+        let (root, blocks) = bolt_ipld::history::epoch_index(epoch, first, &envelopes);
+        let w = self.store.writer()?;
+        for (c, b) in &blocks {
+            w.put_ipld(c, b)?;
+        }
+        w.commit()?;
+        Ok(root.to_bytes())
+    }
+
+    /// Checks storage-audit certificates for block `number` against the panels in the parent
+    /// state `db`: current epoch, pending task, more than 2/3 of the panel. A received block
+    /// (`strict`) must carry only valid ones; a producer drops the rest. Returns the results and
+    /// the certificates kept.
+    #[allow(clippy::type_complexity)]
+    fn check_audits<D: revm::DatabaseRef + Copy>(
+        &self,
+        db: D,
+        number: u64,
+        certs: Vec<Vec<u8>>,
+        strict: bool,
+    ) -> Result<(Vec<bolt_system::AuditResult>, Vec<Vec<u8>>)>
+    where
+        D::Error: std::fmt::Debug,
+    {
+        use bolt_system::{abi::*, addresses::*, queries};
+        let mut results: Vec<bolt_system::AuditResult> = Vec::new();
+        let mut kept = Vec::new();
+        if certs.is_empty() {
+            return Ok((results, kept));
+        }
+        let epoch = self.rules.epoch_of(number);
+        let chain_id = self.config.chain_id;
+        let q = |e| ChainError::Exec(format!("{e}"));
+        let audits = queries::call(db, chain_id, HISTORY, IHistoryRegistry::auditsCall { epoch })
+            .map_err(q)?;
+        let panel = if audits.panel.is_empty() {
+            Vec::new()
+        } else {
+            let keys = queries::call(
+                db,
+                chain_id,
+                STAKING,
+                IStakingManager::keysOfCall { ids: audits.panel.clone() },
+            )
+            .map_err(q)?;
+            keys.pubkeys
+                .chunks_exact(48)
+                .map(bolt_primitives::bls::BlsPublicKey::from_slice)
+                .collect()
+        };
+        for bytes in certs {
+            let ok = bolt_consensus::AuditCert::decode(&bytes).filter(|c| {
+                c.epoch == epoch
+                    && (c.task as usize) < audits.states.len()
+                    && audits.states[c.task as usize] == 0
+                    && !results.iter().any(|r| r.task == c.task)
+                    && c.verify(chain_id, &panel)
+            });
+            match ok {
+                Some(c) => {
+                    results.push(bolt_system::AuditResult {
+                        epoch: c.epoch,
+                        task: c.task,
+                        passed: c.passed,
+                    });
+                    kept.push(bytes);
+                }
+                None if strict => {
+                    return Err(ChainError::InvalidBlock("invalid audit certificate".into()));
+                }
+                None => {}
+            }
+        }
+        Ok((results, kept))
+    }
+
     /// A certificate carried by a mined block in phase B: a QC of the current epoch's checkpoint
     /// committee (it earns its signers their share of the block rewards), checked against the
     /// committee in the parent state `db`.
@@ -413,8 +522,9 @@ impl Chain {
         mut params_fn: impl FnMut(&Header, &BlockKind) -> BlockParams,
         txs: Vec<(TxEnvelope, Address)>,
         expected: Option<&Header>,
-        qc: Vec<u8>,
+        certs: Certs,
     ) -> Result<Executed> {
+        let Certs { qc, audits } = certs;
         let head = self.head()?;
         let ancestors = self.pending_chain(&head, parent_hash)?;
         let parent_header = match ancestors.last() {
@@ -430,7 +540,7 @@ impl Chain {
 
         let mut included = Vec::new();
         let mut rejected = Vec::new();
-        let executed = {
+        let (executed, audits) = {
             let reader = self.store.reader()?;
             let view = StateView::latest(&reader);
             let db = overlay::Overlay { base: &view, changes: &changes };
@@ -452,6 +562,16 @@ impl Chain {
                 self.check_checkpoint_cert(&db, &qc, parent_header.number + 1, checkpointing)?;
             }
             let number = params.input.number;
+            // History (ADR 0009): the previous epoch's index, and the audit certificates carried
+            // (all must verify in a received block; a producer keeps only the valid ones).
+            let epoch_index = if self.rules.is_epoch_start(number) && number > 1 {
+                Some(self.epoch_index_before(number, &ancestors)?)
+            } else {
+                None
+            };
+            let (audit_results, audits) =
+                self.check_audits(&db, number, audits, expected.is_some())?;
+            let history = bolt_system::HistoryInputs { epoch_index, audits: audit_results };
             let mut ex =
                 BlockExecutor::new(&db, params).map_err(|e| ChainError::Exec(e.to_string()))?;
             // Hard forks activating at this block (ADR 0008 §2).
@@ -469,8 +589,15 @@ impl Chain {
                         .map_err(|e| ChainError::Exec(format!("fork {}: {e}", fork.name)))?;
                 }
             }
-            bolt_system::pre_block(&mut ex, &self.rules, &parent_header, &votes, producer)
-                .map_err(|e| ChainError::Exec(format!("system calls: {e}")))?;
+            bolt_system::pre_block(
+                &mut ex,
+                &self.rules,
+                &parent_header,
+                &votes,
+                producer,
+                &history,
+            )
+            .map_err(|e| ChainError::Exec(format!("system calls: {e}")))?;
             for (tx, sender) in txs {
                 if expected.is_none() && ex.gas_remaining() < 21_000 {
                     break;
@@ -487,7 +614,7 @@ impl Chain {
                     }
                 }
             }
-            ex.finish()
+            (ex.finish(), audits)
         };
         let number = executed.params.input.number;
 
@@ -520,7 +647,8 @@ impl Chain {
             Some(p) => Some(p.bundle.root),
             None => self.store.reader()?.envelope_root(head.number)?,
         };
-        let bundle = bolt_ipld::bundle(&header, &executed.transactions, parent_root, qc);
+        let bundle =
+            bolt_ipld::bundle_with_audits(&header, &executed.transactions, parent_root, qc, audits);
         // Publish the IPFS blocks right away so peers can fetch them before the block is final
         // (validators must hold the data to vote).
         {
@@ -612,9 +740,15 @@ impl Chain {
         timestamp: u64,
         beneficiary: Address,
         extra_data: Bytes,
-        qc: Vec<u8>,
+        certs: impl Into<Certs>,
     ) -> Result<BuiltBlock> {
-        let beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
+        let mut certs = certs.into();
+        // Producers include the audit certificates this node collected (invalid ones are dropped
+        // during execution).
+        if certs.audits.is_empty() {
+            certs.audits = self.audit_queue.lock().clone();
+        }
+        let beacon = if certs.qc.is_empty() { B256::ZERO } else { keccak256(&certs.qc) };
         let (pending, included, rejected) = self.execute_on(
             parent,
             |ph, kind| {
@@ -632,7 +766,7 @@ impl Chain {
             },
             candidates.into_iter().collect(),
             None,
-            qc.clone(),
+            certs,
         )?;
         Ok(BuiltBlock {
             header: pending.header.clone(),
@@ -649,8 +783,9 @@ impl Chain {
         &self,
         header: &Header,
         transactions: Vec<TxEnvelope>,
-        qc: Vec<u8>,
+        certs: impl Into<Certs>,
     ) -> Result<Arc<PendingBlock>> {
+        let certs = certs.into();
         if let Some(p) = self.pending(&header.hash_slow()) {
             return Ok(p);
         }
@@ -672,7 +807,7 @@ impl Chain {
         }
         // Base fee, difficulty and the RANDAO mix are recomputed during execution and compared
         // with the header; the kind-specific rules (seal, certificate) are checked first.
-        let expected_beacon = if qc.is_empty() { B256::ZERO } else { keccak256(&qc) };
+        let expected_beacon = if certs.qc.is_empty() { B256::ZERO } else { keccak256(&certs.qc) };
         if header.parent_beacon_block_root != Some(expected_beacon) {
             return Err(invalid("parent certificate hash mismatch".into()));
         }
@@ -702,7 +837,7 @@ impl Chain {
             },
             transactions.into_iter().zip(senders).collect(),
             Some(header),
-            qc,
+            certs,
         )?;
         debug_assert_eq!(pending.header.number, number);
         Ok(pending)
@@ -781,13 +916,13 @@ impl Chain {
         header: &Header,
         transactions: Vec<TxEnvelope>,
         root: Option<Cid>,
-        qc: Vec<u8>,
+        certs: impl Into<Certs>,
     ) -> Result<B256> {
         let head = self.head()?;
         if header.parent_hash != head.hash_slow() {
             return Err(ChainError::InvalidBlock(format!("does not extend head {}", head.number)));
         }
-        let pending = self.verify_block(header, transactions, qc)?;
+        let pending = self.verify_block(header, transactions, certs)?;
         if let Some(exp) = root
             && exp != pending.bundle.root
         {
@@ -799,6 +934,29 @@ impl Chain {
         }
         self.commit_pending(&pending.hash)?;
         Ok(pending.hash)
+    }
+}
+
+/// The certificates a block's envelope carries: the parent's QC (or epoch proof, or a checkpoint
+/// QC in a mined block) and storage-audit certificates (ADR 0009).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Certs {
+    /// Envelope `qc` field.
+    pub qc: Vec<u8>,
+    /// Envelope `audits` field.
+    pub audits: Vec<Vec<u8>>,
+}
+
+impl Certs {
+    /// The certificates of an envelope.
+    pub fn of(env: &bolt_ipld::Envelope) -> Self {
+        Self { qc: env.qc.clone(), audits: env.audits.iter().map(|a| a.to_vec()).collect() }
+    }
+}
+
+impl From<Vec<u8>> for Certs {
+    fn from(qc: Vec<u8>) -> Self {
+        Self { qc, audits: Vec::new() }
     }
 }
 
@@ -879,6 +1037,8 @@ pub fn max_cost(tx: &TxEnvelope) -> U256 {
 
 #[cfg(test)]
 mod epoch_tests;
+#[cfg(test)]
+mod history_tests;
 #[cfg(test)]
 mod pow_tests;
 #[cfg(test)]

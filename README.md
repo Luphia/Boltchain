@@ -9,7 +9,7 @@
 - 設計決策紀錄：[`docs/adr/`](docs/adr/)
 - 里程碑進度：[`docs/milestones.md`](docs/milestones.md)
 
-## 目前狀態：M4.6 質押最終性
+## 目前狀態：M5 儲存層
 
 | 項目 | 狀態 |
 | --- | --- |
@@ -32,7 +32,7 @@
 | 質押達門檻後自動切換到 PoS；首個委員會只抽成熟質押 | 已驗收 |
 | gasLimit 由出塊者投票；硬分叉表與分叉 ID | 完成 |
 | 階段 B：質押委員會以 BFT 確認 PoW 檢查點、60/40 獎勵、完整 A → B → C（M4.6） | 已驗收：`crates/node/tests/m46_finality.rs` |
-| 儲存層：檢查點同步、快照、修剪、歷史分片（M5） | 之後 |
+| 儲存層：epoch 索引、狀態快照、檢查點同步、修剪、歷史分片與抽查、公開閘道（M5，ADR 0009） | 已驗收：`crates/node/tests/m5_storage.rs` |
 | Osaka state tests、ARM 基準 | 在 CI 上執行 |
 
 ## 快速開始
@@ -90,19 +90,39 @@ boltchain keys register-tx --key validator-key.json --fee-recipient <收款地�
 
 把印出的 `to` 與 `data` 從持有質押的錢包送出，金額至少 64 BOLT。所有人規則相同，genesis 不列任何驗證者。
 
+驗證者也是歷史資料的保存者（ADR 0009）：用 owner 錢包公布提供資料的節點，否則抽查一律算失敗、每次罰 1% 質押。
+
+```sh
+boltchain node-id --node-key data/validator/node.key       # 節點的 peer id
+boltchain keys set-peer-tx --id <驗證者 id> --node-key data/validator/node.key
+```
+
+### 儲存層選項
+
+```sh
+# 從快照起步，不必從 genesis 重放（需要最近一個 epoch 結尾區塊的雜湊，來源要可信）
+boltchain validator --datadir data/new --checkpoint <number>:<hash>
+# 保留全部區塊（預設只留最近 7 個 epoch 與分到的舊 epoch）
+boltchain validator --archive
+# 以 HTTP 提供 trustless IPFS gateway：/ipfs/<cid>?format=car、/history/epoch/<n>.car
+boltchain validator --gateway 127.0.0.1:8080
+# 離線匯出一個 epoch 的 CAR（可直接 ipfs dag import）
+boltchain history export --datadir data/validator --epoch 3 --out epoch-3.car
+```
+
 ## Workspace 結構
 
 ```
 crates/
   primitives/  鏈參數、genesis 格式
   exec/        revm Osaka 執行、區塊執行器
-  store/       libmdbx 儲存層、路徑式增量 MPT、狀態歷史
+  store/       libmdbx 儲存層、路徑式增量 MPT、狀態歷史、狀態快照與修剪
   chain/       genesis 初始化、出塊與匯入、PoW 分叉選擇與重組
   txpool/      交易池
   rpc/         eth_* JSON-RPC
-  node/        `boltchain` 執行檔：mine、validator、follow、devnet、keys、bench、genesis 工具
+  node/        `boltchain` 執行檔：mine、validator、follow、devnet、keys、bench、history、genesis 工具；儲存服務與閘道
   pow/         RandomBOLT（RandomX 變體）、header 封印、ASERT、每塊獎勵
-  ipld/        IPLD 編碼、CAR
+  ipld/        IPLD 編碼、CAR、epoch 索引與快照格式
   net/         libp2p、gossipsub、Bitswap 1.2.0、交易轉發
   sync/        公告、跟隨、回填
   consensus/   兩鏈 HotStuff（Jolteon 規則）、epoch 交接、QC/TC、BLS 聚合、最終性證明
