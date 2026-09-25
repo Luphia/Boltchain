@@ -65,6 +65,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/cache@v4
         with:
-          path: ~/.cargo/bin/revme
-          key: revme-43.0.3
+          path: |
+            ~/.cargo/bin/revme
+            ~/.cache/boltchain/eest-v5.4.0
+          key: revme-43.0.3-eest-v5.4.0
       - run: scripts/statetest.sh
