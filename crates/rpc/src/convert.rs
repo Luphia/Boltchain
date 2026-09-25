@@ -49,7 +49,14 @@ pub(crate) fn block_json(r: &Tx<'_, RO>, number: u64, full: bool) -> RpcResult<O
     };
     let rpc: Block<Transaction, RpcHeader> =
         Block { header, uncles: vec![], transactions, withdrawals: Some(Default::default()) };
-    to_json(rpc).map(Some)
+    let mut v = to_json(rpc)?;
+    // Boltchain extension: the block's IPFS root (its envelope), so any IPFS client can fetch
+    // the block and follow `parent` links from there.
+    if let (Some(obj), Some(root)) = (v.as_object_mut(), r.envelope_root(number).map_err(internal)?)
+    {
+        obj.insert("ipfsRoot".into(), Value::String(root.to_string()));
+    }
+    Ok(Some(v))
 }
 
 /// A mined transaction by hash.

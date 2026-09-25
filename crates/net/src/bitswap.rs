@@ -1,7 +1,9 @@
 //! Bitswap 1.2.0 (`/ipfs/bitswap/1.2.0`), wire-compatible with Kubo and Helia.
 //!
-//! Every message travels on its own outbound stream as an unsigned-varint length-prefixed
-//! protobuf; a peer answers wants by opening a stream back. The engine serves any block in the
+//! Messages are unsigned-varint length-prefixed protobufs on outbound streams; a peer answers
+//! wants on its own outbound stream back. Like Kubo, the engine keeps one long-lived outbound
+//! stream per peer and writes every message to it (opening a stream per message exhausted
+//! peers' stream limits over high-latency links on the public testnet). The engine serves any block in the
 //! local blockstore (which only ever holds blocks of validated chain data) and fetches blocks by
 //! sending `want-block` entries, first to the announcer and then to other connected peers.
 
@@ -194,7 +196,15 @@ pub struct Bitswap {
     arrivals: broadcast::Sender<Arrival>,
     /// CIDs some local fetch is waiting for (unsolicited blocks are dropped).
     wanted: Arc<Mutex<HashSet<Cid>>>,
+    /// One outbound stream per peer, reused for every message.
+    outbound: Arc<Mutex<HashMap<PeerId, OutboundSlot>>>,
 }
+
+/// A peer's reusable outbound stream (`None` until opened, or after it failed).
+type OutboundSlot = Arc<tokio::sync::Mutex<Option<libp2p::Stream>>>;
+
+/// Outbound streams kept at most (the least recently opened are dropped beyond this).
+const MAX_OUTBOUND_STREAMS: usize = 512;
 
 impl std::fmt::Debug for Bitswap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -207,7 +217,13 @@ impl Bitswap {
     pub fn new(mut control: libp2p_stream::Control, source: Arc<dyn BlockSource>) -> Self {
         let incoming = control.accept(PROTOCOL).expect("bitswap protocol registered once");
         let (arrivals, _) = broadcast::channel(1024);
-        let this = Self { control, source, arrivals, wanted: Arc::new(Mutex::new(HashSet::new())) };
+        let this = Self {
+            control,
+            source,
+            arrivals,
+            wanted: Arc::new(Mutex::new(HashSet::new())),
+            outbound: Arc::new(Mutex::new(HashMap::new())),
+        };
         let server = this.clone();
         tokio::spawn(async move { server.serve(incoming).await });
         this
@@ -228,6 +244,10 @@ impl Bitswap {
                         }
                     }
                 }
+                // Close our side too: a peer that opened this stream for one message (Helia,
+                // Kubo) waits for it before its stream counts as closed, and stops sending once
+                // too many are still open.
+                let _ = stream.close().await;
             });
         }
     }
@@ -245,7 +265,9 @@ impl Bitswap {
             let mut reply = pb::Message::default();
             for e in wl.entries.iter().filter(|e| !e.cancel) {
                 let Ok(cid) = Cid::try_from(e.block.as_slice()) else { continue };
-                match (self.source.get(&cid), e.want_type) {
+                let found = self.source.get(&cid);
+                tracing::trace!(%peer, %cid, have = found.is_some(), want_type = e.want_type, "bitswap want");
+                match (found, e.want_type) {
                     (Some(data), WANT_BLOCK) => {
                         reply.payload.push(pb::Block { prefix: cid_prefix(&cid), data })
                     }
@@ -259,6 +281,12 @@ impl Bitswap {
                 }
             }
             bolt_primitives::metrics::BITSWAP_SERVED.add(reply.payload.len() as u64);
+            tracing::trace!(
+                %peer,
+                blocks = reply.payload.len(),
+                presences = reply.block_presences.len(),
+                "bitswap reply"
+            );
             if !reply.payload.is_empty() || !reply.block_presences.is_empty() {
                 // Split so no single message exceeds the limit.
                 for part in split(reply) {
@@ -286,16 +314,42 @@ impl Bitswap {
     }
 
     async fn send(&self, peer: PeerId, msg: &pb::Message) {
-        let mut control = self.control.clone();
-        match control.open_stream(peer, PROTOCOL).await {
-            Ok(mut s) => {
-                if let Err(e) = write_msg(&mut s, msg).await {
-                    tracing::debug!(%peer, "bitswap write: {e}");
-                }
-                let _ = s.close().await;
+        let slot = {
+            let mut out = self.outbound.lock();
+            if out.len() >= MAX_OUTBOUND_STREAMS && !out.contains_key(&peer) {
+                // Drop idle streams (nobody holds their lock) to make room.
+                out.retain(|_, s| Arc::strong_count(s) > 1);
             }
-            Err(e) => tracing::debug!(%peer, "bitswap open stream: {e}"),
+            out.entry(peer).or_default().clone()
+        };
+        let mut stream = slot.lock().await;
+        // Write on the existing stream; on failure (peer closed it, connection replaced) open a
+        // fresh one and retry once.
+        for attempt in 0..2 {
+            if stream.is_none() {
+                let mut control = self.control.clone();
+                match control.open_stream(peer, PROTOCOL).await {
+                    Ok(s) => *stream = Some(s),
+                    Err(e) => {
+                        tracing::debug!(%peer, "bitswap open stream: {e}");
+                        break;
+                    }
+                }
+            }
+            let s = stream.as_mut().expect("just opened");
+            match write_msg(s, msg).await {
+                Ok(()) => {
+                    tracing::trace!(%peer, attempt, "bitswap sent");
+                    return;
+                }
+                Err(e) => {
+                    tracing::debug!(%peer, attempt, "bitswap write: {e}");
+                    *stream = None;
+                }
+            }
         }
+        drop(stream);
+        self.outbound.lock().remove(&peer);
     }
 
     fn want_message(cids: &[Cid]) -> pb::Message {

@@ -3,7 +3,7 @@
 // and body chunk, verifies them against their CIDs, decodes the transactions, and (optionally)
 // compares each block with a node's JSON-RPC.
 //
-//   node helia-full-chain.mjs <multiaddr-with-/p2p/> <tip-envelope-cid> [rpc-url]
+//   node helia-full-chain.mjs <multiaddr-with-/p2p/> <tip-envelope-cid | latest> [rpc-url]
 
 import { createHelia } from 'helia'
 import { tcp } from '@libp2p/tcp'
@@ -48,7 +48,9 @@ const call = async (method, params) => {
   return (await r.json()).result
 }
 
-let cid = CID.parse(tip)
+// `latest` (with an RPC URL): start from the head block's IPFS root (`ipfsRoot`, a Boltchain
+// extension of eth_getBlockByNumber).
+let cid = CID.parse(tip === 'latest' ? (await call('eth_getBlockByNumber', ['latest', false])).ipfsRoot : tip)
 let blocks = 0, txs = 0, chunks = 0, ipfsBytes = 0, mismatches = 0
 const started = Date.now()
 while (cid) {

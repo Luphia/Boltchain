@@ -103,6 +103,8 @@ fn main() -> Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,libmdbx=warn".into()),
         )
+        // Colours only on a terminal: log files and journald get plain text.
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
     match Cli::parse().command {
         Command::Devnet(args) => {
