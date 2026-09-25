@@ -30,6 +30,8 @@ for i in $(seq 1 "$N"); do
   A+=" --metrics 127.0.0.1:$((9016 + i)) --mine --randomx-fast --mining-threads $THREADS"
   A+=" --beneficiary $ADDR --extra-data cafeca-n$i"
   [ "$i" = 1 ] && A+=" --gateway 0.0.0.0:8080 --explorer --archive --relay-server"
+  # Contract names for the explorer (e.g. scripts/uniswap-v4/deployments/8018.json copied here).
+  for l in "$ROOT"/labels/*.json; do [ "$i" = 1 ] && [ -f "$l" ] && A+=" --explorer-labels $l"; done
   for k in "$D"/keys/v*.json; do A+=" --key $k"; done
   # Everyone dials node 1 and the other local nodes (as public nodes would).
   for b in $BOOT1; do [ "$i" != 1 ] && A+=" --bootnode $b"; done

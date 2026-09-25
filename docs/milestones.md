@@ -278,6 +278,7 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
   - HTTP 限流：閘道與瀏覽器每個 IP 每秒 20 次（突發 80），同時最多 128 個請求，超過回 429 / 503
   - NAT 穿透：AutoNAT、UPnP、Circuit Relay v2（`--relay-server` 開啟中繼，每條電路最長 30 分鐘、256 MiB）、DCUtR 打洞；AutoNAT 判定在 NAT 後面時自動經由最多 2 個中繼監聽（`relayed_node_serves_blocks`）
   - 防罰沒（doppelganger）：收到自己座位簽的、但不是本機送出的投票或逾時訊息，就停止用那把金鑰簽署並記錄錯誤、`doppelganger` 指標加一；該節點的其他金鑰照常運作（`m4_pos` 驗收）
+- [x] 測試網部署 Uniswap v4（`scripts/uniswap-v4`）：PoolManager、PositionManager、UniversalRouter、V4Quoter、StateView、Permit2、WBOLT；原生 BOLT / tUSD 池加流動性、雙向兌換成功。瀏覽器加上 `--explorer-labels` 顯示合約名稱與常見方法名稱
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## M6 追加項目（ADR 0008）

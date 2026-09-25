@@ -17,7 +17,7 @@ use bolt_store::{RO, StateView, Tx, addr_index::role};
 use bolt_system::{abi::*, addresses::*, queries};
 use bolt_txpool::TxPool;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// The web interface (one self-contained file).
 const INDEX_HTML: &str = include_str!("explorer/index.html");
@@ -48,16 +48,84 @@ fn wei(v: U256) -> String {
     v.to_string()
 }
 
-/// Human name of a system contract.
-fn label(a: &Address) -> Option<&'static str> {
-    match *a {
-        STAKING => Some("StakingManager"),
-        CONSENSUS => Some("ConsensusRegistry"),
-        REWARDS => Some("RewardDistributor"),
-        HISTORY => Some("HistoryRegistry"),
-        SYSTEM => Some("System"),
-        _ => None,
+/// Names of well-known contracts deployed on this network (`--explorer-labels`).
+static LABELS: std::sync::OnceLock<HashMap<Address, String>> = std::sync::OnceLock::new();
+
+/// Loads contract names from a JSON file: either `{ "<address>": "<name>" }` or a deployment
+/// record `{ "contracts": { "<name>": "<address>" } }` (as written by
+/// `scripts/uniswap-v4/deploy.mjs`). Several files can be given; later names win.
+pub fn load_labels(paths: &[std::path::PathBuf]) -> anyhow::Result<usize> {
+    let mut map = HashMap::new();
+    for p in paths {
+        let v: Value = serde_json::from_slice(&std::fs::read(p)?)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", p.display()))?;
+        let pairs: Vec<(String, String)> = match v.get("contracts").and_then(Value::as_object) {
+            Some(c) => {
+                c.iter().filter_map(|(n, a)| Some((a.as_str()?.to_owned(), n.clone()))).collect()
+            }
+            None => v
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter_map(|(a, n)| Some((a.clone(), n.as_str()?.to_owned())))
+                .collect(),
+        };
+        for (a, n) in pairs {
+            let a: Address =
+                a.parse().map_err(|_| anyhow::anyhow!("{}: bad address {a}", p.display()))?;
+            map.insert(a, n);
+        }
     }
+    let n = map.len();
+    let _ = LABELS.set(map);
+    Ok(n)
+}
+
+/// Human name of a system contract or a labelled contract.
+fn label(a: &Address) -> Option<String> {
+    let system = match *a {
+        STAKING => "StakingManager",
+        CONSENSUS => "ConsensusRegistry",
+        REWARDS => "RewardDistributor",
+        HISTORY => "HistoryRegistry",
+        SYSTEM => "System",
+        _ => return LABELS.get().and_then(|m| m.get(a).cloned()),
+    };
+    Some(system.to_owned())
+}
+
+/// Method names for well-known selectors that are not decoded further (Uniswap v4, Permit2,
+/// WETH-style wrappers, mintable tokens).
+fn known_method(sel: [u8; 4]) -> Option<&'static str> {
+    static TABLE: std::sync::OnceLock<HashMap<[u8; 4], &'static str>> = std::sync::OnceLock::new();
+    const SIGS: &[(&str, &str)] = &[
+        ("execute(bytes,bytes[],uint256)", "execute"),
+        ("execute(bytes,bytes[])", "execute"),
+        ("modifyLiquidities(bytes,uint256)", "modifyLiquidities"),
+        ("modifyLiquiditiesWithoutUnlock(bytes,bytes[])", "modifyLiquiditiesWithoutUnlock"),
+        ("initialize((address,address,uint24,int24,address),uint160)", "initialize"),
+        ("initializePool((address,address,uint24,int24,address),uint160)", "initializePool"),
+        ("multicall(bytes[])", "multicall"),
+        ("approve(address,address,uint160,uint48)", "approve (Permit2)"),
+        ("lockdown((address,address)[])", "lockdown"),
+        ("invalidateNonces(address,address,uint48)", "invalidateNonces"),
+        ("deposit()", "deposit"),
+        ("withdraw(uint256)", "withdraw"),
+        ("mint(address,uint256)", "mint"),
+        ("setApprovalForAll(address,bool)", "setApprovalForAll"),
+        ("safeTransferFrom(address,address,uint256)", "safeTransferFrom"),
+    ];
+    TABLE
+        .get_or_init(|| {
+            SIGS.iter()
+                .map(|(sig, name)| {
+                    let h = alloy_primitives::keccak256(sig.as_bytes());
+                    ([h[0], h[1], h[2], h[3]], *name)
+                })
+                .collect()
+        })
+        .get(&sel)
+        .copied()
 }
 
 fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
@@ -770,7 +838,10 @@ fn decode_call(to: Option<Address>, input: &Bytes) -> Option<Value> {
                 ("amount", json!(amount(2)?)),
             ]),
         ),
-        _ => Some(json!({ "method": hex::encode_prefixed(sel), "params": [] })),
+        _ => Some(json!({
+            "method": known_method(sel).map(str::to_owned).unwrap_or_else(|| hex::encode_prefixed(sel)),
+            "params": []
+        })),
     }
 }
 
@@ -884,5 +955,28 @@ mod tests {
         let c = decode_call(Some(Address::repeat_byte(1)), &t.into()).unwrap();
         assert_eq!(c["method"], "transfer");
         assert_eq!(c["params"][1]["value"], "5");
+        // UniversalRouter.execute(bytes,bytes[],uint256): named, not decoded.
+        let c =
+            decode_call(Some(Address::repeat_byte(1)), &Bytes::from(vec![0x35, 0x93, 0x56, 0x4c]))
+                .unwrap();
+        assert_eq!(c["method"], "execute");
+    }
+
+    #[test]
+    fn labels_from_deployment_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (Address::repeat_byte(0xaa), Address::repeat_byte(0xbb));
+        let f1 = dir.path().join("8018.json");
+        std::fs::write(
+            &f1,
+            json!({ "chainId": 8018, "contracts": { "PoolManager": a } }).to_string(),
+        )
+        .unwrap();
+        let f2 = dir.path().join("names.json");
+        std::fs::write(&f2, json!({ b.to_string(): "Faucet" }).to_string()).unwrap();
+        assert_eq!(load_labels(&[f1, f2]).unwrap(), 2);
+        assert_eq!(label(&a).as_deref(), Some("PoolManager"));
+        assert_eq!(label(&b).as_deref(), Some("Faucet"));
+        assert_eq!(label(&STAKING).as_deref(), Some("StakingManager"));
     }
 }

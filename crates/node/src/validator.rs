@@ -1263,6 +1263,10 @@ pub struct StorageArgs {
     /// `127.0.0.1:8080`) and keep the address index it needs (about 10–20% more disk).
     #[arg(long)]
     pub explorer: bool,
+    /// Contract names for the explorer: JSON `{ "<address>": "<name>" }` or a deployment record
+    /// with a `contracts` map (e.g. `scripts/uniswap-v4/deployments/8018.json`). Repeatable.
+    #[arg(long = "explorer-labels", value_name = "FILE")]
+    pub explorer_labels: Vec<std::path::PathBuf>,
 }
 
 /// Runs a validator node until Ctrl-C.
@@ -1299,6 +1303,10 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
     let storage_task = tokio::spawn(storage.run(storage_rx));
     if args.storage.explorer {
         crate::explorer::spawn_address_index(chain.clone())?;
+        if !args.storage.explorer_labels.is_empty() {
+            let n = crate::explorer::load_labels(&args.storage.explorer_labels)?;
+            tracing::info!(contracts = n, "explorer labels loaded");
+        }
         let addr = args.storage.gateway.unwrap_or(([127, 0, 0, 1], 8080).into());
         let ex = crate::explorer::Explorer { chain: chain.clone(), pool: Some(pool.clone()) };
         crate::explorer::start(addr, ex).await?;

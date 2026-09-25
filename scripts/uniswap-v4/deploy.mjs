@@ -278,7 +278,7 @@ book.versions = {
   "@uniswap/v4-core": "1.0.2",
   "@uniswap/v4-periphery": "1.0.3",
   "@uniswap/universal-router": "2.1.0",
-  permit2: "canonical source, solc 0.8.17",
+  permit2: "canonical runtime (v4-periphery lib/permit2), chain-specific immutables",
 };
 save();
 
@@ -295,7 +295,9 @@ const KEY_T =
   "tuple(address currency0,address currency1,uint24 fee,int24 tickSpacing,address hooks)";
 const coder = ethers.AbiCoder.defaultAbiCoder();
 const poolId = ethers.keccak256(coder.encode([KEY_T], [key]));
-book.pools = { "BOLT/tUSD 0.3%": { poolId, key } };
+const POOL = "BOLT/tUSD 0.3%";
+book.pools ??= {};
+book.pools[POOL] = { ...book.pools[POOL], poolId, key };
 save();
 
 const isqrt = (n) => {
@@ -316,17 +318,19 @@ const bal = async () => ({
   tusd: ethers.formatEther(await tusd.balanceOf(me)),
 });
 
-await send("mint 10,000 tUSD", tusd.mint(me, ethers.parseEther("10000")));
+if ((await tusd.balanceOf(me)) < ethers.parseEther("5000"))
+  await send("mint 10,000 tUSD", tusd.mint(me, ethers.parseEther("10000")));
 if ((await tusd.allowance(me, await permit2.getAddress())) < ethers.MaxUint256 / 2n)
   await send("tUSD approve Permit2", tusd.approve(await permit2.getAddress(), ethers.MaxUint256));
 for (const [who, c] of [
   ["PositionManager", posm],
   ["UniversalRouter", router],
 ])
-  await send(
-    `Permit2 allowance for ${who}`,
-    permit2.approve(T, await c.getAddress(), MAX160, MAX48),
-  );
+  if ((await permit2.allowance(me, T, await c.getAddress())).amount < MAX160 / 2n)
+    await send(
+      `Permit2 allowance for ${who}`,
+      permit2.approve(T, await c.getAddress(), MAX160, MAX48),
+    );
 
 const [slot0Price] = await stateView.getSlot0(poolId);
 if (slot0Price === 0n) await send("initialize pool", poolManager.initialize(key, sqrtPriceX96));
@@ -348,33 +352,39 @@ const tickLower = -887220,
 // Full range: amount0 ≈ L / sqrtP, amount1 ≈ L · sqrtP (sqrtP = √10 ≈ 3.16); 10 % headroom.
 const max0 = (((liquidity * 1000n) / 3162n) * 11n) / 10n + 1n;
 const max1 = (((liquidity * 3163n) / 1000n) * 11n) / 10n + 1n;
-const before = await bal();
-const mintParams = [
-  coder.encode(
-    [KEY_T, "int24", "int24", "uint256", "uint128", "uint128", "address", "bytes"],
-    [key, tickLower, tickUpper, liquidity, max0, max1, me, "0x"],
-  ),
-  coder.encode(["address", "address"], [ZERO, T]),
-  coder.encode(["address", "address"], [ZERO, me]),
-];
-const r = await send(
-  "add liquidity (PositionManager)",
-  posm.modifyLiquidities(
+if (book.pools[POOL].smokePosition === undefined) {
+  const before = await bal();
+  const mintParams = [
     coder.encode(
-      ["bytes", "bytes[]"],
-      [actions(A.MINT_POSITION, A.SETTLE_PAIR, A.SWEEP), mintParams],
+      [KEY_T, "int24", "int24", "uint256", "uint128", "uint128", "address", "bytes"],
+      [key, tickLower, tickUpper, liquidity, max0, max1, me, "0x"],
     ),
-    deadline(),
-    { value: max0 },
-  ),
-);
-const tokenId = (await posm.nextTokenId()) - 1n;
-log(
-  `position #${tokenId}, owner ${await posm.ownerOf(tokenId)}, liquidity ${ethers.formatEther(await posm.getPositionLiquidity(tokenId))}`,
-);
-log("balances before / after:", before, await bal());
-book.pools["BOLT/tUSD 0.3%"].smokePosition = Number(tokenId);
-save();
+    coder.encode(["address", "address"], [ZERO, T]),
+    coder.encode(["address", "address"], [ZERO, me]),
+  ];
+  const r = await send(
+    "add liquidity (PositionManager)",
+    posm.modifyLiquidities(
+      coder.encode(
+        ["bytes", "bytes[]"],
+        [actions(A.MINT_POSITION, A.SETTLE_PAIR, A.SWEEP), mintParams],
+      ),
+      deadline(),
+      { value: max0 },
+    ),
+  );
+  const minted = r.logs
+    .filter((l) => l.address === posm.target)
+    .map((l) => posm.interface.parseLog(l))
+    .find((e) => e?.name === "Transfer" && e.args.from === ZERO);
+  const tokenId = minted.args.id;
+  log(
+    `position #${tokenId}, owner ${await posm.ownerOf(tokenId)}, liquidity ${ethers.formatEther(await posm.getPositionLiquidity(tokenId))}`,
+  );
+  log("balances before / after:", before, await bal());
+  book.pools[POOL].smokePosition = Number(tokenId);
+  save();
+} else log(`position #${book.pools[POOL].smokePosition} already added`);
 
 // Swaps through UniversalRouter (command V4_SWAP = 0x10).
 const EXACT_IN_T = `tuple(${KEY_T} poolKey,bool zeroForOne,uint128 amountIn,uint128 amountOutMinimum,bytes hookData)`;

@@ -1,0 +1,33 @@
+{
+  "chainId": 8018,
+  "contracts": {
+    "Permit2": "0x02B5cC3B42C2646a39634374d8cC35B55b8e158C",
+    "WBOLT": "0x7Eb67a435eA575231FDdaA5056f15580Edc581d4",
+    "PoolManager": "0x5dFd9A046A4bCcfa831909f809E9bA519f1fF47C",
+    "PositionDescriptor": "0xb0f5B41Ba48E8DE03625BCd196C4b691254112C9",
+    "PositionManager": "0x4Efa6167f81e046E7A8427a9E197eB875DfcDc59",
+    "StateView": "0xAaa79cBAba5aEBAdE64c2ae8367bB72b3380c4D1",
+    "V4Quoter": "0x6b9fcA1bdd0eCa4E29a0dCcedcA2f18e409b9C40",
+    "UniversalRouter": "0x7cF5C62E8805D0968230ca232F3bAE22F1F3A9F2",
+    "tUSD": "0xd348f3bfb9Ba449De548945E54f2eD25A3263305"
+  },
+  "versions": {
+    "@uniswap/v4-core": "1.0.2",
+    "@uniswap/v4-periphery": "1.0.3",
+    "@uniswap/universal-router": "2.1.0",
+    "permit2": "canonical runtime (v4-periphery lib/permit2), chain-specific immutables"
+  },
+  "pools": {
+    "BOLT/tUSD 0.3%": {
+      "poolId": "0xe49b160f7a87b3db34381eccae1824a8a9828f87c4b004de412a0e1b1b258398",
+      "key": {
+        "currency0": "0x0000000000000000000000000000000000000000",
+        "currency1": "0xd348f3bfb9Ba449De548945E54f2eD25A3263305",
+        "fee": 3000,
+        "tickSpacing": 60,
+        "hooks": "0x0000000000000000000000000000000000000000"
+      },
+      "smokePosition": 1
+    }
+  }
+}

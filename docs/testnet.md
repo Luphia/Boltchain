@@ -83,6 +83,28 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
   --checkpoint <高度>:<雜湊>
 ```
 
+## Uniswap v4
+
+測試網部署了 Uniswap v4（core 1.0.2、periphery 1.0.3、UniversalRouter 2.1.0），部署腳本與地址紀錄在 [`scripts/uniswap-v4`](../scripts/uniswap-v4)：
+
+| 合約 | 地址 |
+| --- | --- |
+| PoolManager | `0x5dFd9A046A4bCcfa831909f809E9bA519f1fF47C` |
+| PositionManager | `0x4Efa6167f81e046E7A8427a9E197eB875DfcDc59` |
+| UniversalRouter | `0x7cF5C62E8805D0968230ca232F3bAE22F1F3A9F2` |
+| V4Quoter | `0x6b9fcA1bdd0eCa4E29a0dCcedcA2f18e409b9C40` |
+| StateView | `0xAaa79cBAba5aEBAdE64c2ae8367bB72b3380c4D1` |
+| PositionDescriptor | `0xb0f5B41Ba48E8DE03625BCd196C4b691254112C9` |
+| Permit2 | `0x02B5cC3B42C2646a39634374d8cC35B55b8e158C` |
+| WBOLT | `0x7Eb67a435eA575231FDdaA5056f15580Edc581d4` |
+| tUSD（測試代幣，任何人都能 mint） | `0xd348f3bfb9Ba449De548945E54f2eD25A3263305` |
+
+- 已建立原生 BOLT / tUSD 池（手續費 0.30%，tick spacing 60，沒有 hook），pool id `0xe49b160f7a87b3db34381eccae1824a8a9828f87c4b004de412a0e1b1b258398`，初始價格 1 BOLT = 10 tUSD，並有 100 單位的全區間流動性。
+- Permit2 不在其他鏈上的標準位址：標準位址要靠不帶 chain id 的交易部署，Boltchain 不接受這種交易。程式碼與標準版本逐位元組相同。
+- Uniswap 官方網頁不支援 chain 8018，請用腳本、ethers 或 Foundry（`cast`）直接呼叫合約。範例見 `scripts/uniswap-v4/deploy.mjs` 的冒煙測試。
+- 瀏覽器會顯示這些合約的名稱，以及 `execute`、`modifyLiquidities` 等方法名稱。
+- Uniswap v4 core 採用 BUSL-1.1，測試網屬於非正式環境的使用；主網部署前要先取得授權（見腳本目錄的 README）。
+
 ## 監看與回報
 
 - `curl 127.0.0.1:9017/health`：高度、階段、peer 數、最終區塊、快照高度。
