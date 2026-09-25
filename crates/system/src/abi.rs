@@ -23,6 +23,7 @@ sol! {
         function keysOf(uint32[] ids) external view returns (bytes pubkeys, address[] recipients);
         function pubkeyOf(uint32 id) external view returns (bytes);
         function totalActiveStake() external view returns (uint256);
+        function weightOf(uint32 id) external view returns (uint256);
         function deadStake() external view returns (uint256);
         function count() external view returns (uint32);
         function idOfPubkey(bytes32 h) external view returns (uint32);
@@ -56,7 +57,9 @@ sol! {
     }
 
     interface IParamRegistry {
-        function initialize(uint64 gasLimit, uint64 minBaseFee, uint32 committeeSize, uint32 floor) external;
+        function initialize(uint64 gasLimit, uint64 minBaseFee, uint32 committeeSize, uint32 floor, uint128 lockedWeightCap) external;
+        function lockedWeightCap() external view returns (uint128);
+        function setLockedWeightCap(uint128 v) external;
         function params() external view returns (uint64 gasLimit, uint64 minBaseFee, uint32 committeeSize);
         function setGasLimit(uint64 v) external;
         function setCommitteeSize(uint32 v) external;

@@ -9,6 +9,10 @@ interface IConsensusRegistry {
     function bootstrapEnded() external view returns (bool);
 }
 
+interface IParams {
+    function lockedWeightCap() external view returns (uint128);
+}
+
 interface IRewardDistributor {
     function burnSupply(uint256 amount) external;
 }
@@ -184,19 +188,20 @@ contract StakingManager is SystemContract {
 
     // ---------------------------------------------------------------- views
 
-    /// Active validators with at least the minimum stake: the committee lottery input. The order is
-    /// unspecified; the node sorts by id.
+    /// Active validators with at least the minimum stake, with their lottery weights: the
+    /// committee lottery input. The order is unspecified; the node sorts by id.
     function snapshot() external view returns (uint32[] memory ids, uint256[] memory stakes) {
         uint256 n = active.length;
         ids = new uint32[](n);
         stakes = new uint256[](n);
+        uint256 cap = IParams(Sys.PARAMS).lockedWeightCap();
         uint256 k;
         for (uint256 i = 0; i < n; i++) {
             uint32 id = active[i];
-            uint256 s = validators[id].stake;
-            if (s >= Sys.MIN_STAKE) {
+            Validator storage v = validators[id];
+            if (v.stake >= Sys.MIN_STAKE) {
                 ids[k] = id;
-                stakes[k] = s;
+                stakes[k] = _weight(v, cap);
                 k++;
             }
         }
@@ -220,14 +225,27 @@ contract StakingManager is SystemContract {
     }
 
     /// Stakers counted for the bootstrap exit condition (active, at least the minimum stake).
+    /// `total` sums lottery weights, so locked bootstrap rewards count only up to the cap.
     function stakerStats() external view returns (uint256 stakers, uint256 total) {
+        uint256 cap = IParams(Sys.PARAMS).lockedWeightCap();
         for (uint256 i = 0; i < active.length; i++) {
-            uint256 s = validators[active[i]].stake;
-            if (s >= Sys.MIN_STAKE) {
+            Validator storage v = validators[active[i]];
+            if (v.stake >= Sys.MIN_STAKE) {
                 stakers++;
-                total += s;
+                total += _weight(v, cap);
             }
         }
+    }
+
+    /// Lottery weight: unlocked stake plus locked bootstrap rewards up to `cap` (ADR 0006 §11).
+    /// The cap follows the stake while it stays staked; the funds themselves are not reduced.
+    function weightOf(uint32 id) external view returns (uint256) {
+        return _weight(validators[id], IParams(Sys.PARAMS).lockedWeightCap());
+    }
+
+    function _weight(Validator storage v, uint256 cap) private view returns (uint256) {
+        uint256 locked = v.locked;
+        return v.stake - locked + (locked < cap ? locked : cap);
     }
 
     function pubkeyOf(uint32 id) public view returns (bytes memory) {

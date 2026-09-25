@@ -181,8 +181,8 @@ fn epochs_rotate_committees_and_pay_rewards() {
     invariant(&chain);
     assert_eq!(view(&chain, CONSENSUS, IConsensusRegistry::currentEpochCall {}), 1);
     assert!(view(&chain, CONSENSUS, IConsensusRegistry::bootstrapEndedCall {}));
-    // Sampled by stake from every eligible validator: the ten new ones (100 BOLT each) and the
-    // bootstrap validators, whose locked rewards now count as ordinary stake (far larger here).
+    // Sampled by weight from every eligible validator: the ten new ones (100 BOLT each) and the
+    // bootstrap validators, whose locked rewards count only up to the cap (ADR 0006 §11).
     let c2 = view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch: 2 });
     assert!(c2.ids.iter().all(|id| (1..=17).contains(id)), "{:?}", c2.ids);
     assert_eq!(
@@ -204,7 +204,15 @@ fn epochs_rotate_committees_and_pay_rewards() {
     );
     let v1 = view(&chain, STAKING, IStakingManager::validatorCall { id: 1 });
     assert_eq!(v1.locked, v1.stake);
-    assert!(v1.locked > U256::ZERO);
+    assert!(v1.locked > bolt(10_000), "one epoch of bootstrap rewards is large");
+    // ...but it weighs no more than an average staker at the exit threshold (640 / 10 BOLT).
+    let cap = view(&chain, PARAMS, IParamRegistry::lockedWeightCapCall {});
+    assert_eq!(U256::from(cap), bolt(64));
+    assert_eq!(view(&chain, STAKING, IStakingManager::weightOfCall { id: 1 }), bolt(64));
+    assert_eq!(view(&chain, STAKING, IStakingManager::weightOfCall { id: 8 }), bolt(100));
+    let snap = view(&chain, STAKING, IStakingManager::snapshotCall {});
+    let w1 = snap.ids.iter().position(|i| *i == 1).map(|k| snap.stakes[k]);
+    assert_eq!(w1, Some(bolt(64)), "the lottery sees the capped weight");
     assert_eq!(view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: 1 }), U256::ZERO);
 
     // Blocks 6-9: epoch 1 is still the bootstrap committee, settled at block 9 at full rate now

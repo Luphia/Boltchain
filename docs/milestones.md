@@ -116,7 +116,7 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
   - 治理：Safe 1.4.1 5-of-9，加上兩個 OpenZeppelin TimelockController（16 天、2 天）
   - 系統合約都是 UUPS proxy，只有 16 天 timelock 能升級
 - [x] Solidity BLS 函式庫：RFC 9380 hash-to-curve（SHA-256 預編譯、MODEXP、EIP-2537），與 blst 交叉驗證
-- [x] genesis：在固定位址直接執行 initcode 部署系統合約，再以 system 地址初始化。devnet genesis hash 改為 `0x8aba54f8…68403`
+- [x] genesis：在固定位址直接執行 initcode 部署系統合約，再以 system 地址初始化。devnet genesis hash 改為 `0x207c7090…8ea0c`
 - [x] 每區塊的 system call：記錄燃燒與投票；epoch 起點結算上一個 epoch 的獎勵，並依質押權重抽下一個 epoch 的委員會（512 席，可重複抽中）
 - [x] RANDAO：`extra_data` 帶 proposer 的 BLS reveal，投票前驗證
 - [x] 共識：
@@ -137,16 +137,16 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 
 | 項目 | 結果 |
 | --- | --- |
-| 100 個驗證者跑完 epoch 輪替（`crates/node/tests/m4_pos.rs`） | 100 個驗證者在 epoch 0 以交易註冊，由 5 個節點運行 107 把金鑰；epoch 2–6 的委員會各不相同，數十位驗證者輪流上任；新的跟隨節點從 genesis 逐個 epoch 驗證證明，同步到 epoch 6。release 約 43 秒、debug 約 46 秒 |
+| 100 個驗證者跑完 epoch 輪替（`crates/node/tests/m4_pos.rs`） | 100 個驗證者（各約 100 BOLT）在 epoch 0 以交易註冊，由 5 個節點運行 107 把金鑰；epoch 2–6 的委員會各不相同，數十位驗證者輪流上任，啟動期驗證者只佔 80 席中的 2 席；新的跟隨節點從 genesis 逐個 epoch 驗證證明，同步到 epoch 6。release 約 43 秒、debug 約 46 秒 |
 | 鏈上驗證雙重簽名證據並罰沒 | 注入的雙重投票被節點偵測、寫出證據，以交易送出後，該驗證者被罰沒 5% 並失去抽籤資格。`submitEvidence` 需 572,075 gas，`register` 需 428,634 gas |
 | 流通量不變量（`crates/chain/src/epoch_tests.rs`） | 逐塊檢查「餘額加總 = 流通量 + 罰沒鎖死額」，包括燃燒、增發、鎖倉、提領 |
 | 共識模擬 | 見下方 |
 
 模擬器第一次跑 seeds 10,000–19,999 時，seed 19148 出現 2 次安全違規。原因是隨機產生的委員會讓拜占庭節點拿到 43% 的席次，超出 BFT 的前提（< 1/3），不是協定錯誤。產生器已改為保證每個委員會的拜占庭席次低於 1/3，之後重跑的結果記在 ADR 0006 §12。
 
-### 待決
+### 決定
 
-- [ ] 啟動期驗證者的鎖倉獎勵會主導退出條件與之後的委員會（ADR 0006 §11），需要決定經濟參數
+- [x] 啟動期驗證者的鎖倉獎勵在抽籤與退出條件中設權重上限，預設 78,125 BOLT（ADR 0006 §11）。驗收情境中，啟動期驗證者只佔 80 席中的 2 席
 
 ### 尚未完成（移到後續里程碑）
 

@@ -18,17 +18,24 @@ contract ParamRegistry is SystemContract {
     uint64 public minBaseFee;
     uint32 public committeeSize;
     uint32 public committeeFloor;
+    /// Most of a validator's locked bootstrap-phase rewards that counts as stake in the committee
+    /// lottery and the bootstrap exit condition (ADR 0006 §11).
+    uint128 public lockedWeightCap;
 
     event ParamChanged(bytes32 indexed name, uint256 value);
 
     error OutOfRange();
 
     /// Genesis values. Dev chains may use a floor below 512; mainnet genesis validation forbids it.
-    function initialize(uint64 gasLimit_, uint64 minBaseFee_, uint32 committeeSize_, uint32 floor_)
-        external
-        onlyGenesis
-    {
+    function initialize(
+        uint64 gasLimit_,
+        uint64 minBaseFee_,
+        uint32 committeeSize_,
+        uint32 floor_,
+        uint128 lockedWeightCap_
+    ) external onlyGenesis {
         committeeFloor = floor_;
+        lockedWeightCap = lockedWeightCap_;
         gasLimit = gasLimit_;
         minBaseFee = minBaseFee_;
         committeeSize = committeeSize_;
@@ -56,6 +63,14 @@ contract ParamRegistry is SystemContract {
         if (v < committeeFloor || v > COMMITTEE_MAX) revert OutOfRange();
         committeeSize = v;
         emit ParamChanged("committeeSize", v);
+    }
+
+    /// Security-relevant: 16-day timelock only; at least the minimum stake.
+    function setLockedWeightCap(uint128 v) external {
+        if (msg.sender != Sys.UPGRADE_TIMELOCK) revert Unauthorized();
+        if (v < Sys.MIN_STAKE) revert OutOfRange();
+        lockedWeightCap = v;
+        emit ParamChanged("lockedWeightCap", v);
     }
 
     /// All parameters in one call, for the node.

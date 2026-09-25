@@ -195,6 +195,13 @@ fn build(g: &Genesis) -> Result<BTreeMap<Address, GenesisAccount>, GenesisBuildE
 
     // Parameters, bootstrap validators and their committee (epochs 0 and 1), supply.
     let floor = g.config.committee_size.min(MIN_COMMITTEE_SIZE);
+    // Locked bootstrap rewards weigh at most as much as an average staker at the exit threshold
+    // (mainnet: 10,000,000 / 128 = 78,125 BOLT).
+    let (exit_stakers, exit_stake_bolt) = g.config.bootstrap_exit();
+    let locked_cap = U256::from(exit_stake_bolt)
+        * U256::from(bolt_primitives::params::WEI_PER_BOLT)
+        / U256::from(exit_stakers.max(1));
+    let locked_cap = locked_cap.max(U256::from(bolt_primitives::params::MIN_STAKE_WEI));
     b.call(
         PARAMS,
         IParamRegistry::initializeCall {
@@ -202,6 +209,7 @@ fn build(g: &Genesis) -> Result<BTreeMap<Address, GenesisAccount>, GenesisBuildE
             minBaseFee: g.config.min_base_fee_wei,
             committeeSize: g.config.committee_size,
             floor,
+            lockedWeightCap: locked_cap.to::<u128>(),
         },
     )?;
     let mut ids = Vec::new();

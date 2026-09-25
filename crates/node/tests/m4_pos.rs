@@ -37,11 +37,9 @@ fn genesis() -> Genesis {
     g.config.epoch_slots = EPOCH;
     g.config.committee_size = 16;
     g.config.bootstrap_exit_min_stakers = Some(STAKERS);
-    g.config.bootstrap_exit_min_stake_bolt = Some(5_000_000);
-    // Stakers comparable to the bootstrap validators' locked rewards (~58k BOLT each after one
-    // epoch), so the lottery actually mixes them.
-    let whale = account(0).address();
-    g.alloc.get_mut(&whale).unwrap().balance = bolt(20_000_000);
+    // 100 BOLT on average per staker; the locked-reward cap is 6,400 / 100 = 64 BOLT, although
+    // each bootstrap validator locks ~58,000 BOLT of rewards in epoch 0 (ADR 0006 §11).
+    g.config.bootstrap_exit_min_stake_bolt = Some(6_400);
     g
 }
 
@@ -81,7 +79,7 @@ fn call_tx(
     t.into_signed(sig).into()
 }
 
-/// Staker k registers dev key FIRST_STAKER_KEY + k with 50,000 + 1,000 × (k mod 37) BOLT.
+/// Staker k registers dev key FIRST_STAKER_KEY + k with 64 + (k mod 37) BOLT.
 fn register_tx(k: u32) -> TxEnvelope {
     let sk = dev_key(FIRST_STAKER_KEY + k);
     let pk = sk.public_key();
@@ -92,7 +90,7 @@ fn register_tx(k: u32) -> TxEnvelope {
         feeRecipient: Address::with_last_byte(k as u8),
     }
     .abi_encode();
-    call_tx(&account(0), k as u64, STAKING, bolt(50_000 + 1_000 * (k % 37) as u64), data, 800_000)
+    call_tx(&account(0), k as u64, STAKING, bolt(64 + (k % 37) as u64), data, 800_000)
 }
 
 async fn start_net(
@@ -217,12 +215,26 @@ async fn hundred_validators_rotate_committees_and_equivocation_is_slashed() {
     assert!(view(c0, CONSENSUS, IConsensusRegistry::bootstrapEndedCall {}));
     let mut members_seen = BTreeSet::new();
     let mut committees = Vec::new();
+    let (mut bootstrap_seats, mut all_seats) = (0u32, 0u32);
     for e in 2..=6u64 {
         let c = view(c0, CONSENSUS, IConsensusRegistry::committeeCall { epoch: e });
         assert_eq!(c.weights.iter().map(|w| *w as u32).sum::<u32>(), 16, "epoch {e}");
+        for (id, w) in c.ids.iter().zip(&c.weights) {
+            all_seats += *w as u32;
+            if *id <= 7 {
+                bootstrap_seats += *w as u32;
+            }
+        }
         members_seen.extend(c.ids.iter().copied());
         committees.push(c.ids);
     }
+    // Locked bootstrap rewards (~58k BOLT each) are capped at 64 BOLT of weight: the bootstrap
+    // validators hold 7 x 64 of ~8,700 weight, about 5% of the seats, not all of them.
+    let v1 = view(c0, STAKING, IStakingManager::validatorCall { id: 1 });
+    assert!(v1.locked > bolt(10_000));
+    assert_eq!(view(c0, STAKING, IStakingManager::weightOfCall { id: 1 }), bolt(64));
+    eprintln!("bootstrap validators held {bootstrap_seats} of {all_seats} seats in epochs 2-6");
+    assert!(bootstrap_seats * 5 < all_seats, "bootstrap validators still dominate");
     eprintln!("committees of epochs 2-6: {committees:?}");
     assert!(committees.windows(2).all(|w| w[0] != w[1]), "committees rotate");
     assert!(members_seen.len() > 30, "only {} distinct validators served", members_seen.len());

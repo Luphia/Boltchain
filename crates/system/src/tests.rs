@@ -257,6 +257,12 @@ fn genesis_deploys_system_contracts() {
     let p = evm.view(PARAMS, IParamRegistry::paramsCall {});
     assert_eq!(p.gasLimit, g.config.gas_limit);
     assert_eq!(p.committeeSize, g.config.committee_size);
+    // Locked bootstrap rewards weigh at most an average staker at the exit threshold.
+    let (stakers, stake) = g.config.bootstrap_exit();
+    assert_eq!(
+        U256::from(evm.view(PARAMS, IParamRegistry::lockedWeightCapCall {})),
+        bolt(stake) / U256::from(stakers)
+    );
     let funded: U256 = g.alloc.values().map(|a| a.balance).sum();
     assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), funded);
     // Genesis-only functions are closed afterwards.
@@ -573,6 +579,24 @@ fn upgrades_go_through_the_16_day_timelock() {
         PARAMS,
         IParamRegistry::setCommitteeSizeCall { v: floor + 1 }
     ));
+    // Locked-reward weight cap: 16-day timelock only, never below the minimum stake.
+    let wei = 1_000_000_000_000_000_000u128;
+    assert!(!evm.call_as(
+        PARAM_TIMELOCK,
+        PARAMS,
+        IParamRegistry::setLockedWeightCapCall { v: 100 * wei }
+    ));
+    assert!(!evm.call_as(
+        UPGRADE_TIMELOCK,
+        PARAMS,
+        IParamRegistry::setLockedWeightCapCall { v: 63 * wei }
+    ));
+    assert!(evm.call_as(
+        UPGRADE_TIMELOCK,
+        PARAMS,
+        IParamRegistry::setLockedWeightCapCall { v: 100 * wei }
+    ));
+    assert_eq!(evm.view(PARAMS, IParamRegistry::lockedWeightCapCall {}), 100 * wei);
 }
 
 /// Genesis now includes the compiled system contracts: any change to them, to the deployment
@@ -583,7 +607,7 @@ fn devnet_genesis_hash_is_pinned() {
     let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&g).unwrap(),
-        "0x8aba54f8d0c38cc9e931bc86779e3e6b9b40f0dee747a09f115d854529468403"
+        "0x207c709035ea564bdf810bb59fecf81f5cbb2eb6a5ed9c5db4ef873e0f48ea0c"
             .parse::<B256>()
             .unwrap()
     );
