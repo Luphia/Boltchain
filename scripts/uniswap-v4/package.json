@@ -1,0 +1,16 @@
+{
+  "name": "boltchain-uniswap-v4",
+  "private": true,
+  "type": "module",
+  "description": "Deploys Uniswap v4 (PoolManager, PositionManager, StateView, V4Quoter, UniversalRouter, Permit2, WBOLT) to a Boltchain network and runs a smoke test",
+  "scripts": {
+    "deploy": "node deploy.mjs"
+  },
+  "dependencies": {
+    "@uniswap/universal-router": "2.1.0",
+    "@uniswap/v4-core": "1.0.2",
+    "@uniswap/v4-periphery": "1.0.3",
+    "ethers": "6.15.0",
+    "solc": "0.8.17"
+  }
+}
