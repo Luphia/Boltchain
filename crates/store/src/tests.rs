@@ -398,3 +398,78 @@ fn snapshot_roundtrip_rebuilds_the_same_state() {
     assert!(!w.has_body(5).unwrap());
     assert!(w.header(5).unwrap().is_some());
 }
+
+#[test]
+fn address_index_follows_blocks_backfills_and_unwinds() {
+    use crate::addr_index::{TRANSFER_TOPIC, role};
+    use alloy_consensus::{
+        Eip658Value, Header, Receipt, ReceiptEnvelope, ReceiptWithBloom, Signed, TxEip1559,
+        TxEnvelope,
+    };
+    use alloy_primitives::{Log, LogData, Signature, TxKind};
+    let (_d, store) = open();
+    let (alice, bob, token, carol) = (
+        Address::repeat_byte(0xa1),
+        Address::repeat_byte(0xb2),
+        Address::repeat_byte(0x70),
+        Address::repeat_byte(0xc3),
+    );
+    let tx = |nonce: u64, to: TxKind| -> TxEnvelope {
+        let t = TxEip1559 { chain_id: 1, nonce, to, gas_limit: 21_000, ..Default::default() };
+        Signed::new_unhashed(t, Signature::test_signature()).into()
+    };
+    let receipt = |logs: Vec<Log>| {
+        ReceiptEnvelope::Eip1559(ReceiptWithBloom::new(
+            Receipt { status: Eip658Value::Eip658(true), cumulative_gas_used: 21_000, logs },
+            Default::default(),
+        ))
+    };
+    let transfer = Log {
+        address: token,
+        data: LogData::new_unchecked(
+            vec![TRANSFER_TOPIC, alice.into_word(), carol.into_word()],
+            Default::default(),
+        ),
+    };
+    let block = |n: u64, txs: Vec<TxEnvelope>| StoredBlock {
+        header: Header { number: n, ..Default::default() },
+        senders: vec![alice; txs.len()],
+        transactions: txs,
+    };
+    // Block 1 before the index is enabled: alice -> bob.
+    let w = store.writer().unwrap();
+    w.put_block(&block(0, vec![]), &[]).unwrap();
+    w.put_block(&block(1, vec![tx(0, TxKind::Call(bob))]), &[receipt(vec![])]).unwrap();
+    assert_eq!(w.enable_address_index().unwrap(), 2);
+    // Block 2: alice creates a contract, then calls the token which emits Transfer(alice, carol).
+    w.put_block(
+        &block(2, vec![tx(1, TxKind::Create), tx(2, TxKind::Call(token))]),
+        &[receipt(vec![]), receipt(vec![transfer])],
+    )
+    .unwrap();
+    w.commit().unwrap();
+    let r = store.reader().unwrap();
+    let a = r.address_txs(&alice, None, 10).unwrap();
+    assert_eq!(a.iter().map(|x| (x.block, x.index)).collect::<Vec<_>>(), vec![(2, 1), (2, 0)]);
+    assert_eq!(a[0].roles, role::FROM | role::TOKEN);
+    let created = alice.create(1);
+    assert_eq!(r.address_txs(&created, None, 10).unwrap()[0].roles, role::CREATED);
+    assert_eq!(r.address_txs(&carol, None, 10).unwrap()[0].roles, role::TOKEN);
+    assert_eq!(r.address_txs(&token, None, 10).unwrap()[0].roles, role::TO | role::TOKEN_CONTRACT);
+    assert!(r.address_txs(&bob, None, 10).unwrap().is_empty(), "block 1 not yet backfilled");
+    // Paging: strictly older than (2, 1).
+    assert_eq!(r.address_txs(&alice, Some((2, 1)), 10).unwrap().len(), 1);
+    drop(r);
+
+    // Backfill reaches block 1.
+    let w = store.writer().unwrap();
+    assert_eq!(w.index_blocks(100).unwrap(), 1);
+    assert_eq!(w.index_blocks(100).unwrap(), 0);
+    assert_eq!(w.address_index_from().unwrap(), Some(1));
+    assert_eq!(w.address_txs(&bob, None, 10).unwrap()[0].block, 1);
+    assert_eq!(w.address_txs(&alice, None, 10).unwrap().len(), 3);
+    // Unwinding block 2 removes its entries.
+    w.remove_head_block(2).unwrap();
+    assert_eq!(w.address_txs(&alice, None, 10).unwrap().len(), 1);
+    assert!(w.address_txs(&carol, None, 10).unwrap().is_empty());
+}

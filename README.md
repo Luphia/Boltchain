@@ -107,6 +107,8 @@ boltchain validator --datadir data/new --checkpoint <number>:<hash>
 boltchain validator --archive
 # 以 HTTP 提供 trustless IPFS gateway：/ipfs/<cid>?format=car、/history/epoch/<n>.car
 boltchain validator --gateway 127.0.0.1:8080
+# 內建區塊鏈瀏覽器（同一個位址的 /；會建立地址索引，建議搭配 --archive）
+boltchain validator --gateway 0.0.0.0:8080 --explorer --archive
 # 離線匯出一個 epoch 的 CAR（可直接 ipfs dag import）
 boltchain history export --datadir data/validator --epoch 3 --out epoch-3.car
 ```

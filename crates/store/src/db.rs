@@ -51,10 +51,12 @@ pub(crate) mod t {
     pub const ENVELOPES: &str = "envelopes";
     /// number(8 BE) -> total difficulty (32 bytes BE) of the canonical chain up to that block
     pub const TD: &str = "td";
+    /// addr(20) ++ number(8 BE) ++ index(4 BE) -> role flags (address index, when enabled)
+    pub const ADDR_TX: &str = "addr_tx";
 
     pub const ALL: &[&str] = &[
         ACCOUNTS, STORAGE, CODES, TRIE_ACC, TRIE_STO, HEADERS, HASH_NUM, BODIES, SENDERS, RECEIPTS,
-        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META, IPLD, ENVELOPES, TD,
+        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META, IPLD, ENVELOPES, TD, ADDR_TX,
     ];
 }
 
@@ -506,6 +508,9 @@ impl<'e> Tx<'e, RW> {
         let td = parent_td.saturating_add(block.header.difficulty);
         self.put_raw(t::TD, &num_key(number), &td.to_be_bytes::<32>())?;
         self.put_raw(t::META, META_HEAD, &num_key(number))?;
+        if self.address_index_from()?.is_some() {
+            self.index_block(block, receipts)?;
+        }
         Ok(hash)
     }
 
@@ -514,6 +519,10 @@ impl<'e> Tx<'e, RW> {
     pub(crate) fn remove_head_block(&self, number: u64) -> Result<StoredBlock> {
         let block = self.block(number)?.ok_or(StoreError::Corrupt(t::HEADERS))?;
         let n = num_key(number);
+        if self.address_index_from()?.is_some() {
+            let receipts = self.receipts(number)?.unwrap_or_default();
+            self.unindex_block(&block, &receipts)?;
+        }
         for tx in &block.transactions {
             let h = tx.tx_hash();
             if self.tx_location(h)?.map(|(b, _)| b) == Some(number) {

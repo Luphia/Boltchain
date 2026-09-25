@@ -3,6 +3,7 @@
 pub mod bench;
 pub mod checkpoint;
 pub mod devnet;
+pub mod explorer;
 pub mod follow;
 pub mod gateway;
 pub mod keys;

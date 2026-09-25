@@ -4,6 +4,7 @@
 //! Execution reads the flat `accounts`/`storage` tables; the tries are only touched when a block
 //! is committed, and only along the paths that block changed.
 
+pub mod addr_index;
 pub mod db;
 pub mod snapshot;
 pub mod state;

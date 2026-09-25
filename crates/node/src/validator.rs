@@ -1157,6 +1157,10 @@ pub struct StorageArgs {
     /// Serve the blockstore over HTTP as a trustless IPFS gateway, e.g. `127.0.0.1:8080`.
     #[arg(long)]
     pub gateway: Option<std::net::SocketAddr>,
+    /// Serve the block explorer (web interface and `/api`) on the gateway address (default
+    /// `127.0.0.1:8080`) and keep the address index it needs (about 10–20% more disk).
+    #[arg(long)]
+    pub explorer: bool,
 }
 
 /// Runs a validator node until Ctrl-C.
@@ -1191,7 +1195,12 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
         },
     );
     let storage_task = tokio::spawn(storage.run(storage_rx));
-    if let Some(addr) = args.storage.gateway {
+    if args.storage.explorer {
+        crate::explorer::spawn_address_index(chain.clone())?;
+        let addr = args.storage.gateway.unwrap_or(([127, 0, 0, 1], 8080).into());
+        let ex = crate::explorer::Explorer { chain: chain.clone(), pool: Some(pool.clone()) };
+        crate::explorer::start(addr, ex).await?;
+    } else if let Some(addr) = args.storage.gateway {
         crate::gateway::start(addr, chain.clone()).await?;
     }
     if let Some(addr) = args.metrics {

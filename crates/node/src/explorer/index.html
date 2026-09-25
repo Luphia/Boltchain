@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boltchain Explorer</title>
+<meta name="description" content="Boltchain block explorer">
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #16181d; --muted: #6a7280; --line: #e4e7ec;
+  --accent: #d9480f; --accent-soft: #fff1e8; --ok: #2b8a3e; --ok-soft: #e6f4ea; --bad: #c92a2a;
+  --bad-soft: #fdecec; --warn: #b7791f; --warn-soft: #fff6e0; --link: #1c5fd4; --code: #f1f3f5;
+  --shadow: 0 1px 2px rgba(16,24,40,.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1115; --panel: #171a21; --text: #e6e8ec; --muted: #9aa3b2; --line: #272c36;
+    --accent: #ff8a4c; --accent-soft: #2a1a10; --ok: #5cc27a; --ok-soft: #13261a; --bad: #ff6b6b;
+    --bad-soft: #2d1515; --warn: #f0b64d; --warn-soft: #2a2312; --link: #7fb0ff; --code: #1f232c;
+    --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1115; --panel: #171a21; --text: #e6e8ec; --muted: #9aa3b2; --line: #272c36;
+  --accent: #ff8a4c; --accent-soft: #2a1a10; --ok: #5cc27a; --ok-soft: #13261a; --bad: #ff6b6b;
+  --bad-soft: #2d1515; --warn: #f0b64d; --warn-soft: #2a2312; --link: #7fb0ff; --code: #1f232c;
+  --shadow: none;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg); color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang TC", "Noto Sans TC",
+    "Microsoft JhengHei", Roboto, sans-serif;
+}
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.muted { color: var(--muted); }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 16px; }
+header.top { background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 5; }
+.bar { display: flex; align-items: center; gap: 16px; height: 60px; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 17px; color: var(--text); white-space: nowrap; }
+.brand svg { width: 22px; height: 22px; }
+.brand small { font-weight: 500; color: var(--muted); font-size: 12px; border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+nav.links { display: flex; gap: 14px; }
+nav.links a { color: var(--muted); font-weight: 500; }
+nav.links a.on { color: var(--text); }
+form.search { flex: 1; display: flex; min-width: 0; }
+form.search input {
+  flex: 1; min-width: 0; height: 38px; border: 1px solid var(--line); border-radius: 10px 0 0 10px;
+  background: var(--bg); color: var(--text); padding: 0 12px; font-size: 14px;
+}
+form.search button { height: 38px; border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 0 10px 10px 0; padding: 0 14px; cursor: pointer; font-weight: 600; }
+.tools { display: flex; gap: 6px; }
+.tools button { height: 32px; min-width: 32px; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; cursor: pointer; font-size: 13px; padding: 0 8px; }
+main.wrap { padding: 24px 16px 48px; }
+h1 { font-size: 20px; margin: 4px 0 16px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+h2 { font-size: 15px; margin: 0; }
+.grid { display: grid; gap: 12px; }
+.grid > * { min-width: 0; }
+.stats { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-bottom: 16px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow); }
+.stat { padding: 14px 16px; }
+.stat .k { color: var(--muted); font-size: 12px; text-transform: none; }
+.stat .v { font-size: 20px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.stat .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.two { grid-template-columns: 1fr 1fr; }
+@media (max-width: 860px) { .two { grid-template-columns: 1fr; } nav.links { display: none; } }
+@media (max-width: 560px) { .brand small { display: none; } .bar { gap: 8px; } }
+.card-h { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.list .row { display: flex; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); min-width: 0; }
+.list .row:last-child { border-bottom: 0; }
+.row .ic { flex: none; width: 36px; height: 36px; border-radius: 9px; background: var(--code); display: grid; place-items: center; font-size: 12px; color: var(--muted); font-weight: 600; }
+.row .main { flex: 1; min-width: 0; }
+.row .main div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .side { text-align: right; flex: none; }
+.badge { display: inline-block; font-size: 12px; font-weight: 600; border-radius: 999px; padding: 1px 9px; background: var(--code); color: var(--muted); white-space: nowrap; }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.bad { background: var(--bad-soft); color: var(--bad); }
+.badge.warn { background: var(--warn-soft); color: var(--warn); }
+.badge.acc { background: var(--accent-soft); color: var(--accent); }
+table.kv { width: 100%; border-collapse: collapse; }
+table.kv td { padding: 11px 16px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.kv tr:last-child td { border-bottom: 0; }
+table.kv td:first-child { width: 220px; color: var(--muted); }
+@media (max-width: 700px) { table.kv td { display: block; width: auto !important; } table.kv td:first-child { padding-bottom: 0; border-bottom: 0; } }
+.break { word-break: break-all; }
+table.tbl { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.tbl th, table.tbl td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+table.tbl th { color: var(--muted); font-weight: 600; font-size: 12px; background: var(--bg); }
+table.tbl td.r, table.tbl th.r { text-align: right; }
+.scroll { overflow-x: auto; }
+.pager { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 16px; }
+.btn { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 8px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
+.btn.acc { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn:disabled { opacity: .5; cursor: default; }
+.copy { cursor: pointer; color: var(--muted); margin-left: 6px; font-size: 12px; border: 0; background: none; }
+.phase { padding: 16px; }
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+@media (max-width: 700px) { .steps { grid-template-columns: 1fr; } }
+.step { border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+.step.cur { border-color: var(--accent); background: var(--accent-soft); }
+.step.done { opacity: .75; }
+.step h3 { margin: 0 0 4px; font-size: 14px; display: flex; justify-content: space-between; gap: 8px; }
+.step p { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.meter { margin: 6px 0; font-size: 12px; }
+.meter .t { display: flex; justify-content: space-between; color: var(--muted); }
+.meter .b { height: 6px; background: var(--code); border-radius: 999px; overflow: hidden; margin-top: 3px; }
+.meter .b i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.meter.full .b i { background: var(--ok); }
+.empty { padding: 28px 16px; text-align: center; color: var(--muted); }
+.err { padding: 16px; border-radius: 12px; background: var(--bad-soft); color: var(--bad); }
+.note { padding: 10px 14px; border-radius: 10px; background: var(--warn-soft); color: var(--warn); font-size: 13px; margin-bottom: 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.verify-out { margin-top: 8px; font-size: 13px; }
+footer.wrap { color: var(--muted); font-size: 12px; padding: 20px 16px 32px; border-top: 1px solid var(--line); }
+.spark { width: 100%; height: 44px; display: block; }
+.tabs { display: flex; gap: 4px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="wrap bar">
+    <a class="brand" href="#/">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" style="color:var(--accent)" d="M13.5 2 4 13.5h6.2L9 22l10-12.5h-6.3z"/></svg>
+      Boltchain <small id="net">…</small>
+    </a>
+    <nav class="links">
+      <a href="#/" data-nav="home" data-i18n="nav.home"></a>
+      <a href="#/blocks" data-nav="blocks" data-i18n="nav.blocks"></a>
+      <a href="#/validators" data-nav="validators" data-i18n="nav.validators"></a>
+    </nav>
+    <form class="search" id="search">
+      <input id="q" autocomplete="off" spellcheck="false">
+      <button data-i18n="search.go"></button>
+    </form>
+    <div class="tools">
+      <button id="lang" title="Language">EN</button>
+      <button id="theme" title="Theme">☾</button>
+    </div>
+  </div>
+</header>
+<main class="wrap" id="app"></main>
+<footer class="wrap" id="foot"></footer>
+<script>
+"use strict";
+// ---------- i18n ----------
+const T = {
+  "zh": {
+    "nav.home": "首頁", "nav.blocks": "區塊", "nav.validators": "驗證者",
+    "search.ph": "搜尋區塊高度、區塊 / 交易雜湊、地址、CID", "search.go": "搜尋",
+    "search.none": "找不到符合的資料", "loading": "載入中…", "error": "發生錯誤",
+    "stat.height": "區塊高度", "stat.stage": "目前階段", "stat.blocktime": "平均出塊時間",
+    "stat.hashrate": "全網算力", "stat.supply": "已發行", "stat.validators": "驗證者",
+    "stat.finalized": "最終區塊", "stat.target": "目標", "stat.staked": "質押",
+    "stage.mining": "挖礦", "stage.checkpoints": "挖礦＋質押確認", "stage.pos": "權益證明",
+    "phase.title": "共識階段", "phase.a": "A · 挖礦", "phase.b": "B · 質押確認", "phase.c": "C · 權益證明",
+    "phase.a.d": "任何人都能用 CPU 挖礦出塊，依累積工作量選鏈。",
+    "phase.b.d": "繼續挖礦，同時由質押委員會以 BFT 確認檢查點，確認後不可逆。",
+    "phase.c.d": "委員會輪流出塊，每個區塊即時最終。",
+    "phase.stakers": "驗證者", "phase.stake": "質押總額", "phase.streak": "連續達標 epoch",
+    "phase.from": "自 epoch {e} 起", "phase.sched": "已排定於 epoch {e}", "phase.now": "進行中", "phase.done": "已完成",
+    "latest.blocks": "最新區塊", "latest.txs": "最新交易", "all": "查看全部",
+    "block": "區塊", "blocks": "區塊", "tx": "交易", "txs": "筆交易", "address": "地址", "contract": "合約",
+    "validator": "驗證者", "epoch": "Epoch", "ago": "前", "s": "秒", "m": "分", "h": "小時", "d": "天",
+    "miner": "出塊者", "mined.by": "挖出者", "produced.by": "出塊者",
+    "k.height": "高度", "k.hash": "雜湊", "k.parent": "父區塊", "k.time": "時間", "k.txs": "交易",
+    "k.miner": "出塊者（收款地址）", "k.extra": "附加資料", "k.difficulty": "難度", "k.gas": "Gas 用量",
+    "k.basefee": "基本費用", "k.burned": "燃燒", "k.status": "狀態", "k.final": "最終性",
+    "k.epoch": "Epoch", "k.stateroot": "狀態根", "k.ipfs": "IPFS", "k.size": "Header 大小",
+    "final.yes": "已最終", "final.no": "未最終（仍可能被重組）",
+    "k.from": "發送者", "k.to": "接收者", "k.value": "金額", "k.fee": "手續費", "k.gasprice": "Gas 價格",
+    "k.nonce": "Nonce", "k.method": "呼叫", "k.input": "輸入資料", "k.logs": "事件", "k.block": "區塊",
+    "k.created": "建立的合約", "k.transfers": "代幣轉帳", "k.type": "類型",
+    "ok": "成功", "fail": "失敗", "pending": "等待打包", "create": "建立合約",
+    "k.balance": "餘額", "k.txcount": "發出交易數", "k.code": "合約程式碼",
+    "addr.txs": "交易紀錄", "addr.noindex": "此節點未啟用地址索引。", "addr.partial": "地址索引涵蓋區塊 {n} 之後（更早的仍在建立中）。",
+    "addr.none": "沒有交易紀錄", "addr.validators": "擁有的驗證者",
+    "role.from": "發出", "role.to": "接收", "role.created": "建立", "role.token": "代幣", "role.tokenContract": "代幣合約",
+    "v.list": "驗證者", "v.id": "編號", "v.owner": "擁有者", "v.stake": "質押", "v.status": "狀態", "v.rewards": "累積獎勵",
+    "v.seats": "本 epoch 席位", "v.peer": "歷史資料節點", "v.committees": "委員會席位（近 10 個 epoch）",
+    "v.audits": "儲存抽查", "v.none": "尚無驗證者。質押至少 64 BOLT 即可註冊。", "v.fee": "收款地址", "v.pubkey": "BLS 公鑰",
+    "st.active": "運作中", "st.exiting": "退出中", "st.slashed": "已罰沒", "st.withdrawn": "已提領", "st.none": "—",
+    "au.pending": "待定", "au.passed": "通過", "au.failed": "失敗",
+    "e.range": "區塊範圍", "e.mode": "模式", "e.committee": "委員會", "e.index": "Epoch 索引", "e.audits": "儲存抽查任務",
+    "e.panel": "抽查小組", "e.provider": "提供者", "e.target": "抽查 epoch", "e.car": "下載 CAR", "e.noaudits": "本 epoch 沒有抽查任務",
+    "prev": "較新", "next": "較舊", "copy": "複製", "copied": "已複製",
+    "verify": "在瀏覽器中驗證", "verify.ok": "驗證成功：從 IPFS 取回的 header 雜湊 = 區塊雜湊；envelope 內容符合其 CID。",
+    "verify.bad": "驗證失敗", "verify.run": "正在從 IPFS 取回並驗證…",
+    "ipfs.root": "Envelope（區塊根）", "ipfs.header": "Header", "ipfs.chunks": "交易分塊", "ipfs.car": "下載此區塊 CAR",
+    "pruned": "此區塊內容已被本節點修剪，可從 IPFS 由保存者取得。",
+    "foot": "資料直接來自這個 Boltchain 節點。所有區塊都以 IPFS 內容定址，可自行驗證。",
+    "sys": "系統合約", "pendingtx": "待打包", "peers": "連線節點", "chain": "Chain ID",
+  },
+  "en": {
+    "nav.home": "Home", "nav.blocks": "Blocks", "nav.validators": "Validators",
+    "search.ph": "Search block number, block / tx hash, address, CID", "search.go": "Search",
+    "search.none": "Nothing matches", "loading": "Loading…", "error": "Something went wrong",
+    "stat.height": "Block height", "stat.stage": "Phase", "stat.blocktime": "Avg block time",
+    "stat.hashrate": "Network hashrate", "stat.supply": "Issued", "stat.validators": "Validators",
+    "stat.finalized": "Finalized", "stat.target": "target", "stat.staked": "staked",
+    "stage.mining": "Mining", "stage.checkpoints": "Mining + stake checkpoints", "stage.pos": "Proof of stake",
+    "phase.title": "Consensus phases", "phase.a": "A · Mining", "phase.b": "B · Stake checkpoints", "phase.c": "C · Proof of stake",
+    "phase.a.d": "Anyone can mine blocks with a CPU; the chain with the most work wins.",
+    "phase.b.d": "Mining continues while a staked committee finalizes checkpoints by BFT; final blocks cannot be reverted.",
+    "phase.c.d": "The committee produces blocks in turn; every block is final at once.",
+    "phase.stakers": "Validators", "phase.stake": "Total stake", "phase.streak": "Epochs in a row",
+    "phase.from": "since epoch {e}", "phase.sched": "scheduled for epoch {e}", "phase.now": "Current", "phase.done": "Done",
+    "latest.blocks": "Latest blocks", "latest.txs": "Latest transactions", "all": "View all",
+    "block": "Block", "blocks": "Blocks", "tx": "Transaction", "txs": "txs", "address": "Address", "contract": "Contract",
+    "validator": "Validator", "epoch": "Epoch", "ago": "ago", "s": "s", "m": "m", "h": "h", "d": "d",
+    "miner": "Producer", "mined.by": "Mined by", "produced.by": "Produced by",
+    "k.height": "Height", "k.hash": "Hash", "k.parent": "Parent", "k.time": "Time", "k.txs": "Transactions",
+    "k.miner": "Producer (fee recipient)", "k.extra": "Extra data", "k.difficulty": "Difficulty", "k.gas": "Gas used",
+    "k.basefee": "Base fee", "k.burned": "Burned", "k.status": "Status", "k.final": "Finality",
+    "k.epoch": "Epoch", "k.stateroot": "State root", "k.ipfs": "IPFS", "k.size": "Header size",
+    "final.yes": "Final", "final.no": "Not final (could still be reorganised)",
+    "k.from": "From", "k.to": "To", "k.value": "Value", "k.fee": "Fee", "k.gasprice": "Gas price",
+    "k.nonce": "Nonce", "k.method": "Call", "k.input": "Input data", "k.logs": "Events", "k.block": "Block",
+    "k.created": "Contract created", "k.transfers": "Token transfers", "k.type": "Type",
+    "ok": "Success", "fail": "Failed", "pending": "Pending", "create": "Contract creation",
+    "k.balance": "Balance", "k.txcount": "Transactions sent", "k.code": "Contract code",
+    "addr.txs": "Transactions", "addr.noindex": "This node does not keep an address index.", "addr.partial": "The address index covers blocks from {n} (older ones are still being indexed).",
+    "addr.none": "No transactions", "addr.validators": "Validators owned",
+    "role.from": "Sent", "role.to": "Received", "role.created": "Created", "role.token": "Token", "role.tokenContract": "Token contract",
+    "v.list": "Validators", "v.id": "ID", "v.owner": "Owner", "v.stake": "Stake", "v.status": "Status", "v.rewards": "Rewards",
+    "v.seats": "Seats this epoch", "v.peer": "History peer", "v.committees": "Committee seats (last 10 epochs)",
+    "v.audits": "Storage audits", "v.none": "No validators yet. Stake at least 64 BOLT to register.", "v.fee": "Fee recipient", "v.pubkey": "BLS public key",
+    "st.active": "Active", "st.exiting": "Exiting", "st.slashed": "Slashed", "st.withdrawn": "Withdrawn", "st.none": "—",
+    "au.pending": "Pending", "au.passed": "Passed", "au.failed": "Failed",
+    "e.range": "Blocks", "e.mode": "Mode", "e.committee": "Committee", "e.index": "Epoch index", "e.audits": "Storage audit tasks",
+    "e.panel": "Audit panel", "e.provider": "Provider", "e.target": "Target epoch", "e.car": "Download CAR", "e.noaudits": "No audit tasks this epoch",
+    "prev": "Newer", "next": "Older", "copy": "Copy", "copied": "Copied",
+    "verify": "Verify in browser", "verify.ok": "Verified: the header fetched from IPFS hashes to the block hash, and the envelope matches its CID.",
+    "verify.bad": "Verification failed", "verify.run": "Fetching from IPFS and verifying…",
+    "ipfs.root": "Envelope (block root)", "ipfs.header": "Header", "ipfs.chunks": "Body chunks", "ipfs.car": "Download block CAR",
+    "pruned": "This node pruned the block body; it is available over IPFS from its keepers.",
+    "foot": "Data comes straight from this Boltchain node. Every block is content-addressed on IPFS and can be verified independently.",
+    "sys": "System contract", "pendingtx": "pending", "peers": "peers", "chain": "Chain ID",
+  },
+};
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (_) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
+};
+let lang = store.get("lang") || ((navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en");
+const t = (k, vars) => {
+  let s = (T[lang] && T[lang][k]) || T.en[k] || k;
+  if (vars) for (const [a, b] of Object.entries(vars)) s = s.replace("{" + a + "}", b);
+  return s;
+};
+function applyI18n() {
+  document.documentElement.lang = lang === "zh" ? "zh-Hant" : "en";
+  document.querySelectorAll("[data-i18n]").forEach((el) => (el.textContent = t(el.dataset.i18n)));
+  document.getElementById("q").placeholder = t("search.ph");
+  document.getElementById("lang").textContent = lang === "zh" ? "EN" : "中";
+  document.getElementById("foot").textContent = t("foot");
+}
+// ---------- theme ----------
+function applyTheme() {
+  const th = store.get("theme");
+  if (th) document.documentElement.dataset.theme = th; else delete document.documentElement.dataset.theme;
+}
+document.getElementById("theme").onclick = () => {
+  const dark = document.documentElement.dataset.theme
+    ? document.documentElement.dataset.theme === "dark"
+    : matchMedia("(prefers-color-scheme: dark)").matches;
+  store.set("theme", dark ? "light" : "dark");
+  applyTheme();
+};
+document.getElementById("lang").onclick = () => {
+  lang = lang === "zh" ? "en" : "zh";
+  store.set("lang", lang);
+  applyI18n();
+  route();
+};
+// ---------- helpers ----------
+const $app = document.getElementById("app");
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+async function api(path) {
+  const r = await fetch("/api/" + path, { cache: "no-store" });
+  const j = await r.json().catch(() => ({ error: r.statusText }));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+const WEI = 10n ** 18n;
+function bolt(w, digits = 4) {
+  if (w === null || w === undefined) return "—";
+  const v = BigInt(w);
+  const neg = v < 0n; const a = neg ? -v : v;
+  const i = a / WEI; const f = a % WEI;
+  let fs = f.toString().padStart(18, "0").slice(0, digits).replace(/0+$/, "");
+  const is = i.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return (neg ? "-" : "") + is + (fs ? "." + fs : "") + " BOLT";
+}
+function gwei(w) {
+  const v = Number(BigInt(w)) / 1e9;
+  return (v < 0.01 ? v.toPrecision(3) : v.toFixed(v < 10 ? 3 : 1)) + " Gwei";
+}
+const num = (n) => Number(n).toLocaleString(lang === "zh" ? "zh-TW" : "en-US");
+function ago(ts) {
+  const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+  if (s < 60) return s + " " + t("s") + " " + t("ago");
+  if (s < 3600) return Math.floor(s / 60) + " " + t("m") + " " + t("ago");
+  if (s < 86400) return Math.floor(s / 3600) + " " + t("h") + " " + t("ago");
+  return Math.floor(s / 86400) + " " + t("d") + " " + t("ago");
+}
+const dateOf = (ts) => new Date(ts * 1000).toLocaleString(lang === "zh" ? "zh-TW" : "en-US");
+const short = (h, a = 8, b = 6) => (h && h.length > a + b + 2 ? h.slice(0, a) + "…" + h.slice(-b) : h || "");
+function hashrate(h) {
+  const u = ["H/s", "kH/s", "MH/s", "GH/s"]; let i = 0;
+  while (h >= 1000 && i < u.length - 1) { h /= 1000; i++; }
+  return h.toFixed(h < 10 ? 2 : 1) + " " + u[i];
+}
+const aLink = (a, label) => a ? `<a class="mono" href="#/address/${a}">${esc(label || short(a, 10, 8))}</a>` : "—";
+const bLink = (n) => `<a href="#/block/${n}">${num(n)}</a>`;
+const txLink = (h, full) => `<a class="mono" href="#/tx/${h}">${esc(full ? h : short(h, 10, 8))}</a>`;
+const copyBtn = (v) => `<button class="copy" data-copy="${esc(v)}" title="${t("copy")}">⧉</button>`;
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-copy]");
+  if (!b) return;
+  const done = () => { b.textContent = "✓"; setTimeout(() => (b.textContent = "⧉"), 1200); };
+  try { navigator.clipboard.writeText(b.dataset.copy).then(done, done); } catch (_) { done(); }
+});
+const statusBadge = (s) => ({ active: `<span class="badge ok">${t("st.active")}</span>`, exiting: `<span class="badge warn">${t("st.exiting")}</span>`, slashed: `<span class="badge bad">${t("st.slashed")}</span>`, withdrawn: `<span class="badge">${t("st.withdrawn")}</span>` }[s] || `<span class="badge">${esc(s)}</span>`);
+const auditBadge = (s) => ({ passed: `<span class="badge ok">${t("au.passed")}</span>`, failed: `<span class="badge bad">${t("au.failed")}</span>`, pending: `<span class="badge warn">${t("au.pending")}</span>` }[s] || esc(s));
+const txStatus = (tx) => tx.pending ? `<span class="badge warn">${t("pending")}</span>` : tx.success === false ? `<span class="badge bad">${t("fail")}</span>` : tx.success === true ? `<span class="badge ok">${t("ok")}</span>` : "";
+const kv = (rows) => `<table class="kv">${rows.filter(Boolean).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>`;
+function loading() { $app.innerHTML = `<div class="empty">${t("loading")}</div>`; }
+function fail(e) { $app.innerHTML = `<div class="err">${t("error")}: ${esc(e.message || e)}</div>`; }
+let timer = null;
+function every(ms, fn) { clearInterval(timer); timer = setInterval(() => { if (!document.hidden) fn().catch(() => {}); }, ms); }
+
+// ---------- pages ----------
+function meter(label, cur, need, fmt = num) {
+  const pct = need > 0 ? Math.min(100, (cur / need) * 100) : 100;
+  return `<div class="meter ${pct >= 100 ? "full" : ""}"><div class="t"><span>${label}</span><span>${fmt(cur)} / ${fmt(need)}</span></div><div class="b"><i style="width:${pct}%"></i></div></div>`;
+}
+function phaseCard(s) {
+  const p = s.phase;
+  const stakers = Number(s.stakers);
+  const stakeBolt = Number(BigInt(s.totalStake) / WEI);
+  const stage = s.stage;
+  const cls = (st) => (st === stage ? "cur" : (stage === "pos" || (stage === "checkpoints" && st === "mining")) ? "done" : "");
+  const tag = (st, sched) => st === stage ? `<span class="badge acc">${t("phase.now")}</span>` : cls(st) === "done" ? `<span class="badge ok">${t("phase.done")}</span>` : sched != null ? `<span class="badge warn">${t("phase.sched", { e: sched })}</span>` : "";
+  const bolts = (v) => num(v) + " BOLT";
+  const skipB = p.posEpoch != null && (p.checkpointEpoch == null || p.checkpointEpoch >= p.posEpoch);
+  return `<div class="card phase"><h2>${t("phase.title")}</h2><div class="steps">
+    <div class="step ${cls("mining")}"><h3>${t("phase.a")} ${tag("mining")}</h3><p>${t("phase.a.d")}</p></div>
+    <div class="step ${cls("checkpoints")}"><h3>${t("phase.b")} ${tag("checkpoints", p.checkpointEpoch)}</h3><p>${t("phase.b.d")}</p>
+      ${stage === "mining" && !skipB ? meter(t("phase.stakers"), stakers, p.checkpoint.stakers) + meter(t("phase.stake"), stakeBolt, p.checkpoint.stakeBolt, bolts) + meter(t("phase.streak"), p.checkpointStreak, p.streakRequired) : ""}</div>
+    <div class="step ${cls("pos")}"><h3>${t("phase.c")} ${tag("pos", p.posEpoch)}</h3><p>${t("phase.c.d")}</p>
+      ${stage !== "pos" ? meter(t("phase.stakers"), stakers, p.pos.stakers) + meter(t("phase.stake"), stakeBolt, p.pos.stakeBolt, bolts) + meter(t("phase.streak"), p.posStreak, p.streakRequired) : ""}</div>
+  </div></div>`;
+}
+function blockRow(b) {
+  return `<div class="row"><div class="ic">${b.mined ? "⛏" : "◆"}</div><div class="main"><div>${bLink(b.number)} <span class="muted">· ${ago(b.timestamp)}</span></div>
+    <div class="muted">${b.mined ? t("mined.by") : t("produced.by")} ${aLink(b.miner)}${b.extra ? ` <span class="badge">${esc(b.extra)}</span>` : ""}</div></div>
+    <div class="side"><span class="badge">${b.txs < 0 ? "—" : num(b.txs)} ${t("txs")}</span></div></div>`;
+}
+function txRow(x) {
+  return `<div class="row"><div class="ic">Tx</div><div class="main"><div>${txLink(x.hash)} <span class="muted">· ${ago(x.timestamp)}</span></div>
+    <div class="muted">${aLink(x.from)} → ${x.create ? `<span class="badge">${t("create")}</span>` : aLink(x.to, x.toLabel)}${x.method ? ` <span class="badge">${esc(x.method)}</span>` : ""}</div></div>
+    <div class="side mono">${bolt(x.value, 3)}</div></div>`;
+}
+async function pageHome() {
+  const draw = async () => {
+    const [s, bl, tx] = await Promise.all([api("status"), api("blocks?limit=8"), api("txs?limit=8")]);
+    document.getElementById("net").textContent = s.chainId === 8017 ? "Mainnet" : s.chainId === 8018 ? "Testnet" : "Chain " + s.chainId;
+    const stats = [
+      [t("stat.height"), num(s.head.number), `${t("stat.finalized")} ${num(s.finalized)}`],
+      [t("stat.stage"), t("stage." + s.stage), `${t("epoch")} ${num(s.epoch)}`],
+      [t("stat.blocktime"), s.blockTime ? s.blockTime.toFixed(1) + " " + t("s") : "—", `${t("stat.target")} ${s.targetBlockTime} ${t("s")}`],
+      s.stage === "pos" ? [t("stat.validators"), num(s.validators), bolt(s.totalStake, 0) + " " + t("stat.staked")]
+        : [t("stat.hashrate"), hashrate(s.hashrate), `${t("k.difficulty")} ${num(s.difficulty)}`],
+      [t("stat.supply"), bolt(s.supply, 0), `${t("k.basefee")} ${gwei(s.baseFee)}`],
+      s.stage === "pos" ? [t("peers"), num(s.peers), `${num(s.pending)} ${t("pendingtx")}`]
+        : [t("stat.validators"), num(s.validators), bolt(s.totalStake, 0) + " " + t("stat.staked")],
+    ];
+    $app.innerHTML = `<div class="grid stats">${stats.map(([k, v, sub]) => `<div class="card stat"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`).join("")}</div>
+      ${phaseCard(s)}
+      <div class="grid two" style="margin-top:16px">
+        <div class="card"><div class="card-h"><h2>${t("latest.blocks")}</h2><a href="#/blocks">${t("all")}</a></div><div class="list">${bl.blocks.map(blockRow).join("")}</div></div>
+        <div class="card"><div class="card-h"><h2>${t("latest.txs")}</h2></div><div class="list">${tx.txs.length ? tx.txs.map(txRow).join("") : `<div class="empty">—</div>`}</div></div>
+      </div>`;
+  };
+  await draw();
+  every(6000, draw);
+}
+async function pageBlocks(q) {
+  const before = q.get("before");
+  const d = await api("blocks?limit=25" + (before ? "&before=" + before : ""));
+  const last = d.blocks.length ? d.blocks[d.blocks.length - 1].number : 0;
+  const first = d.blocks.length ? d.blocks[0].number : 0;
+  $app.innerHTML = `<h1>${t("blocks")}</h1><div class="card scroll"><table class="tbl"><thead><tr>
+    <th>${t("k.height")}</th><th>${t("k.time")}</th><th>${t("miner")}</th><th class="r">${t("k.txs")}</th><th class="r">${t("k.gas")}</th><th class="r">${t("k.difficulty")}</th></tr></thead><tbody>
+    ${d.blocks.map((b) => `<tr><td>${bLink(b.number)}</td><td class="muted">${ago(b.timestamp)}</td><td>${aLink(b.miner)}${b.extra ? ` <span class="badge">${esc(b.extra)}</span>` : ""}</td><td class="r">${b.txs < 0 ? "—" : num(b.txs)}</td><td class="r">${num(b.gasUsed)}</td><td class="r">${b.mined ? num(b.difficulty) : "—"}</td></tr>`).join("")}
+    </tbody></table><div class="pager">
+    <button class="btn" ${first >= d.head ? "disabled" : ""} onclick="location.hash='#/blocks?before=${first + 26}'">‹ ${t("prev")}</button>
+    <button class="btn" ${last <= 0 ? "disabled" : ""} onclick="location.hash='#/blocks?before=${last}'">${t("next")} ›</button></div></div>`;
+}
+async function pageBlock(id) {
+  const b = await api("block/" + encodeURIComponent(id));
+  const ip = b.ipfs;
+  $app.innerHTML = `<h1>${t("block")} #${num(b.number)} ${b.final ? `<span class="badge ok">${t("final.yes")}</span>` : `<span class="badge warn">${t("final.no")}</span>`}
+      <span style="flex:1"></span><a class="btn" href="#/block/${b.number - 1}">‹</a><a class="btn" href="#/block/${b.number + 1}">›</a></h1>
+    <div class="card">${kv([
+      [t("k.hash"), `<span class="mono break">${b.hash}</span>${copyBtn(b.hash)}`],
+      [t("k.time"), `${ago(b.timestamp)} <span class="muted">(${dateOf(b.timestamp)})</span>`],
+      [t("k.txs"), num(b.txs.length)],
+      [b.mined ? t("mined.by") : t("k.miner"), aLink(b.miner, b.minerLabel) + (b.extra ? ` <span class="badge">${esc(b.extra)}</span>` : "")],
+      [t("k.epoch"), `<a href="#/epoch/${b.epoch}">${num(b.epoch)}</a>`],
+      b.mined && [t("k.difficulty"), num(b.difficulty)],
+      [t("k.gas"), `${num(b.gasUsed)} / ${num(b.gasLimit)} <span class="muted">(${(100 * b.gasUsed / b.gasLimit).toFixed(2)}%)</span>`],
+      [t("k.basefee"), gwei(b.baseFee)],
+      [t("k.burned"), bolt(b.burned, 8)],
+      [t("k.parent"), `<a class="mono break" href="#/block/${b.parentHash}">${b.parentHash}</a>`],
+      [t("k.stateroot"), `<span class="mono break">${b.stateRoot}</span>`],
+      [t("k.size"), num(b.size) + " bytes"],
+      ip && [t("k.ipfs"), `<div>${t("ipfs.root")}: <a class="mono break" href="/ipfs/${ip.root}?format=raw">${ip.root}</a></div>
+         <div>${t("ipfs.header")}: <a class="mono break" href="/ipfs/${ip.header}?format=raw">${ip.header}</a></div>
+         <div>${t("ipfs.chunks")}: ${ip.chunks.length ? ip.chunks.map((c) => `<a class="mono break" href="/ipfs/${c}?format=raw">${short(c, 12, 8)}</a>`).join(", ") : "—"}</div>
+         <div style="margin-top:8px" class="chips"><a class="btn" href="/ipfs/${ip.root}?format=car" download>${t("ipfs.car")}</a>
+         <button class="btn acc" id="verify">${t("verify")}</button></div><div class="verify-out" id="vout"></div>`],
+    ])}</div>
+    ${b.bodyAvailable ? "" : `<div class="note" style="margin-top:12px">${t("pruned")}</div>`}
+    ${b.txs.length ? `<div class="card" style="margin-top:16px"><div class="card-h"><h2>${t("k.txs")}</h2></div><div class="list">${b.txs.map(txRow).join("")}</div></div>` : ""}`;
+  const v = document.getElementById("verify");
+  if (v) v.onclick = () => verifyBlock(b);
+}
+async function pageTx(h) {
+  const x = await api("tx/" + encodeURIComponent(h));
+  const call = x.call ? `<span class="badge acc">${esc(x.call.method)}</span>${x.call.params.length ? `<div style="margin-top:6px">${x.call.params.map((p) => `<div><span class="muted">${esc(p.name)}:</span> <span class="mono break">${fmtParam(p)}</span></div>`).join("")}</div>` : ""}` : "";
+  const transfers = x.logs.filter((l) => l.transfer).map((l) => l.transfer);
+  $app.innerHTML = `<h1>${t("tx")} ${txStatus(x)} ${x.final === false && !x.pending ? `<span class="badge warn">${t("final.no")}</span>` : ""}</h1>
+    <div class="card">${kv([
+      [t("k.hash"), `<span class="mono break">${x.hash}</span>${copyBtn(x.hash)}`],
+      !x.pending && [t("k.block"), `${bLink(x.block)} <span class="muted">· ${ago(x.timestamp)} (${dateOf(x.timestamp)})</span>`],
+      [t("k.from"), aLink(x.from, x.from) + copyBtn(x.from)],
+      [t("k.to"), x.to ? aLink(x.to, x.toLabel ? `${x.toLabel} (${short(x.to)})` : x.to) + copyBtn(x.to) : `<span class="badge">${t("create")}</span>`],
+      x.created && [t("k.created"), aLink(x.created, x.created)],
+      [t("k.value"), bolt(x.value, 18)],
+      call && [t("k.method"), call],
+      transfers.length && [t("k.transfers"), transfers.map((tr) => `<div>${aLink(tr.from)} → ${aLink(tr.to)} · <span class="mono">${tr.amount ?? "#" + tr.tokenId}</span> <span class="muted">(${aLink(tr.token)})</span></div>`).join("")],
+      x.fee && [t("k.fee"), `${bolt(x.fee, 8)} <span class="muted">(${t("k.burned")} ${bolt(x.burned, 8)})</span>`],
+      x.gasPrice && [t("k.gasprice"), gwei(x.gasPrice)],
+      [t("k.gas"), x.gasUsed != null ? `${num(x.gasUsed)} / ${num(x.gasLimit)}` : num(x.gasLimit)],
+      [t("k.nonce"), num(x.nonce)],
+      [t("k.type"), "EIP-2718 type " + x.type],
+      x.input && x.input !== "0x" && [t("k.input"), `<div class="mono break" style="max-height:160px;overflow:auto;background:var(--code);padding:8px;border-radius:8px">${esc(x.input)}</div>`],
+      x.logs.length && [t("k.logs"), x.logs.map((l, i) => `<div style="margin-bottom:8px"><span class="badge">${i}</span> ${aLink(l.address, l.label)}<div class="mono break muted">${l.topics.map(esc).join("<br>")}</div></div>`).join("")],
+    ])}</div>`;
+}
+function fmtParam(p) {
+  const v = p.value;
+  if (typeof v === "string" && /^0x[0-9a-fA-F]{40}$/.test(v)) return aLink(v, v);
+  if (p.name === "id") return `<a href="#/validator/${v}">${esc(v)}</a>`;
+  if (p.name === "amount") return esc(v);
+  return esc(typeof v === "string" ? v : JSON.stringify(v));
+}
+async function pageAddress(a, q) {
+  const before = q.get("before");
+  const d = await api("address/" + a + (before ? "?before=" + before : ""));
+  const roleBadges = (rs) => rs.map((r) => `<span class="badge ${r === "from" ? "warn" : r === "to" ? "ok" : ""}">${t("role." + r)}</span>`).join(" ");
+  const idx = d.indexFrom == null ? `<div class="note">${t("addr.noindex")}</div>` : d.indexFrom > 1 ? `<div class="note">${t("addr.partial", { n: num(d.indexFrom) })}</div>` : "";
+  $app.innerHTML = `<h1>${d.contract ? t("contract") : t("address")} ${d.label ? `<span class="badge acc">${t("sys")} · ${esc(d.label)}</span>` : ""}</h1>
+    <div class="card">${kv([
+      [t("address"), `<span class="mono break">${d.address}</span>${copyBtn(d.address)}`],
+      [t("k.balance"), `<b>${bolt(d.balance, 18)}</b>`],
+      [t("k.txcount"), num(d.nonce)],
+      d.contract && [t("k.code"), num(d.codeSize) + " bytes"],
+      d.validators.length && [t("addr.validators"), d.validators.map((v) => `<div><a href="#/validator/${v.id}">#${v.id}</a> ${statusBadge(v.status)} <span class="muted">${bolt(v.stake, 0)}</span></div>`).join("")],
+    ])}</div>
+    <div class="card" style="margin-top:16px"><div class="card-h"><h2>${t("addr.txs")}</h2></div>${idx ? `<div style="padding:12px 16px 0">${idx}</div>` : ""}
+    ${d.txs.length ? `<div class="scroll"><table class="tbl"><thead><tr><th>${t("tx")}</th><th>${t("k.block")}</th><th>${t("k.time")}</th><th></th><th>${t("k.from")} / ${t("k.to")}</th><th>${t("k.method")}</th><th class="r">${t("k.value")}</th><th></th></tr></thead><tbody>
+      ${d.txs.map((x) => `<tr><td>${txLink(x.hash)}</td><td>${bLink(x.block)}</td><td class="muted">${ago(x.timestamp)}</td><td>${roleBadges(x.roles)}</td>
+        <td>${x.from === d.address ? aLink(x.to, x.toLabel) : aLink(x.from)}</td><td>${x.method ? `<span class="badge">${esc(x.method)}</span>` : ""}</td><td class="r mono">${bolt(x.value, 4)}</td><td>${x.success === false ? `<span class="badge bad">${t("fail")}</span>` : ""}</td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">${t("addr.none")}</div>`}
+    <div class="pager">${before ? `<button class="btn" onclick="history.back()">‹ ${t("prev")}</button>` : ""}${d.next ? `<button class="btn" onclick="location.hash='#/address/${d.address}?before=${d.next}'">${t("next")} ›</button>` : ""}</div></div>`;
+}
+async function pageValidators() {
+  const d = await api("validators");
+  $app.innerHTML = `<h1>${t("v.list")} <span class="badge">${num(d.validators.length)}</span> <span class="muted" style="font-size:14px;font-weight:400">${t("epoch")} ${num(d.epoch)}</span></h1>
+    <div class="card scroll">${d.validators.length ? `<table class="tbl"><thead><tr><th>${t("v.id")}</th><th>${t("v.status")}</th><th>${t("v.owner")}</th><th class="r">${t("v.stake")}</th><th class="r">${t("v.seats")}</th><th class="r">${t("v.rewards")}</th><th>${t("v.peer")}</th></tr></thead><tbody>
+      ${d.validators.map((v) => `<tr><td><a href="#/validator/${v.id}">#${v.id}</a></td><td>${statusBadge(v.status)}</td><td>${aLink(v.owner)}</td><td class="r mono">${bolt(v.stake, 2)}</td><td class="r">${v.seats || "—"}</td><td class="r mono">${bolt(v.rewards, 2)}</td><td>${v.historyPeer ? "✓" : `<span class="badge warn">—</span>`}</td></tr>`).join("")}
+      </tbody></table>` : `<div class="empty">${t("v.none")}</div>`}</div>`;
+}
+async function pageValidator(id) {
+  const v = await api("validator/" + encodeURIComponent(id));
+  $app.innerHTML = `<h1>${t("validator")} #${v.id} ${statusBadge(v.status)}</h1>
+    <div class="card">${kv([
+      [t("v.owner"), aLink(v.owner, v.owner)],
+      [t("v.fee"), aLink(v.feeRecipient, v.feeRecipient)],
+      [t("v.stake"), `<b>${bolt(v.stake, 6)}</b>`],
+      [t("v.rewards"), bolt(v.rewards, 6)],
+      [t("v.peer"), v.historyPeer ? `<span class="mono break">${esc(v.historyPeer)}</span>` : `<span class="badge warn">—</span>`],
+      [t("v.pubkey"), `<span class="mono break">${esc(v.pubkey)}</span>`],
+      [t("v.committees"), v.committees.length ? `<div class="chips">${v.committees.map((c) => `<a class="badge" href="#/epoch/${c.epoch}">${t("epoch")} ${c.epoch} · ${c.seats}</a>`).join("")}</div>` : "—"],
+    ])}</div>
+    <div class="card" style="margin-top:16px"><div class="card-h"><h2>${t("v.audits")}</h2></div>
+      ${v.audits.length ? `<div class="scroll"><table class="tbl"><thead><tr><th>${t("epoch")}</th><th>#</th><th>${t("e.target")}</th><th>${t("k.block")}</th><th>${t("k.status")}</th></tr></thead><tbody>
+        ${v.audits.map((a) => `<tr><td><a href="#/epoch/${a.epoch}">${a.epoch}</a></td><td>${a.task}</td><td>${a.target}</td><td>${bLink(a.height)}</td><td>${auditBadge(a.state)}</td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">—</div>`}</div>`;
+}
+async function pageEpoch(n) {
+  const e = await api("epoch/" + encodeURIComponent(n));
+  $app.innerHTML = `<h1>${t("epoch")} ${num(e.epoch)} <span class="badge">${t("stage." + e.mode)}</span>
+      <span style="flex:1"></span><a class="btn" href="#/epoch/${Math.max(0, e.epoch - 1)}">‹</a><a class="btn" href="#/epoch/${e.epoch + 1}">›</a></h1>
+    <div class="card">${kv([
+      [t("e.range"), `${bLink(e.first)} – ${bLink(e.last)}`],
+      [t("e.index"), e.index ? `<span class="mono break">${e.index}</span> <a class="btn" href="/history/epoch/${e.epoch}.car" download>${t("e.car")}</a>` : "—"],
+      [t("e.committee"), e.committee.length ? `<div class="chips">${e.committee.map((c) => `<a class="badge" href="#/validator/${c.id}">#${c.id} · ${c.seats}</a>`).join("")}</div>` : "—"],
+      e.auditPanel.length && [t("e.panel"), `<div class="chips">${e.auditPanel.map((id) => `<a class="badge" href="#/validator/${id}">#${id}</a>`).join("")}</div>`],
+    ])}</div>
+    <div class="card" style="margin-top:16px"><div class="card-h"><h2>${t("e.audits")}</h2></div>
+      ${e.audits.length ? `<div class="scroll"><table class="tbl"><thead><tr><th>#</th><th>${t("e.provider")}</th><th>${t("e.target")}</th><th>${t("k.block")}</th><th>${t("k.status")}</th></tr></thead><tbody>
+        ${e.audits.map((a) => `<tr><td>${a.task}</td><td><a href="#/validator/${a.provider}">#${a.provider}</a></td><td><a href="#/epoch/${a.target}">${a.target}</a></td><td>${bLink(a.height)}</td><td>${auditBadge(a.state)}</td></tr>`).join("")}
+      </tbody></table></div>` : `<div class="empty">${t("e.noaudits")}</div>`}</div>`;
+}
+
+// ---------- in-browser verification (keccak-256, sha-256, CID parsing) ----------
+const RC = [
+  "0x0000000000000001", "0x0000000000008082", "0x800000000000808a", "0x8000000080008000", "0x000000000000808b", "0x0000000080000001",
+  "0x8000000080008081", "0x8000000000008009", "0x000000000000008a", "0x0000000000000088", "0x0000000080008009", "0x000000008000000a",
+  "0x000000008000808b", "0x800000000000008b", "0x8000000000008089", "0x8000000000008003", "0x8000000000008002", "0x8000000000000080",
+  "0x000000000000800a", "0x800000008000000a", "0x8000000080008081", "0x8000000000008080", "0x0000000080000001", "0x8000000080008008",
+].map(BigInt);
+const ROT = [0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14];
+const M64 = (1n << 64n) - 1n;
+const rotl = (x, n) => (n === 0 ? x : ((x << BigInt(n)) | (x >> BigInt(64 - n))) & M64);
+function keccak256(bytes) {
+  const rate = 136; const s = new Array(25).fill(0n);
+  const padded = new Uint8Array(Math.ceil((bytes.length + 1) / rate) * rate);
+  padded.set(bytes); padded[bytes.length] ^= 0x01; padded[padded.length - 1] ^= 0x80;
+  for (let off = 0; off < padded.length; off += rate) {
+    for (let i = 0; i < rate / 8; i++) {
+      let v = 0n; for (let j = 7; j >= 0; j--) v = (v << 8n) | BigInt(padded[off + i * 8 + j]);
+      s[i] ^= v;
+    }
+    for (let r = 0; r < 24; r++) {
+      const c = []; for (let x = 0; x < 5; x++) c[x] = s[x] ^ s[x + 5] ^ s[x + 10] ^ s[x + 15] ^ s[x + 20];
+      for (let x = 0; x < 5; x++) { const d = c[(x + 4) % 5] ^ rotl(c[(x + 1) % 5], 1); for (let y = 0; y < 25; y += 5) s[y + x] ^= d; }
+      const b = new Array(25);
+      for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++) b[y + 5 * ((2 * x + 3 * y) % 5)] = rotl(s[x + 5 * y], ROT[x + 5 * y]);
+      for (let x = 0; x < 5; x++) for (let y = 0; y < 5; y++) s[x + 5 * y] = b[x + 5 * y] ^ (~b[(x + 1) % 5 + 5 * y] & M64 & b[(x + 2) % 5 + 5 * y]);
+      s[0] ^= RC[r];
+    }
+  }
+  const out = new Uint8Array(32);
+  for (let i = 0; i < 4; i++) { let v = s[i]; for (let j = 0; j < 8; j++) { out[i * 8 + j] = Number(v & 0xffn); v >>= 8n; } }
+  return out;
+}
+const K256 = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+function sha256(bytes) {
+  const l = bytes.length; const n = Math.ceil((l + 9) / 64) * 64; const m = new Uint8Array(n);
+  m.set(bytes); m[l] = 0x80; const bits = l * 8;
+  const dv = new DataView(m.buffer); dv.setUint32(n - 4, bits >>> 0); dv.setUint32(n - 8, Math.floor(bits / 2 ** 32));
+  const h = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const w = new Uint32Array(64); const r = (x, k) => (x >>> k) | (x << (32 - k));
+  for (let o = 0; o < n; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(o + i * 4);
+    for (let i = 16; i < 64; i++) { const s0 = r(w[i-15],7) ^ r(w[i-15],18) ^ (w[i-15] >>> 3); const s1 = r(w[i-2],17) ^ r(w[i-2],19) ^ (w[i-2] >>> 10); w[i] = (w[i-16] + s0 + w[i-7] + s1) >>> 0; }
+    let [a, b, c, d, e, f, g, hh] = h;
+    for (let i = 0; i < 64; i++) {
+      const t1 = (hh + (r(e,6) ^ r(e,11) ^ r(e,25)) + ((e & f) ^ (~e & g)) + K256[i] + w[i]) >>> 0;
+      const t2 = ((r(a,2) ^ r(a,13) ^ r(a,22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      hh = g; g = f; f = e; e = (d + t1) >>> 0; d = c; c = b; b = a; a = (t1 + t2) >>> 0;
+    }
+    h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+    h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0; h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+  }
+  const out = new Uint8Array(32); const ov = new DataView(out.buffer); h.forEach((x, i) => ov.setUint32(i * 4, x)); return out;
+}
+const hex = (b) => Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+function cidDigest(cid) {
+  // base32 (multibase "b") CIDv1: <version><codec><hash code><length><digest>
+  if (cid[0] !== "b") throw new Error("unsupported CID encoding");
+  const A = "abcdefghijklmnopqrstuvwxyz234567"; let bits = 0, val = 0; const out = [];
+  for (const ch of cid.slice(1)) { val = (val << 5) | A.indexOf(ch); bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; } }
+  let i = 0; const varint = () => { let x = 0, s = 0, b; do { b = out[i++]; x |= (b & 0x7f) << s; s += 7; } while (b & 0x80); return x; };
+  varint(); varint(); const code = varint(); const len = varint();
+  return { code, digest: hex(out.slice(i, i + len)) };
+}
+async function fetchRaw(cid) {
+  const r = await fetch(`/ipfs/${cid}?format=raw`, { cache: "no-store" });
+  if (!r.ok) throw new Error(`${cid}: HTTP ${r.status}`);
+  return new Uint8Array(await r.arrayBuffer());
+}
+async function verifyBlock(b) {
+  const out = document.getElementById("vout");
+  out.innerHTML = `<span class="muted">${t("verify.run")}</span>`;
+  try {
+    const hdr = await fetchRaw(b.ipfs.header);
+    const hh = "0x" + hex(keccak256(hdr));
+    if (hh !== b.hash) throw new Error(`header keccak ${hh} ≠ ${b.hash}`);
+    const env = await fetchRaw(b.ipfs.root);
+    const d = cidDigest(b.ipfs.root);
+    const got = d.code === 0x12 ? hex(sha256(env)) : hex(keccak256(env));
+    if (got !== d.digest) throw new Error("envelope digest mismatch");
+    for (const c of b.ipfs.chunks) {
+      const data = await fetchRaw(c); const cd = cidDigest(c);
+      if (hex(sha256(data)) !== cd.digest) throw new Error("chunk " + c + " digest mismatch");
+    }
+    out.innerHTML = `<span class="badge ok">✓</span> ${t("verify.ok")}<div class="mono muted break">keccak256(header) = ${hh}</div>`;
+  } catch (e) {
+    out.innerHTML = `<span class="badge bad">✗</span> ${t("verify.bad")}: ${esc(e.message)}`;
+  }
+}
+
+// ---------- routing & search ----------
+document.getElementById("search").onsubmit = async (e) => {
+  e.preventDefault();
+  const q = document.getElementById("q").value.trim();
+  if (!q) return;
+  try {
+    const r = await api("search?q=" + encodeURIComponent(q));
+    if (r.kind === "cid") location.href = `/ipfs/${r.id}?format=raw`;
+    else location.hash = `#/${r.kind}/${r.id}`;
+    document.getElementById("q").value = "";
+  } catch (_) {
+    $app.insertAdjacentHTML("afterbegin", `<div class="note">${t("search.none")}: ${esc(q)}</div>`);
+  }
+};
+async function route() {
+  clearInterval(timer);
+  const h = location.hash.replace(/^#\/?/, "");
+  const [path, qs] = h.split("?");
+  const q = new URLSearchParams(qs || "");
+  const [page, arg] = path.split("/");
+  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("on", a.dataset.nav === (page || "home")));
+  loading();
+  try {
+    if (!page) await pageHome();
+    else if (page === "blocks") await pageBlocks(q);
+    else if (page === "block") await pageBlock(arg);
+    else if (page === "tx") await pageTx(arg);
+    else if (page === "address") await pageAddress(arg, q);
+    else if (page === "validators") await pageValidators();
+    else if (page === "validator") await pageValidator(arg);
+    else if (page === "epoch") await pageEpoch(arg);
+    else await pageHome();
+    window.scrollTo(0, 0);
+  } catch (e) { fail(e); }
+}
+window.addEventListener("hashchange", route);
+applyTheme();
+applyI18n();
+route();
+api("status").then((s) => { document.getElementById("net").textContent = s.chainId === 8017 ? "Mainnet" : s.chainId === 8018 ? "Testnet" : "Chain " + s.chainId; }).catch(() => {});
+</script>
+</body>
+</html>
