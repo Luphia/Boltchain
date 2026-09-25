@@ -166,6 +166,11 @@ pub enum NetEvent {
         /// dag-cbor bytes.
         data: Vec<u8>,
     },
+    /// A transaction gossiped by a peer (raw EIP-2718 bytes, not yet validated).
+    GossipTx {
+        /// Raw transaction.
+        raw: Vec<u8>,
+    },
     /// A storage-layer message (snapshot announcement or audit vote), still encoded.
     Storage {
         /// Peer that relayed it.
@@ -191,6 +196,7 @@ enum Command {
     Publish(Announce),
     PublishConsensus(Vec<u8>),
     PublishStorage(Vec<u8>),
+    PublishTx(Vec<u8>),
     ForwardTx(PeerId, Vec<u8>, oneshot::Sender<Result<B256, String>>),
     RespondTx(u64, Result<B256, String>),
     Peers(oneshot::Sender<Vec<PeerId>>),
@@ -227,6 +233,7 @@ impl std::fmt::Debug for Command {
             Command::Publish(_) => "Publish",
             Command::PublishConsensus(_) => "PublishConsensus",
             Command::PublishStorage(_) => "PublishStorage",
+            Command::PublishTx(_) => "PublishTx",
             Command::ForwardTx(..) => "ForwardTx",
             Command::RespondTx(..) => "RespondTx",
             Command::Peers(_) => "Peers",
@@ -256,6 +263,12 @@ impl NetHandle {
     /// Publishes an encoded storage-layer message (ADR 0009).
     pub async fn publish_storage(&self, data: Vec<u8>) -> Result<(), NetError> {
         self.cmd.send(Command::PublishStorage(data)).await.map_err(|_| NetError::Stopped)
+    }
+
+    /// Gossips a transaction this node admitted (never blocks: dropped if the network task is
+    /// saturated, like any gossip).
+    pub fn gossip_tx(&self, raw: Vec<u8>) {
+        let _ = self.cmd.try_send(Command::PublishTx(raw));
     }
 
     /// Asks `peer` alone for one block, bypassing the local blockstore (storage audits).
@@ -326,6 +339,10 @@ fn topic(chain_id: u64) -> gossipsub::IdentTopic {
 
 fn consensus_topic(chain_id: u64) -> gossipsub::IdentTopic {
     gossipsub::IdentTopic::new(format!("/bolt/{chain_id}/consensus"))
+}
+
+fn tx_topic(chain_id: u64) -> gossipsub::IdentTopic {
+    gossipsub::IdentTopic::new(format!("/bolt/{chain_id}/tx"))
 }
 
 fn storage_topic(chain_id: u64) -> gossipsub::IdentTopic {
@@ -415,6 +432,7 @@ pub async fn start(
     swarm.behaviour_mut().gossipsub.subscribe(&topic(chain_id)).map_err(|e| setup(&e))?;
     swarm.behaviour_mut().gossipsub.subscribe(&consensus_topic(chain_id)).map_err(|e| setup(&e))?;
     swarm.behaviour_mut().gossipsub.subscribe(&storage_topic(chain_id)).map_err(|e| setup(&e))?;
+    swarm.behaviour_mut().gossipsub.subscribe(&tx_topic(chain_id)).map_err(|e| setup(&e))?;
     for addr in &cfg.bootnodes {
         if let Some(peer) = peer_of(addr) {
             swarm.behaviour_mut().kad.add_address(&peer, addr.clone());
@@ -443,6 +461,7 @@ async fn run(
     let topic = topic(cfg.chain_id);
     let ctopic = consensus_topic(cfg.chain_id);
     let stopic = storage_topic(cfg.chain_id);
+    let ttopic = tx_topic(cfg.chain_id);
     let mut pending_fwd: HashMap<
         request_response::OutboundRequestId,
         oneshot::Sender<Result<B256, String>>,
@@ -472,6 +491,11 @@ async fn run(
                     Command::PublishConsensus(data) => {
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ctopic.clone(), data) {
                             tracing::debug!("publish consensus: {e}");
+                        }
+                    }
+                    Command::PublishTx(raw) => {
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ttopic.clone(), raw) {
+                            tracing::debug!("publish tx: {e}");
                         }
                     }
                     Command::PublishStorage(data) => {
@@ -554,6 +578,20 @@ async fn run(
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
                     propagation_source, message_id, message,
+                })) if message.topic == ttopic.hash() => {
+                    // Size and shape only; the pool checks signature, nonce and balance. Peer
+                    // scoring (M6) will penalise peers that relay invalid transactions.
+                    let ok = !message.data.is_empty() && message.data.len() <= MAX_TX_GOSSIP_BYTES;
+                    let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
+                        &message_id, &propagation_source,
+                        if ok { gossipsub::MessageAcceptance::Accept } else { gossipsub::MessageAcceptance::Reject },
+                    );
+                    if ok {
+                        deliver(&ev_tx, NetEvent::GossipTx { raw: message.data });
+                    }
+                }
+                SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                    propagation_source, message_id, message,
                 })) if message.topic == stopic.hash() => {
                     // Checked by the node (signatures, snapshot roots against local headers).
                     let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
@@ -613,6 +651,9 @@ async fn run(
     }
 }
 
+/// Largest transaction relayed by gossip (the pool's own limit is 128 KiB).
+const MAX_TX_GOSSIP_BYTES: usize = 128 * 1024;
+
 /// Events buffered between the network task and the node.
 const EVENT_BUFFER: usize = 1024;
 
@@ -633,6 +674,7 @@ impl NetEvent {
             NetEvent::Tx { .. } => "tx",
             NetEvent::Consensus { .. } => "consensus",
             NetEvent::Storage { .. } => "storage",
+            NetEvent::GossipTx { .. } => "tx gossip",
             NetEvent::Connected(_) => "connected",
         }
     }

@@ -368,9 +368,20 @@ impl Validator {
         }
     }
 
+    /// Adds a transaction a peer gossiped (invalid or known ones are ignored).
+    fn admit_gossiped(&self, raw: &[u8]) {
+        if let Ok(r) = self.chain.store().reader() {
+            let _ = self.pool.add_gossiped(raw, &HeadState(&r));
+        }
+    }
+
     /// Runs until the network event stream ends.
     pub async fn run(self, mut events: mpsc::Receiver<NetEvent>) -> Result<()> {
         std::fs::create_dir_all(&self.cfg.state_dir)?;
+        // Transactions this node admits (RPC, forwarding) are gossiped so every block producer
+        // sees them.
+        let net = self.net.clone();
+        self.pool.on_admit(Box::new(move |raw| net.gossip_tx(raw.to_vec())));
         let (itx, mut irx) = mpsc::unbounded_channel::<Internal>();
         let catch_up = self.spawn_catch_up(itx.clone());
         let mut sources: HashMap<B256, PeerId> = HashMap::new();
@@ -458,6 +469,10 @@ impl Validator {
                         let _ = reply.send(res);
                         vec![]
                     }
+                    Some(NetEvent::GossipTx { raw }) => {
+                        self.admit_gossiped(&raw);
+                        vec![]
+                    }
                     Some(NetEvent::Connected(_) | NetEvent::Storage { .. }) => vec![],
                 },
                 i = irx.recv() => match i {
@@ -527,6 +542,7 @@ impl Validator {
                         };
                         let _ = reply.send(res);
                     }
+                    Some(NetEvent::GossipTx { raw }) => self.admit_gossiped(&raw),
                     Some(NetEvent::Connected(_) | NetEvent::Storage { .. }) => {}
                 },
                 _ = irx.recv() => {

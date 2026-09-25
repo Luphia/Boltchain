@@ -268,6 +268,8 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - [x] 錢包：`boltchain wallet new|balance|send|stake|set-peer`，伺服器上不需要 MetaMask
 - [x] 測試網 genesis（chain 8018，從挖礦開始，門檻縮小）、部署腳本（systemd 與免 root 兩種）、release workflow、加入說明（`docs/testnet.md`）
 - [x] 公開測試網上線（2026-09-25）：211.22.118.149 上跑 4 個節點、16 把驗證者金鑰，公開 bootnode、RPC 與 IPFS 閘道
+- [x] 測試網觀察 1：交易只會被收到它的那個節點放進區塊（其他節點看不到），公開 RPC 送出的交易平均要等好幾個區塊。加上交易 gossip（`/bolt/<chain>/tx`），本機收進交易池的交易會轉發給所有節點（`crates/node/tests/m6_tx_gossip.rs`）
+- [x] 測試網觀察 2：Kubo 經由公開節點從 head 下載到 genesis 全部成功。Helia 連到公開節點時，大約 80 則訊息後就不再送出新的 want（節點端都有回覆）→ 待查
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## M6 追加項目（ADR 0008）

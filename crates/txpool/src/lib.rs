@@ -145,20 +145,50 @@ struct Inner {
 }
 
 /// The transaction pool.
-#[derive(Debug)]
 pub struct TxPool {
     cfg: PoolConfig,
     inner: Mutex<Inner>,
+    /// Called with the raw bytes of every transaction admitted locally (RPC, forwarding), so the
+    /// node can gossip it. Not called for transactions that arrived by gossip.
+    on_admit: Mutex<Option<AdmitHook>>,
+}
+
+/// See [`TxPool::on_admit`].
+pub type AdmitHook = Box<dyn Fn(&[u8]) + Send + Sync>;
+
+impl std::fmt::Debug for TxPool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TxPool").field("len", &self.len()).finish()
+    }
 }
 
 impl TxPool {
     /// Empty pool.
     pub fn new(cfg: PoolConfig) -> Self {
-        Self { cfg, inner: Mutex::new(Inner::default()) }
+        Self { cfg, inner: Mutex::new(Inner::default()), on_admit: Mutex::new(None) }
     }
 
-    /// Decodes and admits a raw EIP-2718 transaction.
+    /// Registers the hook called for every locally admitted transaction (see the field docs).
+    pub fn on_admit(&self, hook: AdmitHook) {
+        *self.on_admit.lock() = Some(hook);
+    }
+
+    /// Admits a raw transaction received from a peer by gossip (the hook is not called: gossip
+    /// already relays it).
+    pub fn add_gossiped(&self, raw: &[u8], state: &impl AccountState) -> Result<B256, AddError> {
+        self.add_raw_inner(raw, state)
+    }
+
+    /// Decodes and admits a raw EIP-2718 transaction, then passes it to the admit hook.
     pub fn add_raw(&self, raw: &[u8], state: &impl AccountState) -> Result<B256, AddError> {
+        let h = self.add_raw_inner(raw, state)?;
+        if let Some(hook) = self.on_admit.lock().as_ref() {
+            hook(raw);
+        }
+        Ok(h)
+    }
+
+    fn add_raw_inner(&self, raw: &[u8], state: &impl AccountState) -> Result<B256, AddError> {
         if raw.len() > MAX_TX_BYTES {
             return Err(AddError::TooLarge);
         }

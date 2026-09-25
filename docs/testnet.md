@@ -91,6 +91,5 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 ## 已知限制（測試網第一階段）
 
 - 沒有 NAT 穿透與 relay：在 NAT 後面、又沒有做連接埠轉發的節點只能對外連線，別人連不進來。
-- 沒有交易 gossip：交易要送到會出塊的節點。公開 RPC 那台節點會把交易放進自己的區塊。
 - peer 評分與速率限制還沒做。
 - 測試網可能因為修正而重置，重置時會更新本頁的 genesis 雜湊。

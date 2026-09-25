@@ -485,7 +485,7 @@ pub async fn run_follower(
                 let _ = reply.send(Err("this node is not a block producer".into()));
             }
             NetEvent::Connected(peer) => tracing::debug!(%peer, "peer connected"),
-            NetEvent::Consensus { .. } | NetEvent::Storage { .. } => {}
+            NetEvent::Consensus { .. } | NetEvent::Storage { .. } | NetEvent::GossipTx { .. } => {}
         }
     }
 }
