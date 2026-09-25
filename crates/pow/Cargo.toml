@@ -1,0 +1,18 @@
+[package]
+name = "bolt-pow"
+description = "Boltchain proof of work: RandomBOLT (RandomX variant), header seal, ASERT difficulty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+randomx-rs = "1.6"
+alloy-primitives.workspace = true
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
+parking_lot.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

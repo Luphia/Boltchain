@@ -1,0 +1,3 @@
+[env]
+# Build randomx-rs against the vendored Boltchain variant of RandomX (third_party/randomx/BOLTCHAIN.md).
+RANDOMX_DIR = { value = "third_party/randomx", relative = true, force = true }

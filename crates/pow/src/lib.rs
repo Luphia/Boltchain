@@ -1,0 +1,111 @@
+//! Boltchain proof of work (ADR 0007 §1).
+//!
+//! * **RandomBOLT**: RandomX with Boltchain's Argon2 salt (`third_party/randomx`), so Monero
+//!   hashrate cannot be reused. Nodes verify in light mode (256 MiB cache, ~30 ms per hash on a
+//!   desktop CPU); miners may use fast mode (2 GiB dataset).
+//! * **Seal**: `pow = RandomBOLT(key, seal_hash ‖ nonce)` where `seal_hash` is the header hash
+//!   with the nonce zeroed; valid if `pow ≤ 2²⁵⁶ / difficulty`.
+//! * **Key rotation**: the RandomX key of block `h` is the hash of block
+//!   [`seed_height`]`(h)`, which changes every [`SEED_EPOCH`] blocks with a [`SEED_LAG`] delay.
+//! * **Difficulty**: relative ASERT, see [`next_difficulty`].
+
+mod asert;
+mod randombolt;
+
+pub use asert::{AsertParams, next_difficulty};
+pub use randombolt::{Hasher, Mode, PowError};
+
+use alloy_consensus::Header;
+use alloy_primitives::{B64, B256, U256, keccak256};
+
+/// Blocks between RandomX key changes.
+pub const SEED_EPOCH: u64 = 2048;
+/// Delay before a new key takes effect (so miners can prepare the dataset in advance).
+pub const SEED_LAG: u64 = 64;
+
+/// Height of the block whose hash keys RandomBOLT for block `height` (0 = genesis).
+pub fn seed_height(height: u64) -> u64 {
+    if height <= SEED_EPOCH + SEED_LAG { 0 } else { (height - SEED_LAG - 1) / SEED_EPOCH * SEED_EPOCH }
+}
+
+/// The header hash the miner commits to: everything but the nonce.
+pub fn seal_hash(header: &Header) -> B256 {
+    let mut h = header.clone();
+    h.nonce = B64::ZERO;
+    h.hash_slow()
+}
+
+/// RandomBOLT input: `seal_hash ‖ nonce` (40 bytes).
+pub fn pow_input(seal: &B256, nonce: u64) -> [u8; 40] {
+    let mut buf = [0u8; 40];
+    buf[..32].copy_from_slice(seal.as_slice());
+    buf[32..].copy_from_slice(&nonce.to_be_bytes());
+    buf
+}
+
+/// Whether `pow` meets `difficulty` (`pow ≤ ⌊(2²⁵⁶ − 1) / difficulty⌋`).
+pub fn meets(pow: &B256, difficulty: U256) -> bool {
+    if difficulty.is_zero() {
+        return false;
+    }
+    U256::from_be_bytes(pow.0) <= U256::MAX / difficulty
+}
+
+/// Work represented by a block of `difficulty` (the expected number of hashes), for total
+/// difficulty accounting.
+pub fn work(difficulty: U256) -> U256 {
+    difficulty
+}
+
+/// Per-block issuance rate for 12-second blocks, scaled by 1e24: `1 − (1 − k_day)^(1/7200)` with
+/// `k_day` = [`bolt_primitives`]' daily rate, so emission keeps its 4-year half-life in time.
+pub const BLOCK_EMISSION_RATE_E24: u128 = 65_938_656_555_113_079;
+
+/// Miner reward for one PoW block: the consensus share (80%) of the per-block issuance of the
+/// unissued pool `unissued`.
+pub fn block_reward(unissued: U256, consensus_bps: u32) -> U256 {
+    unissued * U256::from(BLOCK_EMISSION_RATE_E24) / U256::from(10u128.pow(24)) * U256::from(consensus_bps)
+        / U256::from(10_000)
+}
+
+/// Searches nonces `start, start + step, …` (up to `tries` of them) for one whose RandomBOLT hash
+/// meets `difficulty`. Checks `stop` between batches. Returns (nonce, pow hash).
+#[allow(clippy::too_many_arguments)]
+pub fn search(
+    hasher: &Hasher,
+    key: &B256,
+    seal: &B256,
+    difficulty: U256,
+    start: u64,
+    step: u64,
+    tries: u64,
+    stop: &std::sync::atomic::AtomicBool,
+) -> Result<Option<(u64, B256)>, PowError> {
+    const BATCH: u64 = 16;
+    let mut n = start;
+    let mut done = 0;
+    while done < tries {
+        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let count = BATCH.min(tries - done);
+        let inputs: Vec<[u8; 40]> = (0..count).map(|i| pow_input(seal, n.wrapping_add(i * step))).collect();
+        let refs: Vec<&[u8]> = inputs.iter().map(|i| i.as_slice()).collect();
+        for (i, pow) in hasher.hash_batch(key, &refs)?.into_iter().enumerate() {
+            if meets(&pow, difficulty) {
+                return Ok(Some((n.wrapping_add(i as u64 * step), pow)));
+            }
+        }
+        n = n.wrapping_add(count * step);
+        done += count;
+    }
+    Ok(None)
+}
+
+/// Keccak of the RandomX key material for `seed_block` (domain-separated).
+pub fn key_for(seed_block: &B256) -> B256 {
+    keccak256([b"boltchain/pow-key/v1".as_slice(), seed_block.as_slice()].concat())
+}
+
+#[cfg(test)]
+mod tests;
