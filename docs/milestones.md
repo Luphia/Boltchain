@@ -152,9 +152,9 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 
 ### 尚未完成（移到後續里程碑）
 
-- [ ] 存儲獎勵與歷史抽查（M5；金額見 ADR 0012）
+- [x] 存儲獎勵與歷史抽查（M5；金額見 ADR 0012）
 - [ ] 證據自動送交易（需要付 gas 的帳戶）、投票直送 leader、sentry 節點（M6）
-- [ ] 交易 gossip：目前交易只進入收到它的節點的交易池（M6）
+- [x] 交易 gossip（M6，`m6_tx_gossip`）
 
 ## 方向調整：PoW 啟動（2026-09-25，ADR 0007）
 
@@ -301,7 +301,7 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - [x] 測試網 `compute` 分叉與固定 bytecode 移除；分叉機制保留（目前沒有任何鏈有分叉）
 - [x] 未質押存儲提供者：`HistoryRegistry.registerStorage` / `registerStorageFor`（簽名、免 BOLT）、id 從 2^31 起、每個舊 epoch 另外 16 份副本（不擠掉驗證者）、領獎時扣 20% 累積押金（上限 64 BOLT）、抽查失敗燒 10% 押金並停止分配、14 天後取回押金；`wallet storage-register [--signed]`、節點 `--storage-account`
 - [x] 開發鏈 genesis hash `0x89feb030…bd70103`；新測試網 genesis hash `0x0dd221df…e162bb`
-- [ ] 測試網重新開始（新 genesis、節點資料清空、質押與 `set-peer` 重做、Uniswap v4 重新部署）
+- [x] 測試網重新開始（2026-09-26 10:00 UTC 新 genesis；8 位驗證者重新質押並 `set-peer`；Uniswap v4 重新部署）
 - [ ] 中繼工具：代送未質押提供者的簽名註冊
 
 ## SwarmStorage（ADR 0014）：已實作
@@ -342,4 +342,4 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - [ ] 發布清單（m-of-n ed25519 簽章、IPFS 發布、gossipsub 公告）與驗證
 - [ ] `--auto-update off|notify|apply`（預設 notify）、`--update-signers`、`--pin-version`；7 天冷卻期、分叉預告期檢查、啟動失敗自動回滾
 - [ ] 可重現建置與 CI 建置證明
-- [ ] 測試網演練一次硬分叉（含不規則狀態變更）
+- [ ] 測試網演練一次硬分叉（含不規則狀態變更）：分叉 `swarm` 排在第 2401 塊，替換 `0xB017…0005` 的程式碼
