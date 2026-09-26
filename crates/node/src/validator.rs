@@ -1318,9 +1318,15 @@ pub struct StorageArgs {
     pub explorer_labels: Vec<std::path::PathBuf>,
     /// Serve history as a storage provider without stake (ADR 0012) for this account's registered
     /// provider ids: keep the epochs assigned to them. Repeatable. Register first with
-    /// `boltchain storage register-tx`.
+    /// `boltchain wallet storage-register`. The node also keeps the SwarmStorage deals assigned
+    /// to them (ADR 0014).
     #[arg(long = "storage-account", value_name = "ADDRESS")]
     pub storage_accounts: Vec<alloy_primitives::Address>,
+    /// Enable `bolt_hostBlocks` / `bolt_getBlocks` on the JSON-RPC (SwarmStorage deals, ADR 0014):
+    /// `boltchain storage put/get` go through them. Anyone reaching the RPC can then store blocks
+    /// on this node, so bind the RPC to localhost when enabling it.
+    #[arg(long)]
+    pub rpc_storage: bool,
 }
 
 /// Runs a validator node until Ctrl-C.
@@ -1352,9 +1358,16 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
             prune: !args.storage.archive,
             keys: keys.clone(),
             storage_accounts: args.storage.storage_accounts.clone(),
+            hosted_file: Some(args.datadir.join("hosted-deals.txt")),
             ..Default::default()
         },
     );
+    let host: Option<Arc<dyn bolt_rpc::BlockHost>> = args.storage.rpc_storage.then(|| {
+        Arc::new(crate::storage::RpcHost {
+            storage: storage.clone(),
+            rt: tokio::runtime::Handle::current(),
+        }) as Arc<dyn bolt_rpc::BlockHost>
+    });
     let storage_task = tokio::spawn(storage.run(storage_rx));
     if args.storage.explorer {
         crate::explorer::spawn_address_index(chain.clone())?;
@@ -1377,6 +1390,7 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
         pool: pool.clone(),
         client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
         forwarder: None,
+        host,
     };
     let (addr, handle) = bolt_rpc::start(args.rpc, ctx).await?;
     tracing::info!(%addr, keys = keys.len(), "JSON-RPC listening");

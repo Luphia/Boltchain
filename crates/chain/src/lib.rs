@@ -369,8 +369,8 @@ impl Chain {
         let epoch = self.rules.epoch_of(number);
         let chain_id = self.config.chain_id;
         let q = |e| ChainError::Exec(format!("{e}"));
-        let audits = queries::call(db, chain_id, HISTORY, IHistoryRegistry::auditsCall { epoch })
-            .map_err(q)?;
+        let audits =
+            queries::call(db, chain_id, SWARM, ISwarmStorage::auditsCall { epoch }).map_err(q)?;
         let panel = if audits.panel.is_empty() {
             Vec::new()
         } else {

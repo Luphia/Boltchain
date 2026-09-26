@@ -90,6 +90,7 @@ pub async fn run(args: FollowArgs) -> Result<()> {
             cfg.min_base_fee_wei,
         ))),
         client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
+        host: None,
         forwarder: Some(Arc::new(Forward {
             net: net.clone(),
             producer,

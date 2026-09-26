@@ -190,7 +190,7 @@ const T = {
     "st.active": "運作中", "st.exiting": "退出中", "st.slashed": "已罰沒", "st.withdrawn": "已提領", "st.none": "—",
     "au.pending": "待定", "au.passed": "通過", "au.failed": "失敗",
     "e.range": "區塊範圍", "e.mode": "模式", "e.committee": "委員會", "e.index": "Epoch 索引", "e.audits": "儲存抽查任務",
-    "e.panel": "抽查小組", "e.provider": "提供者", "e.target": "抽查 epoch", "e.car": "下載 CAR", "e.noaudits": "本 epoch 沒有抽查任務",
+    "e.panel": "抽查小組", "e.provider": "提供者", "e.target": "抽查對象", "e.deal": "委託", "e.car": "下載 CAR", "e.noaudits": "本 epoch 沒有抽查任務",
     "prev": "較新", "next": "較舊", "copy": "複製", "copied": "已複製",
     "verify": "在瀏覽器中驗證", "verify.ok": "驗證成功：從 IPFS 取回的 header 雜湊 = 區塊雜湊；envelope 內容符合其 CID。",
     "verify.bad": "驗證失敗", "verify.run": "正在從 IPFS 取回並驗證…",
@@ -237,7 +237,7 @@ const T = {
     "st.active": "Active", "st.exiting": "Exiting", "st.slashed": "Slashed", "st.withdrawn": "Withdrawn", "st.none": "—",
     "au.pending": "Pending", "au.passed": "Passed", "au.failed": "Failed",
     "e.range": "Blocks", "e.mode": "Mode", "e.committee": "Committee", "e.index": "Epoch index", "e.audits": "Storage audit tasks",
-    "e.panel": "Audit panel", "e.provider": "Provider", "e.target": "Target epoch", "e.car": "Download CAR", "e.noaudits": "No audit tasks this epoch",
+    "e.panel": "Audit panel", "e.provider": "Provider", "e.target": "Target", "e.deal": "Deal", "e.car": "Download CAR", "e.noaudits": "No audit tasks this epoch",
     "prev": "Newer", "next": "Older", "copy": "Copy", "copied": "Copied",
     "verify": "Verify in browser", "verify.ok": "Verified: the header fetched from IPFS hashes to the block hash, and the envelope matches its CID.",
     "verify.bad": "Verification failed", "verify.run": "Fetching from IPFS and verifying…",
@@ -329,6 +329,8 @@ document.addEventListener("click", (e) => {
   try { navigator.clipboard.writeText(b.dataset.copy).then(done, done); } catch (_) { done(); }
 });
 const statusBadge = (s) => ({ active: `<span class="badge ok">${t("st.active")}</span>`, exiting: `<span class="badge warn">${t("st.exiting")}</span>`, slashed: `<span class="badge bad">${t("st.slashed")}</span>`, withdrawn: `<span class="badge">${t("st.withdrawn")}</span>` }[s] || `<span class="badge">${esc(s)}</span>`);
+const auditTarget = (a) => a.kind === "deal" ? `${t("e.deal")} ${a.target}` : `epoch <a href="#/epoch/${a.target}">${a.target}</a>`;
+const auditBlock = (a) => a.kind === "deal" ? `#${a.height}` : bLink(a.height);
 const auditBadge = (s) => ({ passed: `<span class="badge ok">${t("au.passed")}</span>`, failed: `<span class="badge bad">${t("au.failed")}</span>`, pending: `<span class="badge warn">${t("au.pending")}</span>` }[s] || esc(s));
 const txStatus = (tx) => tx.pending ? `<span class="badge warn">${t("pending")}</span>` : tx.success === false ? `<span class="badge bad">${t("fail")}</span>` : tx.success === true ? `<span class="badge ok">${t("ok")}</span>` : "";
 const kv = (rows) => `<table class="kv">${rows.filter(Boolean).map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join("")}</table>`;
@@ -513,7 +515,7 @@ async function pageValidator(id) {
     ])}</div>
     <div class="card" style="margin-top:16px"><div class="card-h"><h2>${t("v.audits")}</h2></div>
       ${v.audits.length ? `<div class="scroll"><table class="tbl"><thead><tr><th>${t("epoch")}</th><th>#</th><th>${t("e.target")}</th><th>${t("k.block")}</th><th>${t("k.status")}</th></tr></thead><tbody>
-        ${v.audits.map((a) => `<tr><td><a href="#/epoch/${a.epoch}">${a.epoch}</a></td><td>${a.task}</td><td>${a.target}</td><td>${bLink(a.height)}</td><td>${auditBadge(a.state)}</td></tr>`).join("")}
+        ${v.audits.map((a) => `<tr><td><a href="#/epoch/${a.epoch}">${a.epoch}</a></td><td>${a.task}</td><td>${auditTarget(a)}</td><td>${auditBlock(a)}</td><td>${auditBadge(a.state)}</td></tr>`).join("")}
       </tbody></table></div>` : `<div class="empty">—</div>`}</div>`;
 }
 async function pageEpoch(n) {
@@ -528,7 +530,7 @@ async function pageEpoch(n) {
     ])}</div>
     <div class="card" style="margin-top:16px"><div class="card-h"><h2>${t("e.audits")}</h2></div>
       ${e.audits.length ? `<div class="scroll"><table class="tbl"><thead><tr><th>#</th><th>${t("e.provider")}</th><th>${t("e.target")}</th><th>${t("k.block")}</th><th>${t("k.status")}</th></tr></thead><tbody>
-        ${e.audits.map((a) => `<tr><td>${a.task}</td><td><a href="#/validator/${a.provider}">#${a.provider}</a></td><td><a href="#/epoch/${a.target}">${a.target}</a></td><td>${bLink(a.height)}</td><td>${auditBadge(a.state)}</td></tr>`).join("")}
+        ${e.audits.map((a) => `<tr><td>${a.task}</td><td><a href="#/validator/${a.provider}">#${a.provider}</a></td><td>${auditTarget(a)}</td><td>${auditBlock(a)}</td><td>${auditBadge(a.state)}</td></tr>`).join("")}
       </tbody></table></div>` : `<div class="empty">${t("e.noaudits")}</div>`}</div>`;
 }
 

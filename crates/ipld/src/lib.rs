@@ -13,6 +13,7 @@
 //! so the body needs no trie structure of its own and can be fetched in one bitswap round trip.
 
 pub mod car;
+pub mod deal;
 pub mod history;
 
 use alloy_consensus::{Header, TxEnvelope};

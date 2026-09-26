@@ -6,7 +6,8 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
 use bolt_exec::{BlockExecutor, block::BlockError};
 use bolt_primitives::params::{
-    CHECKPOINT_MINER_BPS, WEI_PER_BOLT, consensus_reward, emission_era, share, storage_reward,
+    CHECKPOINT_MINER_BPS, DEAL_AUDIT_TASKS, WEI_PER_BOLT, consensus_reward, emission_era, share,
+    storage_reward,
 };
 use revm::DatabaseRef;
 
@@ -279,8 +280,8 @@ where
             .ok_or_else(|| BlockError::Evm(format!("missing index of epoch {}", epoch - 1)))?;
         sys(
             exec,
-            HISTORY,
-            IHistoryRegistry::recordEpochCall { epoch: epoch - 1, cid: Bytes::from(cid) },
+            SWARM,
+            ISwarmStorage::recordEpochCall { epoch: epoch - 1, cid: Bytes::from(cid) },
         )?;
     }
 
@@ -342,8 +343,8 @@ where
     Ok(())
 }
 
-/// Draws the audit panel (from the epoch's committee) and tasks (old epochs, their assignees,
-/// a block each) and records them.
+/// Draws the audit panel (from the epoch's committee) and tasks: old epochs (their assignees, a
+/// block each) and, once SwarmStorage is in force, deals (a copy and a block each).
 fn begin_audits<D: DatabaseRef>(
     exec: &mut BlockExecutor<D>,
     rules: &EpochRules,
@@ -354,38 +355,101 @@ where
     D::Error: std::error::Error + Send + Sync + 'static,
 {
     use crate::history::{assignees, draw_panel, draw_targets, draw_task};
-    let Some(last_old) = epoch.checked_sub(rules.history_recent_epochs + 1) else { return Ok(()) };
-    let indexed = view(exec, HISTORY, IHistoryRegistry::indexedEpochsCall {})?;
-    if indexed <= last_old {
+    let seed = seed(parent);
+    let (mut providers, mut targets, mut heights) = (Vec::new(), Vec::new(), Vec::new());
+    let indexed = view(exec, SWARM, ISwarmStorage::indexedEpochsCall {})?;
+    let last_old = epoch.checked_sub(rules.history_recent_epochs + 1).filter(|l| indexed > *l);
+    if let Some(last_old) = last_old {
+        let snap = view(exec, STAKING, IStakingManager::snapshotCall { minAge: 0 })?;
+        let mut validators = snap.ids;
+        validators.sort_unstable();
+        let storage = view(exec, SWARM, ISwarmStorage::activeStorageProvidersCall {})?;
+        for (i, target) in draw_targets(&seed, epoch, last_old).into_iter().enumerate() {
+            let cid = view(exec, SWARM, ISwarmStorage::epochIndexCall { epoch: target })?;
+            let who = assignees(&cid, &validators, &storage);
+            let first = target * rules.epoch_slots + 1;
+            if let Some(t) =
+                draw_task(&seed, epoch, i as u32, target, &who, first, rules.epoch_slots)
+            {
+                providers.push(t.provider);
+                targets.push(t.target);
+                heights.push(t.height);
+            }
+        }
+    }
+    let number = exec.params().input.number;
+    let deals = if bolt_primitives::forks::active(
+        exec.params().input.chain_id,
+        bolt_primitives::forks::SWARM,
+        number,
+    ) {
+        draw_deal_tasks(exec, &seed, epoch)?
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
+    };
+    if providers.is_empty() && deals.0.is_empty() {
         return Ok(());
     }
     let c = view(exec, CONSENSUS, IConsensusRegistry::committeeCall { epoch })?;
     if c.ids.is_empty() {
         return Ok(());
     }
-    let seed = seed(parent);
     let panel = draw_panel(&seed, epoch, &c.ids);
-    let snap = view(exec, STAKING, IStakingManager::snapshotCall { minAge: 0 })?;
-    let mut validators = snap.ids;
-    validators.sort_unstable();
-    let storage = view(exec, HISTORY, IHistoryRegistry::activeStorageProvidersCall {})?;
-    let (mut providers, mut targets, mut heights) = (Vec::new(), Vec::new(), Vec::new());
-    for (i, target) in draw_targets(&seed, epoch, last_old).into_iter().enumerate() {
-        let cid = view(exec, HISTORY, IHistoryRegistry::epochIndexCall { epoch: target })?;
-        let who = assignees(&cid, &validators, &storage);
-        let first = target * rules.epoch_slots + 1;
-        if let Some(t) = draw_task(&seed, epoch, i as u32, target, &who, first, rules.epoch_slots) {
-            providers.push(t.provider);
-            targets.push(t.target);
-            heights.push(t.height);
+    sys(exec, SWARM, ISwarmStorage::beginAuditsCall { epoch, panel, providers, targets, heights })?;
+    if !deals.0.is_empty() {
+        let (providers, deal_ids, indexes_) = deals;
+        sys(
+            exec,
+            SWARM,
+            ISwarmStorage::addDealAuditsCall { epoch, providers, dealIds: deal_ids, indexes_ },
+        )?;
+    }
+    Ok(())
+}
+
+/// Deal audit tasks (ADR 0014): [`DEAL_AUDIT_TASKS`] draws, each a random deal still running, one
+/// of its copies past its first epoch, and one of its blocks (up to 4 attempts per task).
+#[allow(clippy::type_complexity)]
+fn draw_deal_tasks<D: DatabaseRef>(
+    exec: &mut BlockExecutor<D>,
+    seed: &B256,
+    epoch: u64,
+) -> Result<(Vec<u32>, Vec<u64>, Vec<u64>), BlockError<D::Error>>
+where
+    D::Error: std::error::Error + Send + Sync + 'static,
+{
+    use crate::history::draw_index;
+    let (mut providers, mut deal_ids, mut indexes_) = (Vec::new(), Vec::new(), Vec::new());
+    let count = view(exec, SWARM, ISwarmStorage::dealCountCall {})?;
+    if count.is_zero() {
+        return Ok((providers, deal_ids, indexes_));
+    }
+    let count = u64::try_from(count).unwrap_or(u64::MAX);
+    for i in 0..DEAL_AUDIT_TASKS {
+        for attempt in 0..4u32 {
+            let n = i * 4 + attempt;
+            let id = draw_index(seed, b"audit/deal", epoch, n, count);
+            let d = view(exec, SWARM, ISwarmStorage::dealCall { id: U256::from(id) })?;
+            if d.closed || epoch >= d.endEpoch || d.blocks == 0 {
+                continue;
+            }
+            let s = view(exec, SWARM, ISwarmStorage::dealSlotsCall { id: U256::from(id) })?;
+            let live: Vec<u32> = (0..s.providers.len())
+                .filter(|k| s.open[*k] && s.since[*k] < epoch)
+                .map(|k| s.providers[k])
+                .collect();
+            if live.is_empty() {
+                continue;
+            }
+            let who =
+                live[draw_index(seed, b"audit/deal-copy", epoch, n, live.len() as u64) as usize];
+            providers.push(who);
+            deal_ids.push(id);
+            indexes_.push(draw_index(seed, b"audit/deal-block", epoch, n, d.blocks));
+            break;
         }
     }
-    sys(
-        exec,
-        HISTORY,
-        IHistoryRegistry::beginAuditsCall { epoch, panel, providers, targets, heights },
-    )?;
-    Ok(())
+    Ok((providers, deal_ids, indexes_))
 }
 
 /// Assigns waiting compute disputes to a verifier panel: drawn from the epoch's committee, or in
@@ -426,8 +490,8 @@ where
     for a in &history.audits {
         sys(
             exec,
-            HISTORY,
-            IHistoryRegistry::recordAuditCall { epoch: a.epoch, task: a.task, ok: a.passed },
+            SWARM,
+            ISwarmStorage::recordAuditCall { epoch: a.epoch, task: a.task, ok: a.passed },
         )?;
     }
     Ok(())

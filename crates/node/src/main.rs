@@ -1,6 +1,6 @@
 //! Boltchain node binary.
 
-use boltchain::{bench, devnet, follow, keys, validator, wallet};
+use boltchain::{bench, devnet, follow, keys, swarm, validator, wallet};
 
 use anyhow::{Context, Result};
 use bolt_primitives::Genesis;
@@ -27,6 +27,9 @@ enum Command {
     /// Account wallet: create a key, check balances, send BOLT, stake, publish a history peer.
     #[command(subcommand)]
     Wallet(wallet::WalletCmd),
+    /// SwarmStorage (ADR 0014): store encrypted files with paid providers, offer storage.
+    #[command(subcommand)]
+    Storage(swarm::StorageCmd),
     /// Run a single-producer development network with JSON-RPC, announcing blocks over IPFS.
     Devnet(devnet::DevnetArgs),
     /// Follow a producer: sync blocks over IPFS, serve JSON-RPC, forward transactions.
@@ -116,6 +119,7 @@ fn main() -> Result<()> {
         Command::Bench(args) => bench::run(args)?,
         Command::Keys(cmd) => keys::run(cmd)?,
         Command::Wallet(cmd) => wallet::run(cmd)?,
+        Command::Storage(cmd) => swarm::run(cmd)?,
         Command::Follow(args) => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

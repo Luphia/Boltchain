@@ -25,6 +25,12 @@ fn draw(seed: &B256, tag: &[u8], epoch: u64, i: u32) -> u64 {
     u64::from_be_bytes(h[..8].try_into().expect("8 bytes"))
 }
 
+/// Draw `i` of kind `tag` in `epoch`, reduced to `0..n` (`n > 0`). Used for deal audits
+/// (ADR 0014): which deal, which copy, which block.
+pub fn draw_index(seed: &B256, tag: &[u8], epoch: u64, i: u32, n: u64) -> u64 {
+    draw(seed, tag, epoch, i) % n
+}
+
 /// One audit task: provider `provider` must serve data of block `height` (in epoch `target`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuditTask {

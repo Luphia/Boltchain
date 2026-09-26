@@ -5,7 +5,7 @@
 //! - `GET /ipfs/<cid>?format=car` (or `Accept: application/vnd.ipld.car`): a CAR v1 of the DAG
 //!   under `<cid>` (an envelope's `parent` link is not followed, so an epoch index gives exactly
 //!   that epoch).
-//! - `GET /history/epoch/<n>.car`: the CAR of epoch `n`, located through `HistoryRegistry`.
+//! - `GET /history/epoch/<n>.car`: the CAR of epoch `n`, located through `SwarmStorage`.
 //!
 //! Every block is content-addressed, so clients verify what they receive and need not trust the
 //! gateway. Blocks the node pruned are answered with 404.
@@ -14,7 +14,7 @@ use anyhow::Result;
 use bolt_chain::Chain;
 use bolt_ipld::{Cid, car};
 use bolt_store::StateView;
-use bolt_system::{abi::IHistoryRegistry, addresses::HISTORY, queries};
+use bolt_system::{abi::ISwarmStorage, addresses::SWARM, queries};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -189,8 +189,8 @@ pub fn respond(chain: &Chain, req: &str) -> Response {
         let idx = queries::call(
             &StateView::latest(&r),
             chain.config().chain_id,
-            HISTORY,
-            IHistoryRegistry::epochIndexCall { epoch },
+            SWARM,
+            ISwarmStorage::epochIndexCall { epoch },
         );
         match idx.ok().and_then(|b| Cid::try_from(b.as_ref()).ok()) {
             Some(c) => return car_of(c, get),

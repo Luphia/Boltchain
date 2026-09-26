@@ -165,7 +165,7 @@ contract StakingManager is SystemContract {
     }
 
     /// A storage-audit failure (ADR 0009): `bps` of the stake is burned (1% of it to the reporter),
-    /// without forcing an exit. Only HistoryRegistry may call.
+    /// without forcing an exit. Only SwarmStorage may call.
     function penalize(uint32 id, uint256 bps, address reporter) external returns (uint256 amount) {
         if (msg.sender != Sys.HISTORY) revert Unauthorized();
         Validator storage v = validators[id];

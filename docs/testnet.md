@@ -91,6 +91,16 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 - 沒有算力份額；`ComputeMarket` 從 genesis 起就在（`0xB017000000000000000000000000000000000006`）。
 - 存儲抽查開放給未質押節點：`boltchain wallet storage-register --wallet <帳戶> --node-key <datadir>/node.key`（沒有 BOLT 時加 `--signed`，把印出的交易交給任何人代送），然後節點加上 `--storage-account <地址>`。
 
+## 硬分叉 `swarm`（第 2401 塊，ADR 0014）
+
+測試網的 genesis 是 `HistoryRegistry`；第 2401 塊（epoch 4 的第一塊）把 `0xB017…0005` 的程式碼換成 `SwarmStorage`（固定的 bytecode，`contracts/forks/8018-swarm`），原有狀態全部保留。從那個 epoch 起：
+
+- 提供者可以開放報價：`boltchain storage offer --wallet <帳戶> --id <提供者 id> --capacity <MiB> --price <BOLT/GiB/epoch>`
+- 使用者可以付費保存檔案：節點加 `--rpc-storage`（RPC 綁 localhost），然後 `boltchain storage put`
+- 每個 epoch 多 16 個委託抽查任務
+
+節點必須在第 2401 塊之前換上新版，否則會停在分叉前（fork id 不同）。
+
 ## Uniswap v4
 
 舊測試網部署過 Uniswap v4（core 1.0.2、periphery 1.0.3、UniversalRouter 2.1.0），部署腳本與地址紀錄在 [`scripts/uniswap-v4`](../scripts/uniswap-v4)：

@@ -246,12 +246,12 @@ async fn history_is_indexed_audited_pruned_and_snapshots_bootstrap_new_nodes() {
     // Owners publish the peer each validator serves history from.
     for (n, ids) in key_sets.iter().enumerate() {
         for i in ids {
-            let data = IHistoryRegistry::setPeerCall {
+            let data = ISwarmStorage::setPeerCall {
                 id: i + 1,
                 peerId: Bytes::from(nodes[n].net.peer_id().to_bytes()),
             }
             .abi_encode();
-            submit(&nodes, &call_tx(&owner(*i), 0, HISTORY, U256::ZERO, data));
+            submit(&nodes, &call_tx(&owner(*i), 0, SWARM, U256::ZERO, data));
         }
     }
     // Steady transfers so blocks have bodies.
@@ -271,7 +271,7 @@ async fn history_is_indexed_audited_pruned_and_snapshots_bootstrap_new_nodes() {
     });
     let c0 = nodes[0].chain.clone();
     wait_until("peers registered", 60, || {
-        (1..=7).all(|id| !view(&c0, HISTORY, IHistoryRegistry::peerOfCall { id }).is_empty())
+        (1..=7).all(|id| !view(&c0, SWARM, ISwarmStorage::peerOfCall { id }).is_empty())
     })
     .await;
 
@@ -289,24 +289,24 @@ async fn history_is_indexed_audited_pruned_and_snapshots_bootstrap_new_nodes() {
                 head(&pruner)
             );
         }
-        view(&c0, HISTORY, IHistoryRegistry::indexedEpochsCall {}) >= 4
+        view(&c0, SWARM, ISwarmStorage::indexedEpochsCall {}) >= 4
     })
     .await;
-    let idx0 = view(&c0, HISTORY, IHistoryRegistry::epochIndexCall { epoch: 0 });
+    let idx0 = view(&c0, SWARM, ISwarmStorage::epochIndexCall { epoch: 0 });
     let idx0 = Cid::try_from(idx0.as_ref()).unwrap();
     let mut passed_epoch = None;
     wait_until("a certified audit", 120, || {
         let cur = c0.rules().epoch_of(head(&nodes[0]) + 1);
         passed_epoch = (2..=cur)
-            .find(|e| !view(&c0, HISTORY, IHistoryRegistry::passedCall { epoch: *e }).is_empty());
+            .find(|e| !view(&c0, SWARM, ISwarmStorage::passedCall { epoch: *e }).is_empty());
         passed_epoch.is_some()
     })
     .await;
     let e = passed_epoch.unwrap();
-    let a = view(&c0, HISTORY, IHistoryRegistry::auditsCall { epoch: e });
+    let a = view(&c0, SWARM, ISwarmStorage::auditsCall { epoch: e });
     eprintln!("audits of epoch {e}: providers {:?} states {:?}", a.providers, a.states);
     assert!(a.states.iter().all(|s| *s != 2), "no honest provider failed");
-    let provider = view(&c0, HISTORY, IHistoryRegistry::passedCall { epoch: e })[0];
+    let provider = view(&c0, SWARM, ISwarmStorage::passedCall { epoch: e })[0];
     // Settled at the end of epoch e: the provider's rewards include a storage share.
     wait_until("storage settlement", 60, || head(&nodes[0]) > c0.rules().epoch_end(e) + 1).await;
     let rewards = view(&c0, REWARDS, IRewardDistributor::rewardsCall { id: provider });

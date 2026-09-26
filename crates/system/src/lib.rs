@@ -18,6 +18,8 @@ pub use hooks::{AuditResult, CertVotes, EpochRules, HistoryInputs, Phase, Produc
 #[cfg(test)]
 mod compute_tests;
 #[cfg(test)]
+mod deal_tests;
+#[cfg(test)]
 mod storage_tests;
 #[cfg(test)]
 mod tests;

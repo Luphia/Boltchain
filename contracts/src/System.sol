@@ -12,6 +12,7 @@ library Sys {
     address internal constant CONSENSUS = 0xB017000000000000000000000000000000000002;
     address internal constant REWARDS = 0xb017000000000000000000000000000000000003;
     // 0xb017…0004 was ParamRegistry; left unused.
+    /// SwarmStorage (was SwarmStorage; ADR 0014).
     address internal constant HISTORY = 0xb017000000000000000000000000000000000005;
     address internal constant COMPUTE = 0xB017000000000000000000000000000000000006;
 

@@ -151,7 +151,14 @@ fn build(g: &Genesis) -> Result<BTreeMap<Address, GenesisAccount>, GenesisBuildE
     b.deploy(STAKING, &artifacts::staking_manager().bytecode, &[])?;
     b.deploy(CONSENSUS, &artifacts::consensus_registry().bytecode, &[])?;
     b.deploy(REWARDS, &artifacts::reward_distributor().bytecode, &[])?;
-    b.deploy(HISTORY, &artifacts::history_registry().bytecode, &[])?;
+    // ADR 0014; the public testnet started with HistoryRegistry and gets SwarmStorage at its
+    // `swarm` fork.
+    if bolt_primitives::forks::active(g.config.chain_id, bolt_primitives::forks::SWARM, 0) {
+        b.deploy(SWARM, &artifacts::swarm_storage().bytecode, &[])?;
+    } else {
+        let init = Bytes::from_static(bolt_primitives::forks::TESTNET_GENESIS_HISTORY_REGISTRY);
+        b.deploy(SWARM, &init, &[])?;
+    }
     // ADR 0011; the public testnet gets it from its compute fork instead.
     b.deploy(COMPUTE, &artifacts::compute_market().bytecode, &[])?;
 

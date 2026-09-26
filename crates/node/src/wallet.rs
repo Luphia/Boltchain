@@ -231,6 +231,17 @@ pub fn send_tx(
     bail!("transaction {hash} not included after 6 minutes (still pending)")
 }
 
+/// The chain's current epoch (ConsensusRegistry).
+pub fn current_epoch(url: &str) -> Result<u64> {
+    let data = bolt_system::abi::IConsensusRegistry::currentEpochCall {}.abi_encode();
+    let out = rpc(
+        url,
+        "eth_call",
+        json!([{"to": bolt_system::addresses::CONSENSUS, "data": hex::encode_prefixed(data)}, "latest"]),
+    )?;
+    Ok(quantity(&out)?.to::<u64>())
+}
+
 /// Runs a wallet command.
 pub fn run(cmd: WalletCmd) -> Result<()> {
     match cmd {
@@ -296,18 +307,17 @@ pub fn run(cmd: WalletCmd) -> Result<()> {
             let peer = bolt_net::load_or_create_key(&node_key)?.public().to_peer_id();
             let tx = keys::set_peer_tx(id, &peer);
             let data: Bytes = tx["data"].as_str().context("data")?.parse()?;
-            send_tx(&url, &s, bolt_system::addresses::HISTORY, U256::ZERO, data)?;
+            send_tx(&url, &s, bolt_system::addresses::SWARM, U256::ZERO, data)?;
             println!("validator {id} serves history from {peer}");
         }
         WalletCmd::StorageRegister { wallet, node_key, signed, rpc: url } => {
-            use bolt_system::abi::IHistoryRegistry;
+            use bolt_system::abi::ISwarmStorage;
             let s = load_wallet(&wallet)?;
             let peer = bolt_net::load_or_create_key(&node_key)?.public().to_peer_id();
             let peer_bytes = Bytes::copy_from_slice(&peer.to_bytes());
-            let history = bolt_system::addresses::HISTORY;
+            let history = bolt_system::addresses::SWARM;
             if !signed {
-                let data =
-                    IHistoryRegistry::registerStorageCall { peerId: peer_bytes }.abi_encode();
+                let data = ISwarmStorage::registerStorageCall { peerId: peer_bytes }.abi_encode();
                 send_tx(&url, &s, history, U256::ZERO, data.into())?;
                 println!("{} registered as a storage provider serving from {peer}", s.address());
                 println!("run the node with --storage-account {}", s.address());
@@ -317,7 +327,7 @@ pub fn run(cmd: WalletCmd) -> Result<()> {
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()
                     + 86_400,
             );
-            let call = IHistoryRegistry::registrationDigestCall {
+            let call = ISwarmStorage::registrationDigestCall {
                 account: s.address(),
                 peerId: peer_bytes.clone(),
                 deadline,
@@ -330,7 +340,7 @@ pub fn run(cmd: WalletCmd) -> Result<()> {
             )?;
             let digest: B256 = out.as_str().context("digest")?.parse()?;
             let sig = alloy_signer::SignerSync::sign_hash_sync(&s, &digest)?;
-            let data = IHistoryRegistry::registerStorageForCall {
+            let data = ISwarmStorage::registerStorageForCall {
                 account: s.address(),
                 peerId: peer_bytes,
                 deadline,

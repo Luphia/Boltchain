@@ -304,6 +304,28 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - [ ] 測試網重新開始（新 genesis、節點資料清空、質押與 `set-peer` 重做、Uniswap v4 重新部署）
 - [ ] 中繼工具：代送未質押提供者的簽名註冊
 
+## SwarmStorage（ADR 0014）：已實作
+
+決定（2026-09-26）：新的 `SwarmStorage` 系統合約處理付費保存使用者資料，並取代 `HistoryRegistry`（同一地址），歷史與委託共用抽查。
+
+- [x] `SwarmStorage`：保留 `HistoryRegistry` 的儲存佈局；提供者報價（容量、最低單價）、委託（託管、隨機指派、每個 epoch 領款、未質押者 20% 進押金、接單上限 5 + 10 × 押金）、延長、取消、結束結算、修復、`withdraw` / `payout`
+- [x] 抽查：每個 epoch 在 16 個歷史任務後加 16 個委託任務；新副本寬限一個 epoch；失敗時罰則同歷史、副本解除且未付款項不付、自動抽替補；只有歷史任務分發行量
+- [x] `DealIndex`（`bolt-ipld`）、節點保存者巡檢、委託資料公告（`DealAnnounce`）、審計者探測委託區塊
+- [x] JSON-RPC `bolt_hostBlocks` / `bolt_getBlocks`（`--rpc-storage`）、`boltchain storage put/get/offer/deal/settle/extend/cancel/withdraw`、瀏覽器顯示任務種類
+- [x] 測試：合約（指派、領款、押金上限、失敗與替補、修復、取消與延長、驗證者報價、測試網升級保留狀態）、整合測試 `m7_swarm`（3 份副本、抽查通過、領款、讀回檔案）
+- [x] 開發鏈 genesis hash `0x4cb847e8…3e09418e`；測試網 genesis 不變，以分叉 `swarm` 在第 2401 塊換上固定的 bytecode
+- [ ] 保存者刪除已結束委託的區塊
+- [ ] 依委託金額加權抽查、提供者拒收、同一委託的副本分散到不同機器
+
+## TEE Agent 租用（ADR 0013）：已採納，未實作
+
+決定（2026-09-26）：必須支援 DGX Spark、Intel AI PC、AMD AI PC（沒有機密 VM，新增 T2「量測開機裝置」等級，靠 TPM 與驗證小組）；接受驗證小組背書；公開機器 ID；檢查點每小時上鏈；LLM 呼叫外部 API；映像開放登記；同版本雙簽罰沒全部押金。
+
+- [ ] 第零期：三款裝置實機確認（TPM、量測開機、Boot Guard / PSB、記憶體加密、IOMMU）
+- [ ] 第一期：驗證小組裁決憑證 + TPM 驗證、`TdxVerifier`、`TeeCollateral`、`ImageRegistry`、`EnclaveLease`、`bolt-art`（x86-64 / arm64）、`bolt-attest`、限權錢包
+- [ ] 第二期：保管小組、SEV-SNP
+- [ ] 第三期：GPU 機密運算
+
 ## M7 AI 算力市場（ADR 0011）：進行中
 
 決定（2026-09-26）：爭議由驗證小組處理；SwarmStorage 改用 bolt-vault WASM。發行分配與金絲雀任務已由 ADR 0012 取消。

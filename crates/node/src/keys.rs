@@ -60,7 +60,7 @@ pub enum KeysCmd {
         #[arg(long)]
         fee_recipient: Address,
     },
-    /// Print the `HistoryRegistry.setPeer` transaction that publishes the node a validator
+    /// Print the `SwarmStorage.setPeer` transaction that publishes the node a validator
     /// serves its history shards from (send it from the validator's owner wallet).
     SetPeerTx {
         /// Validator id.
@@ -159,13 +159,13 @@ pub fn register_tx(key: &BlsSecretKey, fee_recipient: Address) -> Result<serde_j
 
 /// The `setPeer` transaction (to, data) publishing `peer` for validator `id`.
 pub fn set_peer_tx(id: u32, peer: &libp2p::PeerId) -> serde_json::Value {
-    let data = bolt_system::abi::IHistoryRegistry::setPeerCall {
+    let data = bolt_system::abi::ISwarmStorage::setPeerCall {
         id,
         peerId: Bytes::copy_from_slice(&peer.to_bytes()),
     }
     .abi_encode();
     serde_json::json!({
-        "to": bolt_system::addresses::HISTORY,
+        "to": bolt_system::addresses::SWARM,
         "data": hex::encode_prefixed(data),
         "peerId": peer.to_string(),
     })

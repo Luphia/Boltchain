@@ -27,6 +27,7 @@ bolt-consensus.workspace = true
 serde_ipld_dagcbor.workspace = true
 alloy-rlp.workspace = true
 bolt-system.workspace = true
+bolt-vault.workspace = true
 libp2p.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true

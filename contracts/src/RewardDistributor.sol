@@ -145,7 +145,7 @@ contract RewardDistributor is SystemContract {
         amount = rewards[id];
         rewards[id] = 0;
         if (id >= 2 ** 31) {
-            // A storage provider without stake (ADR 0012): HistoryRegistry keeps its bond part.
+            // A storage provider without stake (ADR 0012): SwarmStorage keeps its bond part.
             emit Claimed(id, Sys.HISTORY, amount);
             IHistoryRewards(Sys.HISTORY).depositEarnings{value: amount}(id);
             return amount;

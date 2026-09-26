@@ -52,6 +52,7 @@ async fn wallet_flow_over_json_rpc() {
         chain: chain.clone(),
         pool: pool.clone(),
         client_version: "test".into(),
+        host: None,
         forwarder: None,
     };
     let (addr, _handle) = bolt_rpc::start("127.0.0.1:0".parse().unwrap(), ctx).await.unwrap();

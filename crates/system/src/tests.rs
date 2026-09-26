@@ -462,7 +462,7 @@ fn no_governance_only_the_node_can_call_admin_functions() {
     alloy_sol_types::sol! {
         function upgradeToAndCall(address newImplementation, bytes data) external payable;
     }
-    for c in [STAKING, CONSENSUS, REWARDS, HISTORY] {
+    for c in [STAKING, CONSENSUS, REWARDS, SWARM] {
         let call = upgradeToAndCallCall { newImplementation: anyone, data: Bytes::new() };
         assert!(!evm.try_call(anyone, c, U256::ZERO, call));
     }
@@ -595,7 +595,7 @@ fn devnet_genesis_hash_is_pinned() {
     let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&g).unwrap(),
-        "0x89feb0301648215cbec52e6044fe84f701e7a7f5aa4afee45dd71c42bbd70103"
+        "0x4cb847e817cbec813e1ce0e90b9fa1b98d2d09ec8ce511a6d7f9dc883e09418e"
             .parse::<B256>()
             .unwrap()
     );

@@ -64,6 +64,7 @@ pub async fn run(args: DevnetArgs) -> Result<()> {
         chain: chain.clone(),
         pool: pool.clone(),
         client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
+        host: None,
         forwarder: None,
     };
     let (addr, handle) = bolt_rpc::start(args.rpc, ctx).await?;

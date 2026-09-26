@@ -45,11 +45,13 @@ pub const HISTORY_REPLICATION: u32 = 16;
 /// top of the [`HISTORY_REPLICATION`] validators.
 pub const STORAGE_REPLICATION: u32 = 16;
 
-/// First id of a storage provider without stake (`HistoryRegistry.STORAGE_ID_BASE`).
+/// First id of a storage provider without stake (`SwarmStorage.STORAGE_ID_BASE`).
 pub const STORAGE_ID_BASE: u32 = 1 << 31;
 
 /// Storage audits drawn per epoch (ADR 0009).
 pub const AUDIT_TASKS: u32 = 16;
+/// Deal audit tasks drawn per epoch, after the history tasks (ADR 0014).
+pub const DEAL_AUDIT_TASKS: u32 = 16;
 
 /// Auditors per epoch, drawn from the committee.
 pub const AUDIT_PANEL: u32 = 16;

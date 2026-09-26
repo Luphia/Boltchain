@@ -34,12 +34,40 @@ pub struct Fork {
 /// Chain id of the public testnet.
 pub const TESTNET_CHAIN_ID: u64 = 8018;
 
+/// ADR 0014: `SwarmStorage` (paid user storage, deal audits) replaces `HistoryRegistry` at the
+/// same address. Part of the genesis rules of every chain except the public testnet, which
+/// started with `HistoryRegistry` and switches at its `swarm` fork.
+pub const SWARM: &str = "swarm";
+
+/// Init code of `HistoryRegistry` as deployed by the public testnet's genesis (2026-09-26).
+/// Pinned: the testnet genesis hash depends on it.
+pub const TESTNET_GENESIS_HISTORY_REGISTRY: &[u8] =
+    include_bytes!("../../../contracts/forks/8018-genesis/HistoryRegistry.initcode");
+
+/// Runtime code of `SwarmStorage` installed by the testnet's `swarm` fork. Pinned (never rebuilt):
+/// a node replaying the fork block must install exactly these bytes.
+pub const TESTNET_SWARM_STORAGE: &[u8] =
+    include_bytes!("../../../contracts/forks/8018-swarm/SwarmStorage.bin");
+
+/// Activation of the testnet's `swarm` fork: the first block of an epoch (600-block epochs).
+pub const TESTNET_SWARM_ACTIVATION: u64 = 2_401;
+
+const TESTNET_FORKS: &[Fork] = &[Fork {
+    name: SWARM,
+    activation: TESTNET_SWARM_ACTIVATION,
+    changes: &[IrregularChange {
+        address: alloy_primitives::address!("0xB017000000000000000000000000000000000005"),
+        code: Some(TESTNET_SWARM_STORAGE),
+        storage: &[],
+    }],
+}];
+
 /// Hard forks of a chain, in activation order.
 pub fn forks(chain_id: u64) -> &'static [Fork] {
-    // No chain has forked yet: the public testnet restarted with ADR 0012's rules in its genesis
-    // (the `compute` fork it ran at block 6001 is gone with the old chain).
-    let _ = chain_id;
-    &[]
+    match chain_id {
+        TESTNET_CHAIN_ID => TESTNET_FORKS,
+        _ => &[],
+    }
 }
 
 /// Whether the rules named `feature` apply at block `number`: from its fork's activation on a

@@ -38,6 +38,18 @@ pub struct RpcContext {
     /// When set (on non-producing nodes), `eth_sendRawTransaction` hands transactions to this
     /// forwarder instead of the local pool.
     pub forwarder: Option<Arc<dyn TxForwarder>>,
+    /// Block hosting for SwarmStorage deals (ADR 0014): `bolt_hostBlocks` / `bolt_getBlocks`.
+    /// `None`: the methods answer with an error (the node was started without `--rpc-storage`).
+    pub host: Option<Arc<dyn BlockHost>>,
+}
+
+/// Stores and fetches IPFS blocks for a user's SwarmStorage deals (ADR 0014).
+pub trait BlockHost: Send + Sync + std::fmt::Debug + 'static {
+    /// Stores `blocks` (each checked against its CID) and announces deal index `root` to storage
+    /// providers.
+    fn host(&self, root: String, blocks: Vec<(String, Vec<u8>)>) -> Result<(), String>;
+    /// Reads blocks, fetching missing ones from the network (from deal `deal`'s providers first).
+    fn fetch(&self, cids: Vec<String>, deal: Option<u64>) -> Result<Vec<Vec<u8>>, String>;
 }
 
 /// Forwards raw transactions to the block producer.
@@ -233,6 +245,25 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         }
         let r = c.chain.store().reader().map_err(internal)?;
         c.pool.add_raw(&raw, &HeadState(&r)).map_err(|e| err(-32000, e.to_string()))
+    });
+
+    method!("bolt_hostBlocks", |p, c| -> RpcResult<bool> {
+        let (root, blocks): (String, Vec<(String, Bytes)>) = p.parse()?;
+        let h =
+            c.host.as_ref().ok_or_else(|| err(-32601, "block hosting is off (--rpc-storage)"))?;
+        h.host(root, blocks.into_iter().map(|(c, b)| (c, b.to_vec())).collect())
+            .map_err(|e| err(-32000, e))?;
+        Ok(true)
+    });
+    method!("bolt_getBlocks", |p, c| -> RpcResult<Vec<Bytes>> {
+        let (cids, deal): (Vec<String>, Option<u64>) = p.parse()?;
+        let h =
+            c.host.as_ref().ok_or_else(|| err(-32601, "block hosting is off (--rpc-storage)"))?;
+        if cids.len() > 256 {
+            return Err(err(-32602, "at most 256 blocks per call"));
+        }
+        let got = h.fetch(cids, deal).map_err(|e| err(-32000, e))?;
+        Ok(got.into_iter().map(Bytes::from).collect())
     });
 
     method!("eth_getBlockByNumber", |p, c| -> RpcResult<Option<serde_json::Value>> {

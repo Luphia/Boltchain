@@ -23,8 +23,8 @@ fn register(evm: &mut Evm, who: &PrivateKeySigner, peer: &[u8]) -> u32 {
     let deadline = U256::from(evm.timestamp + 3600);
     let peer = Bytes::copy_from_slice(peer);
     let digest: B256 = evm.view(
-        HISTORY,
-        IHistoryRegistry::registrationDigestCall {
+        SWARM,
+        ISwarmStorage::registrationDigestCall {
             account: who.address(),
             peerId: peer.clone(),
             deadline,
@@ -33,22 +33,22 @@ fn register(evm: &mut Evm, who: &PrivateKeySigner, peer: &[u8]) -> u32 {
     let sig = Bytes::from(who.sign_hash_sync(&digest).unwrap().as_bytes().to_vec());
     let relayer = Address::repeat_byte(0xa1);
     evm.fund(relayer, bolt(1));
-    let call = IHistoryRegistry::registerStorageForCall {
+    let call = ISwarmStorage::registerStorageForCall {
         account: who.address(),
         peerId: peer,
         deadline,
         sig,
     };
-    let id = evm.call(relayer, HISTORY, U256::ZERO, call.clone());
-    assert!(!evm.try_call(relayer, HISTORY, U256::ZERO, call), "a signature registers once");
+    let id = evm.call(relayer, SWARM, U256::ZERO, call.clone());
+    assert!(!evm.try_call(relayer, SWARM, U256::ZERO, call), "a signature registers once");
     id
 }
 
 /// One audit task on `provider` in `epoch`, decided `ok`.
 fn audit(evm: &mut Evm, epoch: u64, provider: u32, ok: bool) {
     evm.system(
-        HISTORY,
-        IHistoryRegistry::beginAuditsCall {
+        SWARM,
+        ISwarmStorage::beginAuditsCall {
             epoch,
             panel: vec![1],
             providers: vec![provider],
@@ -56,7 +56,7 @@ fn audit(evm: &mut Evm, epoch: u64, provider: u32, ok: bool) {
             heights: vec![1],
         },
     );
-    assert!(evm.system(HISTORY, IHistoryRegistry::recordAuditCall { epoch, task: 0, ok }));
+    assert!(evm.system(SWARM, ISwarmStorage::recordAuditCall { epoch, task: 0, ok }));
 }
 
 #[test]
@@ -66,13 +66,10 @@ fn a_provider_without_bolt_registers_earns_and_builds_a_bond() {
     assert_eq!(evm.balance(who.address()), U256::ZERO);
     let id = register(&mut evm, &who, b"peer-1");
     assert_eq!(id, BASE);
-    assert_eq!(evm.view(HISTORY, IHistoryRegistry::activeStorageProvidersCall {}), vec![BASE]);
+    assert_eq!(evm.view(SWARM, ISwarmStorage::activeStorageProvidersCall {}), vec![BASE]);
+    assert_eq!(evm.view(SWARM, ISwarmStorage::peerOfCall { id }), Bytes::from_static(b"peer-1"));
     assert_eq!(
-        evm.view(HISTORY, IHistoryRegistry::peerOfCall { id }),
-        Bytes::from_static(b"peer-1")
-    );
-    assert_eq!(
-        evm.view(HISTORY, IHistoryRegistry::storageIdsOfCall { account: who.address() }),
+        evm.view(SWARM, ISwarmStorage::storageIdsOfCall { account: who.address() }),
         vec![id]
     );
 
@@ -88,7 +85,7 @@ fn a_provider_without_bolt_registers_earns_and_builds_a_bond() {
 
     // Anyone claims for it: 20% goes to the bond, capped at 64 BOLT; the rest to the account.
     evm.call(Address::repeat_byte(0xa1), REWARDS, U256::ZERO, IRewardDistributor::claimCall { id });
-    let p = evm.view(HISTORY, IHistoryRegistry::storageProviderCall { id });
+    let p = evm.view(SWARM, ISwarmStorage::storageProviderCall { id });
     assert_eq!(p.bond, bolt(64));
     assert!(p.active);
     assert_eq!(evm.balance(who.address()), emission - bolt(64));
@@ -103,26 +100,26 @@ fn a_failed_audit_burns_part_of_the_bond_and_deactivates() {
     evm.fund(REWARDS, bolt(100));
     evm.system(REWARDS, IRewardDistributor::settleStorageCall { epoch: 5, emission: bolt(100) });
     evm.call(who.address(), REWARDS, U256::ZERO, IRewardDistributor::claimCall { id });
-    assert_eq!(evm.view(HISTORY, IHistoryRegistry::storageProviderCall { id }).bond, bolt(20));
+    assert_eq!(evm.view(SWARM, ISwarmStorage::storageProviderCall { id }).bond, bolt(20));
 
     let supply = evm.view(REWARDS, IRewardDistributor::supplyCall {});
     audit(&mut evm, 6, id, false);
-    let p = evm.view(HISTORY, IHistoryRegistry::storageProviderCall { id });
+    let p = evm.view(SWARM, ISwarmStorage::storageProviderCall { id });
     assert_eq!(p.bond, bolt(18), "10% burned");
     assert!(!p.active, "no more assignments");
-    assert!(evm.view(HISTORY, IHistoryRegistry::activeStorageProvidersCall {}).is_empty());
+    assert!(evm.view(SWARM, ISwarmStorage::activeStorageProvidersCall {}).is_empty());
     assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), supply - bolt(2));
 
     // The rest of the bond comes back after the exit delay.
     let before = evm.balance(who.address());
     assert!(!evm.try_call(
         who.address(),
-        HISTORY,
+        SWARM,
         U256::ZERO,
-        IHistoryRegistry::releaseStorageBondCall { id }
+        ISwarmStorage::releaseStorageBondCall { id }
     ));
     evm.timestamp += 14 * 86_400;
-    evm.call(who.address(), HISTORY, U256::ZERO, IHistoryRegistry::releaseStorageBondCall { id });
+    evm.call(who.address(), SWARM, U256::ZERO, ISwarmStorage::releaseStorageBondCall { id });
     assert_eq!(evm.balance(who.address()) - before, bolt(18));
 }
 
@@ -134,12 +131,12 @@ fn only_the_account_moves_or_exits_its_provider() {
     let other = Address::repeat_byte(0x77);
     evm.fund(other, bolt(1));
     evm.fund(who.address(), bolt(1));
-    let set = IHistoryRegistry::setStoragePeerCall { id, peerId: Bytes::from_static(b"peer-2") };
-    assert!(!evm.try_call(other, HISTORY, U256::ZERO, set.clone()));
-    evm.call(who.address(), HISTORY, U256::ZERO, set);
-    assert!(!evm.try_call(other, HISTORY, U256::ZERO, IHistoryRegistry::exitStorageCall { id }));
-    evm.call(who.address(), HISTORY, U256::ZERO, IHistoryRegistry::exitStorageCall { id });
-    assert!(!evm.view(HISTORY, IHistoryRegistry::storageProviderCall { id }).active);
+    let set = ISwarmStorage::setStoragePeerCall { id, peerId: Bytes::from_static(b"peer-2") };
+    assert!(!evm.try_call(other, SWARM, U256::ZERO, set.clone()));
+    evm.call(who.address(), SWARM, U256::ZERO, set);
+    assert!(!evm.try_call(other, SWARM, U256::ZERO, ISwarmStorage::exitStorageCall { id }));
+    evm.call(who.address(), SWARM, U256::ZERO, ISwarmStorage::exitStorageCall { id });
+    assert!(!evm.view(SWARM, ISwarmStorage::storageProviderCall { id }).active);
     // Earnings enter only through RewardDistributor (which keeps the bond accounting honest).
-    assert!(!evm.try_call(other, HISTORY, bolt(1), IHistoryRegistry::depositEarningsCall { id }));
+    assert!(!evm.try_call(other, SWARM, bolt(1), ISwarmStorage::depositEarningsCall { id }));
 }

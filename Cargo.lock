@@ -1695,6 +1695,7 @@ dependencies = [
  "bolt-sync",
  "bolt-system",
  "bolt-txpool",
+ "bolt-vault",
  "clap",
  "k256",
  "libp2p",

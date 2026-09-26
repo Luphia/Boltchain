@@ -1,23 +1,25 @@
-//! Storage duties of a node (ADR 0009): state snapshots and their announcements, checkpoint sync
-//! (start from a snapshot instead of genesis), pruning with history shards, and storage audits.
+//! Storage duties of a node (ADR 0009, 0014): state snapshots and their announcements, checkpoint
+//! sync (start from a snapshot instead of genesis), pruning with history shards, SwarmStorage
+//! deals (hosting a user's blocks, keeping the deals assigned to this node) and storage audits.
 //!
 //! Messages travel on the `/bolt/<chain>/storage` gossip topic: a tag byte, then the payload
-//! (a dag-cbor [`SnapshotAnnounce`], or an encoded [`AuditVote`]).
+//! (a dag-cbor [`SnapshotAnnounce`] or [`DealAnnounce`], or an encoded [`AuditVote`]).
 
 use alloy_consensus::Header;
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{B256, U256, keccak256};
 use anyhow::{Context, Result, bail};
 use bolt_chain::Chain;
 use bolt_consensus::{AuditCert, AuditVote};
 use bolt_ipld::{
     Cid, Envelope,
+    deal::DealIndex,
     history::{EpochIndex, SnapshotRoot, decode_group},
 };
 use bolt_net::{NetEvent, NetHandle};
 use bolt_primitives::bls::{BlsPublicKey, BlsSecretKey};
 use bolt_store::StateView;
 use bolt_system::{abi::*, addresses::*, queries};
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -32,6 +34,12 @@ use tokio::sync::mpsc;
 
 const TAG_SNAPSHOT: u8 = 1;
 const TAG_AUDIT: u8 = 2;
+const TAG_DEAL: u8 = 3;
+
+/// How often a node announces the deal data it can serve.
+pub const DEAL_ANNOUNCE_EVERY: Duration = Duration::from_secs(20);
+/// How long a node keeps announcing blocks it hosts for a user (until providers took them).
+pub const HOSTED_FOR: Duration = Duration::from_secs(3 * 86_400);
 
 /// How often a node re-announces its latest final snapshot.
 pub const ANNOUNCE_EVERY: Duration = Duration::from_secs(5);
@@ -51,6 +59,18 @@ pub struct SnapshotAnnounce {
     pub at: u64,
 }
 
+/// A node serves the blocks of deal index `root` (ADR 0014): providers that must fetch a deal
+/// dial one of `addrs` (which end in `/p2p/<peer id>`). A hint only: blocks are verified by CID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DealAnnounce {
+    /// Deal index root.
+    pub root: Cid,
+    /// Sender's listen addresses.
+    pub addrs: Vec<String>,
+    /// Sender's clock (unix ms), as in [`SnapshotAnnounce`].
+    pub at: u64,
+}
+
 /// A storage-topic message.
 #[derive(Debug, Clone)]
 pub enum StorageMsg {
@@ -58,6 +78,8 @@ pub enum StorageMsg {
     Snapshot(SnapshotAnnounce),
     /// Audit vote.
     Audit(AuditVote),
+    /// Deal data announcement.
+    Deal(DealAnnounce),
 }
 
 impl StorageMsg {
@@ -74,6 +96,11 @@ impl StorageMsg {
                 v.extend(vote.encode());
                 v
             }
+            StorageMsg::Deal(a) => {
+                let mut v = vec![TAG_DEAL];
+                v.extend(serde_ipld_dagcbor::to_vec(a).expect("encodes"));
+                v
+            }
         }
     }
 
@@ -83,6 +110,7 @@ impl StorageMsg {
         match *tag {
             TAG_SNAPSHOT => serde_ipld_dagcbor::from_slice(rest).ok().map(StorageMsg::Snapshot),
             TAG_AUDIT => AuditVote::decode(rest).map(StorageMsg::Audit),
+            TAG_DEAL => serde_ipld_dagcbor::from_slice(rest).ok().map(StorageMsg::Deal),
             _ => None,
         }
     }
@@ -127,6 +155,8 @@ pub struct StorageConfig {
     /// Accounts whose storage-provider ids (without stake, ADR 0012) this node serves: it keeps
     /// the epochs assigned to them instead of pruning them.
     pub storage_accounts: Vec<alloy_primitives::Address>,
+    /// File listing the deal roots this node hosts for its user (kept across restarts).
+    pub hosted_file: Option<std::path::PathBuf>,
 }
 
 impl Default for StorageConfig {
@@ -137,6 +167,7 @@ impl Default for StorageConfig {
             keys: vec![],
             audit_timeout: Duration::from_secs(10),
             storage_accounts: vec![],
+            hosted_file: None,
         }
     }
 }
@@ -155,6 +186,14 @@ struct State {
     pruned: HashSet<u64>,
     /// Panel keys by epoch.
     panels: HashMap<u64, Vec<BlsPublicKey>>,
+    /// Deal roots hosted for this node's user, with the time they were hosted (unix s).
+    hosted: BTreeMap<Cid, u64>,
+    /// Announced sources of deal data: root -> (peer, addresses).
+    sources: HashMap<Cid, (PeerId, Vec<Multiaddr>)>,
+    /// Deals this node keeps completely: id -> root.
+    kept: HashMap<u64, Cid>,
+    /// When deal data was last announced.
+    deal_announced: Option<Instant>,
 }
 
 /// The storage service.
@@ -163,13 +202,14 @@ pub struct Storage {
     net: NetHandle,
     cfg: StorageConfig,
     state: Mutex<State>,
-    /// Background jobs running: snapshot, audit, prune.
-    busy: [AtomicBool; 3],
+    /// Background jobs running: snapshot, audit, prune, deals.
+    busy: [AtomicBool; 4],
 }
 
 const SNAPSHOT_JOB: usize = 0;
 const AUDIT_JOB: usize = 1;
 const PRUNE_JOB: usize = 2;
+const DEAL_JOB: usize = 3;
 
 impl std::fmt::Debug for Storage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -189,13 +229,56 @@ fn view<C: alloy_sol_types::SolCall>(
 impl Storage {
     /// Creates the service.
     pub fn new(chain: Arc<Chain>, net: NetHandle, cfg: StorageConfig) -> Arc<Self> {
-        Arc::new(Self {
-            chain,
-            net,
-            cfg,
-            state: Mutex::new(State::default()),
-            busy: Default::default(),
-        })
+        let mut state = State::default();
+        if let Some(f) = &cfg.hosted_file
+            && let Ok(text) = std::fs::read_to_string(f)
+        {
+            for line in text.lines() {
+                let mut it = line.split_whitespace();
+                if let (Some(c), Some(t)) = (it.next(), it.next())
+                    && let (Ok(c), Ok(t)) = (c.parse::<Cid>(), t.parse::<u64>())
+                {
+                    state.hosted.insert(c, t);
+                }
+            }
+        }
+        Arc::new(Self { chain, net, cfg, state: Mutex::new(state), busy: Default::default() })
+    }
+
+    /// Stores a user's blocks (each checked against its CID) and announces deal index `root` to
+    /// storage providers for [`HOSTED_FOR`], so they can fetch the deal (ADR 0014).
+    pub fn host(&self, root: Cid, blocks: &[(Cid, Vec<u8>)]) -> Result<()> {
+        for (c, b) in blocks {
+            let got = bolt_ipld::sha256_cid(c.codec(), b);
+            if got != *c {
+                bail!("block does not match {c}");
+            }
+        }
+        let w = self.chain.store().writer()?;
+        for (c, b) in blocks {
+            w.put_ipld(c, b)?;
+        }
+        w.commit()?;
+        let now = unix_secs();
+        let mut st = self.state.lock();
+        st.hosted.insert(root, now);
+        st.hosted.retain(|_, t| *t + HOSTED_FOR.as_secs() > now);
+        st.deal_announced = None;
+        if let Some(f) = &self.cfg.hosted_file {
+            let text: String = st.hosted.iter().map(|(c, t)| format!("{c} {t}\n")).collect();
+            std::fs::write(f, text)?;
+        }
+        Ok(())
+    }
+
+    /// Reads blocks locally, fetching the missing ones from the network: first from the providers
+    /// of deal `deal` (if given) and announced sources of `root`.
+    pub async fn fetch(&self, cids: &[Cid], deal: Option<u64>) -> Result<HashMap<Cid, Vec<u8>>> {
+        let mut peers = Vec::new();
+        if let Some(id) = deal {
+            peers = self.deal_peers(id, None).await?;
+        }
+        get_or_fetch(&self.chain, &self.net, cids, &peers).await
     }
 
     /// Snapshot announcements seen so far (newest last).
@@ -208,6 +291,7 @@ impl Storage {
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         let mut last_announce = Instant::now() - ANNOUNCE_EVERY;
         let mut last_prune = Instant::now();
+        let mut last_deals = Instant::now() - Duration::from_secs(2);
         loop {
             tokio::select! {
                 m = rx.recv() => match m {
@@ -241,6 +325,14 @@ impl Storage {
                         self.spawn_guarded(PRUNE_JOB, |s| async move {
                             if let Err(e) = s.prune_round().await {
                                 tracing::debug!("prune round: {e:#}");
+                            }
+                        });
+                    }
+                    if last_deals.elapsed() >= Duration::from_secs(2) {
+                        last_deals = Instant::now();
+                        self.spawn_guarded(DEAL_JOB, |s| async move {
+                            if let Err(e) = s.deal_round().await {
+                                tracing::debug!("deal round: {e:#}");
                             }
                         });
                     }
@@ -302,6 +394,23 @@ impl Storage {
                     tracing::debug!("audit vote: {e:#}");
                 }
             }
+            Some(StorageMsg::Deal(a)) => {
+                let addrs: Vec<Multiaddr> =
+                    a.addrs.iter().filter_map(|s| s.parse().ok()).take(8).collect();
+                let peer = addrs.iter().find_map(|m| {
+                    m.iter().find_map(|p| match p {
+                        libp2p::multiaddr::Protocol::P2p(id) => Some(id),
+                        _ => None,
+                    })
+                });
+                if let Some(peer) = peer {
+                    let mut st = self.state.lock();
+                    if st.sources.len() >= 4096 {
+                        st.sources.clear();
+                    }
+                    st.sources.insert(a.root, (peer, addrs));
+                }
+            }
             None => tracing::debug!(%via, "undecodable storage message"),
         }
     }
@@ -310,7 +419,7 @@ impl Storage {
         if let Some(k) = self.state.lock().panels.get(&epoch) {
             return Ok(k.clone());
         }
-        let a = view(&self.chain, HISTORY, IHistoryRegistry::auditsCall { epoch })?;
+        let a = view(&self.chain, SWARM, ISwarmStorage::auditsCall { epoch })?;
         if a.panel.is_empty() {
             return Ok(vec![]);
         }
@@ -372,13 +481,10 @@ impl Storage {
             }
         }
         for account in &self.cfg.storage_accounts {
-            let ids = view(
-                &self.chain,
-                HISTORY,
-                IHistoryRegistry::storageIdsOfCall { account: *account },
-            )?;
+            let ids =
+                view(&self.chain, SWARM, ISwarmStorage::storageIdsOfCall { account: *account })?;
             for id in ids {
-                let p = view(&self.chain, HISTORY, IHistoryRegistry::storageProviderCall { id })?;
+                let p = view(&self.chain, SWARM, ISwarmStorage::storageProviderCall { id })?;
                 if p.active {
                     out.insert(id, usize::MAX);
                 }
@@ -392,10 +498,13 @@ impl Storage {
     async fn audit_round(&self) -> Result<()> {
         let head = self.chain.head()?.number;
         let epoch = self.chain.rules().epoch_of(head + 1);
-        let a = view(&self.chain, HISTORY, IHistoryRegistry::auditsCall { epoch })?;
+        let a = view(&self.chain, SWARM, ISwarmStorage::auditsCall { epoch })?;
         if a.panel.is_empty() {
             return Ok(());
         }
+        // Before SwarmStorage (testnet `swarm` fork) every task is a history task.
+        let kinds =
+            view(&self.chain, SWARM, ISwarmStorage::taskKindsCall { epoch }).unwrap_or_default();
         let mine = self.my_ids()?;
         let members: Vec<(u16, usize)> = a
             .panel
@@ -425,7 +534,11 @@ impl Storage {
             if todo.is_empty() {
                 continue;
             }
-            let passed = self.check_provider(a.providers[task], a.heights[task], &mine).await;
+            let passed = if kinds.get(task) == Some(&1) {
+                self.check_deal(a.providers[task], a.targets[task], a.heights[task], &mine).await
+            } else {
+                self.check_provider(a.providers[task], a.heights[task], &mine).await
+            };
             tracing::debug!(epoch, task, provider = a.providers[task], passed, "audited");
             for (m, k) in todo {
                 let vote = AuditVote::sign(&self.cfg.keys[k], chain_id, epoch, task16, passed, m);
@@ -458,12 +571,196 @@ impl Storage {
                 .and_then(|r| r.ipld(&target).ok().flatten())
                 .is_some();
         }
-        let Ok(peer) = view(&self.chain, HISTORY, IHistoryRegistry::peerOfCall { id: provider })
-        else {
+        let Ok(peer) = view(&self.chain, SWARM, ISwarmStorage::peerOfCall { id: provider }) else {
             return false;
         };
         let Ok(peer) = PeerId::from_bytes(&peer) else { return false };
         self.net.probe(target, peer, self.cfg.audit_timeout).await.is_ok()
+    }
+
+    /// Whether `provider` serves block `index` of deal `id`: the deal index (root and group) is
+    /// fetched from the provider first, then from anyone; the block itself only from the
+    /// provider's registered peer. A position past the index's end is the owner's fault: pass.
+    async fn check_deal(
+        &self,
+        provider: u32,
+        id: u64,
+        index: u64,
+        mine: &HashMap<u32, usize>,
+    ) -> bool {
+        let Ok(d) = view(&self.chain, SWARM, ISwarmStorage::dealCall { id: U256::from(id) }) else {
+            return false;
+        };
+        let Ok(root) = Cid::try_from(d.root.as_ref()) else { return true };
+        let peer = view(&self.chain, SWARM, ISwarmStorage::peerOfCall { id: provider })
+            .ok()
+            .and_then(|p| PeerId::from_bytes(&p).ok());
+        let local = mine.contains_key(&provider);
+        let hint: Vec<PeerId> = peer.into_iter().collect();
+        let leaf = async {
+            let got = get_or_fetch(&self.chain, &self.net, &[root], &hint).await.ok()?;
+            let idx = DealIndex::decode(&got[&root]).ok()?;
+            let Some((group, pos)) = idx.locate(index) else { return Some(None) };
+            let got = get_or_fetch(&self.chain, &self.net, &[group], &hint).await.ok()?;
+            let list = bolt_ipld::deal::decode_group(&got[&group]).ok()?;
+            list.get(pos).copied().map(Some)
+        }
+        .await;
+        let leaf = match leaf {
+            None => return false, // index missing or malformed: the provider keeps it too
+            Some(None) => return true, // past the end of the index
+            Some(Some(c)) => c,
+        };
+        if local {
+            return self
+                .chain
+                .store()
+                .reader()
+                .ok()
+                .and_then(|r| r.ipld(&leaf).ok().flatten())
+                .is_some();
+        }
+        let Some(peer) = peer else { return false };
+        self.net.probe(leaf, peer, self.cfg.audit_timeout).await.is_ok()
+    }
+
+    /// Deals (ADR 0014): announces the deal data this node can serve (hosted for its user, or
+    /// kept for a deal with a copy still in its first epoch), and fetches the deals assigned to
+    /// its provider ids.
+    async fn deal_round(&self) -> Result<()> {
+        let Ok(count) = view(&self.chain, SWARM, ISwarmStorage::dealCountCall {}) else {
+            return Ok(()); // before SwarmStorage
+        };
+        let epoch = self.chain.rules().epoch_of(self.chain.head()?.number + 1);
+        self.announce_deals(epoch).await;
+        if count.is_zero() {
+            return Ok(());
+        }
+        let mine = self.my_ids()?;
+        let mut seen = HashSet::new();
+        for id in mine.keys() {
+            let deals = view(&self.chain, SWARM, ISwarmStorage::dealsOfCall { id: *id })?;
+            for d in deals {
+                let d = d.to::<u64>();
+                if !seen.insert(d) || self.state.lock().kept.contains_key(&d) {
+                    continue;
+                }
+                let slots =
+                    view(&self.chain, SWARM, ISwarmStorage::dealSlotsCall { id: U256::from(d) })?;
+                let holds =
+                    (0..slots.providers.len()).any(|k| slots.open[k] && slots.providers[k] == *id);
+                let info = view(&self.chain, SWARM, ISwarmStorage::dealCall { id: U256::from(d) })?;
+                if !holds || info.closed || epoch >= info.endEpoch {
+                    continue;
+                }
+                let Ok(root) = Cid::try_from(info.root.as_ref()) else { continue };
+                let peers = self.deal_peers(d, Some(root)).await?;
+                match self.ensure_deal(root, &peers).await {
+                    Ok(n) => {
+                        tracing::info!(deal = d, blocks = n, "keeping deal");
+                        self.state.lock().kept.insert(d, root);
+                    }
+                    Err(e) => tracing::debug!(deal = d, "deal data not complete yet: {e:#}"),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Peers to fetch deal `id` from: the announced source of its root (dialed), then the other
+    /// providers holding it.
+    async fn deal_peers(&self, id: u64, root: Option<Cid>) -> Result<Vec<PeerId>> {
+        let mut peers = Vec::new();
+        let root = match root {
+            Some(r) => Some(r),
+            None => view(&self.chain, SWARM, ISwarmStorage::dealCall { id: U256::from(id) })
+                .ok()
+                .and_then(|d| Cid::try_from(d.root.as_ref()).ok()),
+        };
+        if let Some(root) = root {
+            let src = self.state.lock().sources.get(&root).cloned();
+            if let Some((peer, addrs)) = src {
+                if !self.net.peers().await.contains(&peer) {
+                    for a in addrs {
+                        let _ = self.net.dial(a).await;
+                    }
+                }
+                peers.push(peer);
+            }
+        }
+        let slots = view(&self.chain, SWARM, ISwarmStorage::dealSlotsCall { id: U256::from(id) })?;
+        for (k, p) in slots.providers.iter().enumerate() {
+            if !slots.open[k] {
+                continue;
+            }
+            let peer = view(&self.chain, SWARM, ISwarmStorage::peerOfCall { id: *p })?;
+            if let Ok(peer) = PeerId::from_bytes(&peer)
+                && peer != self.net.peer_id()
+                && !peers.contains(&peer)
+            {
+                peers.push(peer);
+            }
+        }
+        Ok(peers)
+    }
+
+    /// Makes sure every block of a deal (index and listed blocks) is in the local blockstore;
+    /// returns the number of listed blocks.
+    async fn ensure_deal(&self, root: Cid, peers: &[PeerId]) -> Result<u64> {
+        let got = get_or_fetch(&self.chain, &self.net, &[root], peers).await?;
+        let idx = DealIndex::decode(&got[&root])?;
+        let groups = get_or_fetch(&self.chain, &self.net, &idx.groups, peers).await?;
+        let mut leaves = Vec::new();
+        for g in &idx.groups {
+            leaves.extend(bolt_ipld::deal::decode_group(&groups[g])?);
+        }
+        if leaves.len() as u64 != idx.count {
+            bail!("deal index lists {} blocks, says {}", leaves.len(), idx.count);
+        }
+        let got = get_or_fetch(&self.chain, &self.net, &leaves, peers).await?;
+        if got.len() < leaves.iter().collect::<HashSet<_>>().len() {
+            bail!("deal incomplete");
+        }
+        Ok(idx.count)
+    }
+
+    async fn announce_deals(&self, epoch: u64) {
+        let (roots, kept) = {
+            let mut st = self.state.lock();
+            if st.deal_announced.is_some_and(|t| t.elapsed() < DEAL_ANNOUNCE_EVERY) {
+                return;
+            }
+            st.deal_announced = Some(Instant::now());
+            let now = unix_secs();
+            let hosted: Vec<Cid> = st
+                .hosted
+                .iter()
+                .filter(|(_, t)| **t + HOSTED_FOR.as_secs() > now)
+                .map(|(c, _)| *c)
+                .collect();
+            (hosted, st.kept.clone())
+        };
+        let mut roots = roots;
+        for (id, root) in kept {
+            // Only while a copy is new (in its first epoch) and may still need the data.
+            if let Ok(s) =
+                view(&self.chain, SWARM, ISwarmStorage::dealSlotsCall { id: U256::from(id) })
+                && (0..s.providers.len()).any(|k| s.open[k] && s.since[k] + 1 >= epoch)
+                && !roots.contains(&root)
+            {
+                roots.push(root);
+            }
+        }
+        if roots.is_empty() {
+            return;
+        }
+        let addrs: Vec<String> =
+            self.net.listen_addrs().await.iter().map(|a| a.to_string()).collect();
+        let at = unix_secs() * 1000;
+        for root in roots {
+            let a = DealAnnounce { root, addrs: addrs.clone(), at };
+            let _ = self.net.publish_storage(StorageMsg::Deal(a).encode()).await;
+        }
     }
 
     /// Prunes epochs older than the recent window that no local validator keeps, and completes
@@ -478,10 +775,10 @@ impl Storage {
         let mut validators =
             view(&self.chain, STAKING, IStakingManager::snapshotCall { minAge: 0 })?.ids;
         validators.sort_unstable();
-        let storage = view(&self.chain, HISTORY, IHistoryRegistry::activeStorageProvidersCall {})?;
+        let storage = view(&self.chain, SWARM, ISwarmStorage::activeStorageProvidersCall {})?;
         let mine = self.my_ids()?;
         for e in 0..=last_old {
-            let idx = view(&self.chain, HISTORY, IHistoryRegistry::epochIndexCall { epoch: e })?;
+            let idx = view(&self.chain, SWARM, ISwarmStorage::epochIndexCall { epoch: e })?;
             if idx.is_empty() {
                 continue;
             }
@@ -529,6 +826,43 @@ impl Storage {
     async fn get_or_fetch(&self, cids: &[Cid]) -> Result<HashMap<Cid, Vec<u8>>> {
         get_or_fetch(&self.chain, &self.net, cids, &[]).await
     }
+}
+
+/// JSON-RPC block hosting (`--rpc-storage`) backed by the storage service.
+#[derive(Debug)]
+pub struct RpcHost {
+    /// Storage service.
+    pub storage: Arc<Storage>,
+    /// Runtime for the network fetches (RPC handlers run on blocking threads).
+    pub rt: tokio::runtime::Handle,
+}
+
+impl bolt_rpc::BlockHost for RpcHost {
+    fn host(&self, root: String, blocks: Vec<(String, Vec<u8>)>) -> Result<(), String> {
+        let root: Cid = root.parse().map_err(|e| format!("root: {e}"))?;
+        let blocks = blocks
+            .into_iter()
+            .map(|(c, b)| c.parse::<Cid>().map(|c| (c, b)).map_err(|e| format!("cid: {e}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.storage.host(root, &blocks).map_err(|e| format!("{e:#}"))
+    }
+
+    fn fetch(&self, cids: Vec<String>, deal: Option<u64>) -> Result<Vec<Vec<u8>>, String> {
+        let cids = cids
+            .iter()
+            .map(|c| c.parse::<Cid>().map_err(|e| format!("cid: {e}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let got =
+            self.rt.block_on(self.storage.fetch(&cids, deal)).map_err(|e| format!("{e:#}"))?;
+        cids.iter().map(|c| got.get(c).cloned().ok_or_else(|| format!("{c} not found"))).collect()
+    }
+}
+
+fn unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Reads blocks from the local blockstore, fetching the missing ones from `peers` (then any

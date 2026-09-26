@@ -19,7 +19,7 @@ fn chain_with_history() -> (tempfile::TempDir, Chain, Genesis) {
 
 /// Votes of the whole panel of `epoch` on task `task`.
 fn certify(chain: &Chain, epoch: u64, task: u16, passed: bool) -> Vec<u8> {
-    let a = view(chain, HISTORY, IHistoryRegistry::auditsCall { epoch });
+    let a = view(chain, SWARM, ISwarmStorage::auditsCall { epoch });
     let votes: Vec<AuditVote> = a
         .panel
         .iter()
@@ -36,8 +36,8 @@ fn epoch_indexes_audits_and_storage_rewards() {
     while chain.head().unwrap().number < L + 1 {
         produce(&chain, vec![]);
     }
-    assert_eq!(view(&chain, HISTORY, IHistoryRegistry::indexedEpochsCall {}), 1);
-    let cid = view(&chain, HISTORY, IHistoryRegistry::epochIndexCall { epoch: 0 });
+    assert_eq!(view(&chain, SWARM, ISwarmStorage::indexedEpochsCall {}), 1);
+    let cid = view(&chain, SWARM, ISwarmStorage::epochIndexCall { epoch: 0 });
     let cid = bolt_ipld::Cid::try_from(cid.as_ref()).unwrap();
     let r = chain.store().reader().unwrap();
     let idx = bolt_ipld::history::EpochIndex::decode(&r.ipld(&cid).unwrap().unwrap()).unwrap();
@@ -52,7 +52,7 @@ fn epoch_indexes_audits_and_storage_rewards() {
     while chain.head().unwrap().number < 2 * L + 1 {
         produce(&chain, vec![]);
     }
-    let a = view(&chain, HISTORY, IHistoryRegistry::auditsCall { epoch: 2 });
+    let a = view(&chain, SWARM, ISwarmStorage::auditsCall { epoch: 2 });
     assert_eq!(a.providers.len(), 16);
     assert!(a.targets.iter().all(|t| *t == 0));
     assert!(a.heights.iter().all(|h| (1..=L).contains(h)));
@@ -70,7 +70,7 @@ fn epoch_indexes_audits_and_storage_rewards() {
     chain.add_audit_cert(certify(&chain, 2, fail_task, false));
     chain.add_audit_cert(vec![1, 2, 3]); // garbage: a producer just drops it
     let h = produce(&chain, vec![]);
-    let a = view(&chain, HISTORY, IHistoryRegistry::auditsCall { epoch: 2 });
+    let a = view(&chain, SWARM, ISwarmStorage::auditsCall { epoch: 2 });
     assert_eq!(a.states[0], 1, "passed");
     assert_eq!(a.states[fail_task as usize], 2, "failed");
     let v = view(&chain, STAKING, IStakingManager::validatorCall { id: fail_provider });

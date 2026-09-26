@@ -87,7 +87,7 @@ fn label(a: &Address) -> Option<String> {
         STAKING => "StakingManager",
         CONSENSUS => "ConsensusRegistry",
         REWARDS => "RewardDistributor",
-        HISTORY => "HistoryRegistry",
+        SWARM => "SwarmStorage",
         COMPUTE => "ComputeMarket",
         SYSTEM => "System",
         _ => return LABELS.get().and_then(|m| m.get(a).cloned()),
@@ -521,7 +521,7 @@ impl Explorer {
                 .find(|(i, _)| **i == id)
                 .map(|(_, w)| *w)
                 .unwrap_or(0);
-            let peer = self.view(r, HISTORY, IHistoryRegistry::peerOfCall { id })?;
+            let peer = self.view(r, SWARM, ISwarmStorage::peerOfCall { id })?;
             list.push(json!({
                 "id": id,
                 "owner": v.owner,
@@ -546,7 +546,7 @@ impl Explorer {
         }
         let v = self.view(r, STAKING, IStakingManager::validatorCall { id })?;
         let rewards = self.view(r, REWARDS, IRewardDistributor::rewardsCall { id })?;
-        let peer = self.view(r, HISTORY, IHistoryRegistry::peerOfCall { id })?;
+        let peer = self.view(r, SWARM, ISwarmStorage::peerOfCall { id })?;
         let head = r.head().map_err(internal)?.unwrap_or(0);
         let rules = self.chain.rules();
         let cur = rules.epoch_of(head + 1);
@@ -560,12 +560,14 @@ impl Explorer {
             if e > cur {
                 continue;
             }
-            let a = self.view(r, HISTORY, IHistoryRegistry::auditsCall { epoch: e })?;
+            let a = self.view(r, SWARM, ISwarmStorage::auditsCall { epoch: e })?;
+            let kinds =
+                self.view(r, SWARM, ISwarmStorage::taskKindsCall { epoch: e }).unwrap_or_default();
             for (task, p) in a.providers.iter().enumerate() {
                 if *p == id {
                     audits.push(json!({
                         "epoch": e, "task": task, "target": a.targets[task], "height": a.heights[task],
-                        "state": audit_state(a.states[task]),
+                        "state": audit_state(a.states[task]), "kind": task_kind(&kinds, task),
                     }));
                 }
             }
@@ -592,12 +594,14 @@ impl Explorer {
         let last = rules.epoch_end(e);
         let head = r.head().map_err(internal)?.unwrap_or(0);
         let c = self.view(r, CONSENSUS, IConsensusRegistry::committeeCall { epoch: e })?;
-        let idx = self.view(r, HISTORY, IHistoryRegistry::epochIndexCall { epoch: e })?;
-        let a = self.view(r, HISTORY, IHistoryRegistry::auditsCall { epoch: e })?;
+        let idx = self.view(r, SWARM, ISwarmStorage::epochIndexCall { epoch: e })?;
+        let a = self.view(r, SWARM, ISwarmStorage::auditsCall { epoch: e })?;
+        let kinds =
+            self.view(r, SWARM, ISwarmStorage::taskKindsCall { epoch: e }).unwrap_or_default();
         let tasks: Vec<Value> = (0..a.providers.len())
             .map(|i| json!({
                 "task": i, "provider": a.providers[i], "target": a.targets[i], "height": a.heights[i],
-                "state": audit_state(a.states[i]),
+                "state": audit_state(a.states[i]), "kind": task_kind(&kinds, i),
             }))
             .collect();
         let phase = self.chain.phase().map_err(internal)?;
@@ -670,6 +674,12 @@ fn status_name(s: u8) -> &'static str {
         .get(s as usize)
         .copied()
         .unwrap_or("unknown")
+}
+
+/// Audit task kind (ADR 0014): "history" (target = epoch, height = block) or "deal" (target =
+/// deal id, height = block index in the deal).
+fn task_kind(kinds: &[u8], task: usize) -> &'static str {
+    if kinds.get(task) == Some(&1) { "deal" } else { "history" }
 }
 
 fn audit_state(s: u8) -> &'static str {
@@ -811,8 +821,8 @@ fn decode_call(to: Option<Address>, input: &Bytes) -> Option<Value> {
             );
         }
     }
-    if to == HISTORY && sel == IHistoryRegistry::setPeerCall::SELECTOR {
-        let c = IHistoryRegistry::setPeerCall::abi_decode(input).ok()?;
+    if to == SWARM && sel == ISwarmStorage::setPeerCall::SELECTOR {
+        let c = ISwarmStorage::setPeerCall::abi_decode(input).ok()?;
         let peer = libp2p::PeerId::from_bytes(&c.peerId)
             .map(|p| p.to_string())
             .unwrap_or_else(|_| hex::encode_prefixed(&c.peerId));
@@ -952,8 +962,8 @@ mod tests {
     #[test]
     fn decodes_system_and_token_calls() {
         let data =
-            IHistoryRegistry::setPeerCall { id: 4, peerId: Bytes::from(vec![0, 1]) }.abi_encode();
-        let c = decode_call(Some(HISTORY), &data.into()).unwrap();
+            ISwarmStorage::setPeerCall { id: 4, peerId: Bytes::from(vec![0, 1]) }.abi_encode();
+        let c = decode_call(Some(SWARM), &data.into()).unwrap();
         assert_eq!(c["method"], "setPeer");
         let mut t = vec![0xa9, 0x05, 0x9c, 0xbb];
         t.extend([0u8; 12]);

@@ -61,7 +61,7 @@ sol! {
         function previewStorage(uint64 epoch, uint256 emission) external view returns (uint256);
     }
 
-    interface IHistoryRegistry {
+    interface ISwarmStorage {
         function recordEpoch(uint64 epoch, bytes cid) external;
         function epochIndex(uint64 epoch) external view returns (bytes);
         function indexedEpochs() external view returns (uint64);
@@ -87,6 +87,32 @@ sol! {
         function releaseStorageBond(uint32 id) external;
         function nonces(address account) external view returns (uint256);
         function depositEarnings(uint32 id) external payable;
+        function depositBond(uint32 id) external payable;
+        function addDealAudits(uint64 epoch, uint32[] providers, uint64[] dealIds, uint64[] indexes_)
+            external;
+        function taskKinds(uint64 epoch) external view returns (uint8[] kinds);
+        function offerStorage(uint32 id, uint64 capacityMiB, uint128 minPrice) external;
+        function closeOffer(uint32 id) external;
+        function offer(uint32 id) external view returns (uint64 capacityMiB, uint64 usedMiB,
+            uint128 minPrice, bool open, uint256 committed);
+        function offerList() external view returns (uint32[]);
+        function createDeal(bytes root, uint64 blocks, uint64 size, uint8 replicas, uint64 epochs,
+            uint128 price) external payable returns (uint256 id);
+        function extendDeal(uint256 id, uint64 epochs) external payable;
+        function cancelDeal(uint256 id) external;
+        function claim(uint256 id, uint256 slot) external;
+        function closeDeal(uint256 id) external;
+        function repair(uint256 id, uint256 slot) external;
+        function deal(uint256 id) external view returns (address owner, bytes root, uint64 blocks,
+            uint64 size, uint8 replicas, uint64 startEpoch, uint64 endEpoch, uint128 price,
+            uint128 perEpoch, uint256 escrow, bool closed);
+        function dealSlots(uint256 id) external view returns (uint32[] providers, uint64[] since,
+            uint64[] paidThrough, bool[] open);
+        function dealsOf(uint32 id) external view returns (uint256[]);
+        function dealCount() external view returns (uint256);
+        function balanceOf(address account) external view returns (uint256);
+        function withdraw(address to) external;
+        function payout(address account) external;
     }
 
     interface IComputeMarket {
