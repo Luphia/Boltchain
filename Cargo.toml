@@ -25,6 +25,7 @@ bolt-sim = { path = "crates/sim" }
 bolt-chain = { path = "crates/chain" }
 bolt-system = { path = "crates/system" }
 bolt-pow = { path = "crates/pow" }
+bolt-vault = { path = "crates/vault" }
 
 # ethereum
 revm = { version = "43", default-features = false, features = ["std", "secp256k1", "c-kzg", "blst"] }
