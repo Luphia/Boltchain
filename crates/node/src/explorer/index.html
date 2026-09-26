@@ -103,6 +103,9 @@ table.tbl td.r, table.tbl th.r { text-align: right; }
 .step.done { opacity: .75; }
 .step h3 { margin: 0 0 4px; font-size: 14px; display: flex; justify-content: space-between; gap: 8px; }
 .step p { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.meter .note { font-size: 12px; color: var(--muted); margin-top: 3px; }
+.meter .note .ok, .outlook.ok { color: var(--ok); }
+.outlook { font-size: 13px; margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); color: var(--warn); }
 .meter { margin: 6px 0; font-size: 12px; }
 .meter .t { display: flex; justify-content: space-between; color: var(--muted); }
 .meter .b { height: 6px; background: var(--code); border-radius: 999px; overflow: hidden; margin-top: 3px; }
@@ -167,6 +170,13 @@ const T = {
     "phase.c.d": "改由委員會輪流產生區塊，每個區塊一產生就確定，不需再等待。",
     "phase.stakers": "驗證者人數", "phase.stake": "質押總額", "phase.streak": "連續達標週期",
     "phase.from": "自第 {e} 週期起", "phase.sched": "預定於第 {e} 週期開始", "phase.now": "進行中", "phase.done": "已完成",
+    "phase.met": "已達標", "phase.short": "尚缺 {n}",
+    "phase.nextCheck": "每個週期的第一個區塊檢查一次；下次在第 {b} 塊（約 {time}），還需要 {n} 次",
+    "phase.waitCond": "驗證者人數與質押總額都達標後才開始累計",
+    "phase.expect": "條件已達成：若持續達標，預計第 {b} 塊（第 {e} 週期，約 {time}）進入此階段。",
+    "phase.startsAt": "已排定：第 {b} 塊（第 {e} 週期，約 {time}）開始。",
+    "phase.notYet": "尚未達成：還差 {what}。兩項都達標後，需再連續 3 個週期達標，並於之後第 2 個週期開始。",
+    "phase.missStakers": "{n} 位驗證者", "phase.missStake": "{n} 質押", "phase.and": "、",
     "latest.blocks": "最新區塊", "latest.txs": "最新交易", "all": "查看全部",
     "block": "區塊", "blocks": "區塊", "tx": "交易", "txs": "筆交易", "address": "地址", "contract": "合約",
     "validator": "驗證者", "epoch": "週期", "ago": "前", "s": "秒", "m": "分", "h": "小時", "d": "天",
@@ -214,6 +224,13 @@ const T = {
     "phase.c.d": "The committee produces blocks in turn; every block is final at once.",
     "phase.stakers": "Validators", "phase.stake": "Total stake", "phase.streak": "Epochs in a row",
     "phase.from": "since epoch {e}", "phase.sched": "scheduled for epoch {e}", "phase.now": "Current", "phase.done": "Done",
+    "phase.met": "met", "phase.short": "{n} short",
+    "phase.nextCheck": "Checked at the first block of each epoch; next at block {b} (about {time}), {n} more needed",
+    "phase.waitCond": "Counts once both the validator count and the total stake are met",
+    "phase.expect": "Conditions met: if they hold, this phase starts at block {b} (epoch {e}, about {time}).",
+    "phase.startsAt": "Scheduled: starts at block {b} (epoch {e}, about {time}).",
+    "phase.notYet": "Not met yet: {what} missing. Once both are met, they must hold for 3 epochs in a row; the phase starts 2 epochs later.",
+    "phase.missStakers": "{n} validators", "phase.missStake": "{n} of stake", "phase.and": " and ",
     "latest.blocks": "Latest blocks", "latest.txs": "Latest transactions", "all": "View all",
     "block": "Block", "blocks": "Blocks", "tx": "Transaction", "txs": "txs", "address": "Address", "contract": "Contract",
     "validator": "Validator", "epoch": "Epoch", "ago": "ago", "s": "s", "m": "m", "h": "h", "d": "d",
@@ -340,25 +357,61 @@ let timer = null;
 function every(ms, fn) { clearInterval(timer); timer = setInterval(() => { if (!document.hidden) fn().catch(() => {}); }, ms); }
 
 // ---------- pages ----------
-function meter(label, cur, need, fmt = num) {
+function meter(label, cur, need, fmt = num, note) {
   const pct = need > 0 ? Math.min(100, (cur / need) * 100) : 100;
-  return `<div class="meter ${pct >= 100 ? "full" : ""}"><div class="t"><span>${label}</span><span>${fmt(cur)} / ${fmt(need)}</span></div><div class="b"><i style="width:${pct}%"></i></div></div>`;
+  const n = note === undefined ? (pct >= 100 ? `<span class="ok">✓ ${t("phase.met")}</span>` : t("phase.short", { n: fmt(need - cur) })) : note;
+  return `<div class="meter ${pct >= 100 ? "full" : ""}"><div class="t"><span>${label}</span><span>${fmt(cur)} / ${fmt(need)}</span></div><div class="b"><i style="width:${pct}%"></i></div>${n ? `<div class="note">${n}</div>` : ""}</div>`;
 }
-function phaseCard(s) {
+// Block `n`'s expected time from the current head and average block time.
+function eta(s, n) {
+  const secs = Math.max(0, n - s.head.number) * (s.blockTime || s.targetBlockTime || 12);
+  const d = new Date((s.head.timestamp + secs) * 1000);
+  return d.toLocaleString(lang === "zh" ? "zh-TW" : "en", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+}
+// Conditions, streak and outlook of one phase: `req` = {stakers, stakeBolt}, `streak`, scheduled
+// start epoch `sched` (or null).
+function phaseMeters(s, req, streak, sched) {
   const p = s.phase;
   const stakers = Number(s.stakers);
   const stakeBolt = Number(BigInt(s.totalStake) / WEI);
+  const bolts = (v) => num(v) + " BOLT";
+  const met = stakers >= req.stakers && stakeBolt >= req.stakeBolt;
+  const first = (e) => e * s.epochSlots + 1;
+  let streakNote, outlook;
+  if (sched != null) {
+    streakNote = `<span class="ok">✓ ${t("phase.met")}</span>`;
+    outlook = t("phase.startsAt", { b: num(first(sched)), e: sched, time: eta(s, first(sched)) });
+  } else if (met) {
+    const left = Math.max(0, p.streakRequired - streak);
+    const nextCheck = first(s.epoch + 1);
+    const start = s.epoch + left + 2;
+    streakNote = t("phase.nextCheck", { b: num(nextCheck), time: eta(s, nextCheck), n: left });
+    outlook = t("phase.expect", { b: num(first(start)), e: start, time: eta(s, first(start)) });
+  } else {
+    streakNote = t("phase.waitCond");
+    const miss = [];
+    if (stakers < req.stakers) miss.push(t("phase.missStakers", { n: num(req.stakers - stakers) }));
+    if (stakeBolt < req.stakeBolt) miss.push(t("phase.missStake", { n: bolts(req.stakeBolt - stakeBolt) }));
+    outlook = t("phase.notYet", { what: miss.join(t("phase.and")) });
+  }
+  const shortStakers = stakers >= req.stakers ? undefined : t("phase.short", { n: t("phase.missStakers", { n: num(req.stakers - stakers) }) });
+  return meter(t("phase.stakers"), stakers, req.stakers, num, shortStakers) +
+    meter(t("phase.stake"), stakeBolt, req.stakeBolt, bolts) +
+    meter(t("phase.streak"), streak, p.streakRequired, num, streakNote) +
+    `<div class="outlook ${met || sched != null ? "ok" : ""}">${outlook}</div>`;
+}
+function phaseCard(s) {
+  const p = s.phase;
   const stage = s.stage;
   const cls = (st) => (st === stage ? "cur" : (stage === "pos" || (stage === "checkpoints" && st === "mining")) ? "done" : "");
   const tag = (st, sched) => st === stage ? `<span class="badge acc">${t("phase.now")}</span>` : cls(st) === "done" ? `<span class="badge ok">${t("phase.done")}</span>` : sched != null ? `<span class="badge warn">${t("phase.sched", { e: sched })}</span>` : "";
-  const bolts = (v) => num(v) + " BOLT";
   const skipB = p.posEpoch != null && (p.checkpointEpoch == null || p.checkpointEpoch >= p.posEpoch);
   return `<div class="card phase"><h2>${t("phase.title")}</h2><div class="steps">
     <div class="step ${cls("mining")}"><h3>${t("phase.a")} ${tag("mining")}</h3><p>${t("phase.a.d")}</p></div>
     <div class="step ${cls("checkpoints")}"><h3>${t("phase.b")} ${tag("checkpoints", p.checkpointEpoch)}</h3><p>${t("phase.b.d")}</p>
-      ${stage === "mining" && !skipB ? meter(t("phase.stakers"), stakers, p.checkpoint.stakers) + meter(t("phase.stake"), stakeBolt, p.checkpoint.stakeBolt, bolts) + meter(t("phase.streak"), p.checkpointStreak, p.streakRequired) : ""}</div>
+      ${stage === "mining" && !skipB ? phaseMeters(s, p.checkpoint, p.checkpointStreak, p.checkpointEpoch) : ""}</div>
     <div class="step ${cls("pos")}"><h3>${t("phase.c")} ${tag("pos", p.posEpoch)}</h3><p>${t("phase.c.d")}</p>
-      ${stage !== "pos" ? meter(t("phase.stakers"), stakers, p.pos.stakers) + meter(t("phase.stake"), stakeBolt, p.pos.stakeBolt, bolts) + meter(t("phase.streak"), p.posStreak, p.streakRequired) : ""}</div>
+      ${stage !== "pos" ? phaseMeters(s, p.pos, p.posStreak, p.posEpoch) : ""}</div>
   </div></div>`;
 }
 function blockRow(b) {
