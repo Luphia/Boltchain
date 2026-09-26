@@ -152,7 +152,7 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 
 ### 尚未完成（移到後續里程碑）
 
-- [ ] 存儲獎勵（發行的 20%）與歷史抽查（M5）
+- [ ] 存儲獎勵與歷史抽查（M5；金額見 ADR 0012）
 - [ ] 證據自動送交易（需要付 gas 的帳戶）、投票直送 leader、sentry 節點（M6）
 - [ ] 交易 gossip：目前交易只進入收到它的節點的交易池（M6）
 
@@ -291,19 +291,28 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
   - 加上共識除錯紀錄（`boltchain::validator=debug`：收到的提案、投票、逾時，round 變化與 leader，自己的提案）與每分鐘的 gossip mesh 和 peer 分數。r18 全部重啟後，最終區塊穩定落後 head 約 33–36 塊。持續觀察，若再停住就用這些紀錄找原因
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
+## 發行改制（ADR 0012）：已實作
+
+決定（2026-09-26）：取消總量上限；每塊 32 BOLT（共識 31 + 存儲 1），每 4 年（鏈上時間）減半，第 5 期起固定為共識 1 + 存儲 1；PoS 之後每塊一樣；取消算力份額與金絲雀任務；存儲開放給未質押節點；公開測試網重新開始。
+
+- [x] `consensus_reward(era)`、`storage_reward()`、`emission_era`（`params.rs`）；礦工每塊直接拿共識獎勵（階段 B 為 60%），委員會與存儲在 epoch 結束時以「塊數 × 當期獎勵」結算
+- [x] 移除 `SUPPLY_CAP`、按池比例發行、`reward_split`、`bolt_pow::block_reward`
+- [x] `ComputeMarket` 移除算力份額（`recordWork`、`previewCompute`、`settleCompute`、`minted`）；每條鏈都在 genesis 部署；流通量只看 `RewardDistributor.supply`
+- [x] 測試網 `compute` 分叉與固定 bytecode 移除；分叉機制保留（目前沒有任何鏈有分叉）
+- [x] 未質押存儲提供者：`HistoryRegistry.registerStorage` / `registerStorageFor`（簽名、免 BOLT）、id 從 2^31 起、每個舊 epoch 另外 16 份副本（不擠掉驗證者）、領獎時扣 20% 累積押金（上限 64 BOLT）、抽查失敗燒 10% 押金並停止分配、14 天後取回押金；`wallet storage-register [--signed]`、節點 `--storage-account`
+- [x] 開發鏈 genesis hash `0x89feb030…bd70103`；新測試網 genesis hash `0xfce268e8…8aef49`
+- [ ] 測試網重新開始（新 genesis、節點資料清空、質押與 `set-peer` 重做、Uniswap v4 重新部署）
+- [ ] 中繼工具：代送未質押提供者的簽名註冊
+
 ## M7 AI 算力市場（ADR 0011）：進行中
 
-決定（2026-09-26）：發行改為共識 60% / 存儲 20% / 算力 20%，算力份額從挖礦階段開始；爭議由驗證小組處理；存儲抽查開放給未質押節點；SwarmStorage 改用 bolt-vault WASM。
+決定（2026-09-26）：爭議由驗證小組處理；SwarmStorage 改用 bolt-vault WASM。發行分配與金絲雀任務已由 ADR 0012 取消。
 
 - [x] `bolt-vault`（`crates/vault`）：分塊 XChaCha20-Poly1305、大小級距、密文上的 Reed-Solomon（預設 4 + 2）、加密清單、HPKE（X25519）包裝內容金鑰、不重傳即可加入收件人；Rust 與 WASM（約 350 KB），Node 煙霧測試；`js/file_operator.ts` 取代 SwarmStorage 的同名檔案
-- [x] 發行 60 / 20 / 20：`reward_split`；主網與開發鏈自 genesis 起，公開測試網以硬分叉 `compute` 在第 6001 塊（epoch 10 起點）啟用，同時安裝 `ComputeMarket`（固定的 runtime bytecode：`contracts/forks/8018-compute/`）。這也是 ADR 0008 硬分叉演練的第一次（含不規則狀態變更）
-- [x] `ComputeMarket` 系統合約（`0xB017…0006`）：執行者以簽名註冊（中繼代送，費用從第一筆收入償還）、託管、以簽名接單與交付收據、委託者核可或爭議窗口過後任何人結算（結算者得中繼費）、押金從收入扣 20% 累積到 64 BOLT、接單上限 5 BOLT + 10 × 押金、逾期退款、爭議押金 1 BOLT、驗證小組裁決（錯則罰押金 10%）、7 天無裁決視為執行者勝、協定工作（金絲雀任務）計量與算力份額結算、任何人可代為把餘額推給帳戶
+- [x] `ComputeMarket` 系統合約（`0xB017…0006`）：執行者以簽名註冊（中繼代送，費用從第一筆收入償還）、託管、以簽名接單與交付收據、委託者核可或爭議窗口過後任何人結算（結算者得中繼費）、押金從收入扣 20% 累積到 64 BOLT、接單上限 5 BOLT + 10 × 押金、逾期退款、爭議押金 1 BOLT、驗證小組裁決（錯則罰押金 10%）、7 天無裁決視為執行者勝、任何人可代為把餘額推給帳戶
 - [x] 每個 epoch 起點把待處理的爭議交給驗證小組（從委員會抽；挖礦階段沒有委員會時從質押者抽）
-- [x] 流通量 = RewardDistributor.supply + ComputeMarket.minted
 - [ ] 節點端：驗證小組的裁決憑證（BLS 聚合，比照抽查）、爭議時把檔案加給小組為收件人、小組重跑比對
-- [ ] 金絲雀任務：以 epoch 種子派題、批改、`recordWork`
 - [ ] `boltchain provider` / `boltchain job` CLI（先支援 llama.cpp）、中繼、瀏覽器頁面
-- [ ] 存儲抽查開放給未質押節點（從收入累積押金）
 - [ ] `ModelRegistry`
 
 ## M6 追加項目（ADR 0008）

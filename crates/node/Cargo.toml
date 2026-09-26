@@ -31,6 +31,7 @@ libp2p.workspace = true
 alloy-primitives.workspace = true
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
+alloy-signer = "2.5"
 alloy-signer-local = "2.5"
 alloy-network = "2.5"
 clap.workspace = true

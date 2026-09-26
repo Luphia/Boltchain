@@ -61,18 +61,6 @@ pub fn work(difficulty: U256) -> U256 {
     difficulty
 }
 
-/// Per-block issuance rate for 12-second blocks, scaled by 1e24: `1 − (1 − k_day)^(1/7200)` with
-/// `k_day` = [`bolt_primitives`]' daily rate, so emission keeps its 4-year half-life in time.
-pub const BLOCK_EMISSION_RATE_E24: u128 = 65_938_656_555_113_079;
-
-/// Miner reward for one PoW block: the consensus share (80%) of the per-block issuance of the
-/// unissued pool `unissued`.
-pub fn block_reward(unissued: U256, consensus_bps: u32) -> U256 {
-    unissued * U256::from(BLOCK_EMISSION_RATE_E24) / U256::from(10u128.pow(24))
-        * U256::from(consensus_bps)
-        / U256::from(10_000)
-}
-
 /// Proof-of-work function of a chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {

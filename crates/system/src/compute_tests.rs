@@ -339,77 +339,32 @@ fn disputes_go_to_the_verifier_panel() {
 }
 
 #[test]
-fn compute_emission_pays_verified_work_only_by_system_call() {
+fn only_the_node_records_verdicts() {
     let mut m = market();
     m.register_via_relayer(U256::ZERO);
-    let p = m.provider.address();
-    let outsider = Address::repeat_byte(0x55);
-    // Only the node records work and settles.
-    assert!(!m.evm.try_call(
-        m.relayer,
-        COMPUTE,
-        U256::ZERO,
-        IComputeMarket::recordWorkCall { epoch: 5, provider_: m.relayer, units: U256::from(9) },
-    ));
-    assert!(!m.evm.try_call(
-        m.relayer,
-        COMPUTE,
-        U256::ZERO,
-        IComputeMarket::settleComputeCall { epoch: 5, emission: bolt(1) },
-    ));
     assert!(!m.evm.try_call(
         m.requester,
         COMPUTE,
         U256::ZERO,
         IComputeMarket::recordVerdictCall { id: U256::ZERO, providerAtFault: true },
     ));
-    // Nothing recorded: nothing paid (the share stays unissued).
-    assert_eq!(
-        m.evm.view(COMPUTE, IComputeMarket::previewComputeCall { epoch: 5, emission: bolt(4_000) }),
-        U256::ZERO
-    );
-    m.evm.system(
-        COMPUTE,
-        IComputeMarket::recordWorkCall { epoch: 5, provider_: p, units: U256::from(3) },
-    );
-    m.evm.system(
-        COMPUTE,
-        IComputeMarket::recordWorkCall { epoch: 5, provider_: outsider, units: U256::from(1) },
-    );
-    let paid =
-        m.evm.view(COMPUTE, IComputeMarket::previewComputeCall { epoch: 5, emission: bolt(4_000) });
-    assert_eq!(paid, bolt(4_000));
-    m.evm.fund(COMPUTE, paid);
-    assert_eq!(
-        m.evm
-            .system(COMPUTE, IComputeMarket::settleComputeCall { epoch: 5, emission: bolt(4_000) }),
-        paid
-    );
-    // Registered provider: 3 BOLT, 20% to its bond. Unregistered worker: paid in full.
-    assert_eq!(m.bond(), bolt(600));
-    assert_eq!(m.balance_in_market(p), bolt(2_400));
-    assert_eq!(m.balance_in_market(outsider), bolt(1_000));
-    assert_eq!(m.evm.view(COMPUTE, IComputeMarket::mintedCall {}), bolt(4_000));
-    // Part of the circulating supply.
-    let supply = crate::queries::supply(&m.evm.db, m.evm.chain_id).unwrap();
-    let rewards_supply = m.evm.view(REWARDS, IRewardDistributor::supplyCall {});
-    assert_eq!(supply, rewards_supply + bolt(4_000));
 }
 
 #[test]
-fn bond_is_capped_and_released_after_exit() {
+fn bond_is_capped_from_earnings() {
     let mut m = market();
     m.register_via_relayer(U256::ZERO);
     let p = m.provider.address();
-    // 400 BOLT of verified work: the bond stops at 64.
-    m.evm.system(
-        COMPUTE,
-        IComputeMarket::recordWorkCall { epoch: 1, provider_: p, units: U256::from(1) },
-    );
-    m.evm.fund(COMPUTE, bolt(400_000));
-    m.evm.system(COMPUTE, IComputeMarket::settleComputeCall { epoch: 1, emission: bolt(400_000) });
+    m.evm.fund(m.requester, bolt(1_000_000));
+    // Each job earns 3 BOLT (1,000 + 1,000 tokens), 0.6 of it to the bond: 107 jobs pass 64.
+    for _ in 0..107 {
+        let id = m.post(p);
+        assert!(m.accept_signed(id));
+        m.deliver_signed(id, 1000, 1000);
+        m.evm.call(m.requester, COMPUTE, U256::ZERO, IComputeMarket::settleCall { id });
+    }
     assert_eq!(m.bond(), bolt(64_000));
-    assert_eq!(m.balance_in_market(p), bolt(336_000));
+    assert_eq!(m.balance_in_market(p), bolt(107 * 3_000 - 64_000));
     // Bond larger: larger jobs (5 + 10 x 64 BOLT).
     assert_eq!(m.evm.view(COMPUTE, IComputeMarket::jobLimitCall { p }), bolt(645_000));
 }

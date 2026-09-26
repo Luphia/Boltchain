@@ -41,6 +41,13 @@ pub const RECENT_PINNED_EPOCHS: u64 = 7;
 /// Replication factor for older history shards.
 pub const HISTORY_REPLICATION: u32 = 16;
 
+/// Additional copies of each old epoch kept by storage providers without stake (ADR 0012), on
+/// top of the [`HISTORY_REPLICATION`] validators.
+pub const STORAGE_REPLICATION: u32 = 16;
+
+/// First id of a storage provider without stake (`HistoryRegistry.STORAGE_ID_BASE`).
+pub const STORAGE_ID_BASE: u32 = 1 << 31;
+
 /// Storage audits drawn per epoch (ADR 0009).
 pub const AUDIT_TASKS: u32 = 16;
 
@@ -60,42 +67,23 @@ pub const INLINE_BODY_BYTES: usize = 64 * 1024;
 /// One BOLT in wei.
 pub const WEI_PER_BOLT: u128 = 1_000_000_000_000_000_000;
 
-/// Total supply cap in whole BOLT: 2^32.
-pub const SUPPLY_CAP_BOLT: u64 = 1 << 32;
-
-/// Total supply cap in wei.
-pub const SUPPLY_CAP_WEI: U256 = U256::from_limbs([0xa764_0000_0000_0000, 0x0de0_b6b3, 0, 0]);
-
 /// Minimum stake: 64 BOLT, in wei.
 pub const MIN_STAKE_WEI: u128 = 64 * WEI_PER_BOLT;
 
-/// Emission half-life, in epochs (4 years of 365 days).
-pub const EMISSION_HALF_LIFE_EPOCHS: u64 = 4 * 365;
+/// Whole emission of a block in the first era, in whole BOLT (ADR 0012): the consensus reward
+/// plus the storage reward. There is no supply cap.
+pub const INITIAL_BLOCK_REWARD_BOLT: u64 = 32;
 
-/// Per-epoch emission rate `k = 1 - 2^(-1/1460)`, scaled by 1e18.
-pub const EMISSION_RATE_E18: u128 = 474_645_662_939_840;
+/// Storage reward of every block, in whole BOLT, forever: paid per epoch to the history audits
+/// passed in it (ADR 0009, 0012).
+pub const STORAGE_BLOCK_REWARD_BOLT: u64 = 1;
 
-/// Share of emission paid to consensus participation (mining, then committees), in basis
-/// points (ADR 0011: 60 / 20 / 20).
-pub const CONSENSUS_REWARD_BPS: u32 = 6_000;
+/// Lowest consensus reward of a block, in whole BOLT, reached after four halvings and paid forever.
+pub const TAIL_CONSENSUS_REWARD_BOLT: u64 = 1;
 
-/// Share of emission paid to history storage providers that pass audits, in basis points.
-pub const STORAGE_REWARD_BPS: u32 = 2_000;
-
-/// Share of emission paid for verified AI compute (ADR 0011), in basis points.
-pub const COMPUTE_REWARD_BPS: u32 = 10_000 - CONSENSUS_REWARD_BPS - STORAGE_REWARD_BPS;
-
-/// Consensus share before the compute fork (ADR 0003: 80 / 20, no compute share).
-pub const LEGACY_CONSENSUS_REWARD_BPS: u32 = 8_000;
-
-/// Emission split `(consensus, storage, compute)` in basis points at block `number`.
-pub fn reward_split(chain_id: u64, number: u64) -> (u32, u32, u32) {
-    if crate::forks::active(chain_id, crate::forks::COMPUTE, number) {
-        (CONSENSUS_REWARD_BPS, STORAGE_REWARD_BPS, COMPUTE_REWARD_BPS)
-    } else {
-        (LEGACY_CONSENSUS_REWARD_BPS, 10_000 - LEGACY_CONSENSUS_REWARD_BPS, 0)
-    }
-}
+/// Length of an emission era: the block reward halves every 4 years of 365 days of chain time
+/// (block timestamps since genesis), whatever the block spacing (12 s mined, 6 s PoS slots).
+pub const HALVING_SECONDS: u64 = 4 * 365 * 86_400;
 
 /// Stake finality start (phase B, ADR 0007 §4): minimum number of stakers.
 pub const CHECKPOINT_MIN_STAKERS: u32 = 32;
@@ -137,12 +125,27 @@ const _: () = assert!(MIN_COMMITTEE_SIZE >= 512);
 const _: () =
     assert!(GAS_LIMIT_RANGE.0 <= DEFAULT_GAS_LIMIT && DEFAULT_GAS_LIMIT <= GAS_LIMIT_RANGE.1);
 
-/// Emission for one epoch, given the current unissued pool (cap minus circulating supply).
-///
-/// Burned base fees flow back into the unissued pool, so emission never reaches zero and the
-/// circulating supply never exceeds [`SUPPLY_CAP_WEI`].
-pub fn epoch_emission(unissued: U256) -> U256 {
-    unissued * U256::from(EMISSION_RATE_E18) / U256::from(WEI_PER_BOLT)
+/// Emission era of a block with timestamp `timestamp` on a chain started at `genesis_timestamp`.
+pub fn emission_era(genesis_timestamp: u64, timestamp: u64) -> u64 {
+    timestamp.saturating_sub(genesis_timestamp) / HALVING_SECONDS
+}
+
+/// Consensus reward of one block in era `era`, in wei: 31, 15, 7, 3, then 1 BOLT forever (the
+/// block's 32, 16, 8, 4, 2 BOLT minus the storage reward, never below the tail).
+pub fn consensus_reward(era: u64) -> U256 {
+    let total = INITIAL_BLOCK_REWARD_BOLT.checked_shr(era.min(63) as u32).unwrap_or(0);
+    let bolt = total.saturating_sub(STORAGE_BLOCK_REWARD_BOLT).max(TAIL_CONSENSUS_REWARD_BOLT);
+    U256::from(bolt) * U256::from(WEI_PER_BOLT)
+}
+
+/// Storage reward of one block, in wei (1 BOLT in every era).
+pub fn storage_reward() -> U256 {
+    U256::from(STORAGE_BLOCK_REWARD_BOLT) * U256::from(WEI_PER_BOLT)
+}
+
+/// `bps` basis points of `amount`.
+pub fn share(amount: U256, bps: u32) -> U256 {
+    amount * U256::from(bps) / U256::from(10_000)
 }
 
 #[cfg(test)]
@@ -150,27 +153,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supply_cap_is_two_pow_32_bolt() {
-        let expected = U256::from(SUPPLY_CAP_BOLT) * U256::from(WEI_PER_BOLT);
-        assert_eq!(SUPPLY_CAP_WEI, expected);
+    fn block_reward_halves_every_four_years_down_to_the_tail() {
+        let bolt = |w: U256| (w / U256::from(WEI_PER_BOLT)).to::<u64>();
+        let consensus: Vec<u64> = (0..8).map(|e| bolt(consensus_reward(e))).collect();
+        assert_eq!(consensus, [31, 15, 7, 3, 1, 1, 1, 1]);
+        let total: Vec<u64> =
+            (0..8).map(|e| bolt(consensus_reward(e) + storage_reward())).collect();
+        assert_eq!(total, [32, 16, 8, 4, 2, 2, 2, 2]);
+        assert_eq!(bolt(consensus_reward(u64::MAX)), 1, "the tail is paid forever");
     }
 
     #[test]
-    fn emission_halves_after_half_life() {
-        let mut unissued = SUPPLY_CAP_WEI;
-        for _ in 0..EMISSION_HALF_LIFE_EPOCHS {
-            unissued -= epoch_emission(unissued);
-        }
-        let half = SUPPLY_CAP_WEI / U256::from(2);
-        let diff = if unissued > half { unissued - half } else { half - unissued };
-        // within 1 ppm of exactly half
-        assert!(diff < SUPPLY_CAP_WEI / U256::from(1_000_000u64), "diff = {diff}");
-    }
-
-    #[test]
-    fn first_epoch_emission_matches_plan() {
-        let bolt = epoch_emission(SUPPLY_CAP_WEI) / U256::from(WEI_PER_BOLT);
-        // 2,038,587.x BOLT (the plan rounds it to 2,038,588)
-        assert_eq!(bolt, U256::from(2_038_587u64));
+    fn eras_follow_chain_time() {
+        let g = 1_800_000_000;
+        assert_eq!(emission_era(g, g), 0);
+        assert_eq!(emission_era(g, g + HALVING_SECONDS - 1), 0);
+        assert_eq!(emission_era(g, g + HALVING_SECONDS), 1);
+        assert_eq!(emission_era(g, g + 5 * HALVING_SECONDS + 7), 5);
+        assert_eq!(emission_era(g, g - 10), 0, "clock skew before genesis stays in era 0");
     }
 }

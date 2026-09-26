@@ -17,9 +17,7 @@ import {Sys, SystemContract} from "./System.sol";
 /// files to the panel (bolt-vault recipients), and the panel's certified verdict is recorded by a
 /// system call.
 ///
-/// The compute share of the emission (20%, ADR 0011) pays verified protocol work (canary tasks):
-/// the node records each provider's verified units per epoch and settles the share in the first
-/// block of the next epoch, like the storage share.
+/// There is no emission here (ADR 0012): providers earn only what requesters pay.
 contract ComputeMarket is SystemContract {
     // ------------------------------------------------------------------ constants
 
@@ -113,14 +111,6 @@ contract ComputeMarket is SystemContract {
     /// Verifier panel (validator ids) per epoch.
     mapping(uint64 => uint32[]) internal panels;
 
-    // ------------------------------------------------------------------ compute emission
-
-    mapping(uint64 => address[]) internal workers;
-    mapping(uint64 => mapping(address => uint256)) public workUnits;
-    mapping(uint64 => uint256) public totalUnits;
-    /// Total emission paid by this contract (part of the circulating supply).
-    uint256 public minted;
-
     // ------------------------------------------------------------------ events and errors
 
     event ProviderRegistered(address indexed provider, bytes peerId, address relayer, uint256 fee);
@@ -134,8 +124,6 @@ contract ComputeMarket is SystemContract {
     event Disputed(uint256 indexed id, bytes reason);
     event PanelAssigned(uint64 indexed epoch, uint256 disputes);
     event Verdict(uint256 indexed id, bool providerAtFault, uint256 slashed);
-    event WorkRecorded(uint64 indexed epoch, address indexed provider, uint256 units);
-    event ComputeSettled(uint64 indexed epoch, uint256 emission, uint256 paid);
     event Withdrawn(address indexed account, address to, uint256 amount);
     event ExitRequested(address indexed provider, uint64 epoch);
 
@@ -497,48 +485,6 @@ contract ComputeMarket is SystemContract {
 
     function pendingDisputes() external view returns (uint256[] memory) {
         return unassigned;
-    }
-
-    // ------------------------------------------------------------------ compute emission
-
-    /// Verified protocol work (canary tasks graded by a verifier panel, checked by the node).
-    function recordWork(uint64 epoch, address provider_, uint256 units) external onlySystem {
-        if (units == 0) return;
-        if (workUnits[epoch][provider_] == 0) workers[epoch].push(provider_);
-        workUnits[epoch][provider_] += units;
-        totalUnits[epoch] += units;
-        emit WorkRecorded(epoch, provider_, units);
-    }
-
-    /// Amount `settleCompute(epoch, emission)` would pay.
-    function previewCompute(uint64 epoch, uint256 emission) public view returns (uint256 paid) {
-        uint256 total = totalUnits[epoch];
-        if (total == 0) return 0;
-        address[] storage w = workers[epoch];
-        for (uint256 i = 0; i < w.length; i++) {
-            paid += emission * workUnits[epoch][w[i]] / total;
-        }
-    }
-
-    /// First block of epoch `epoch + 1`: the compute share of epoch `epoch`'s emission, in
-    /// proportion to verified units. The node credits exactly `previewCompute` first; what is not
-    /// paid stays in the unissued pool.
-    function settleCompute(uint64 epoch, uint256 emission) external onlySystem returns (uint256 paid) {
-        uint256 total = totalUnits[epoch];
-        if (total == 0) return 0;
-        address[] storage w = workers[epoch];
-        for (uint256 i = 0; i < w.length; i++) {
-            uint256 share = emission * workUnits[epoch][w[i]] / total;
-            if (share == 0) continue;
-            paid += share;
-            if (providers[w[i]].registered) {
-                _earn(w[i], share);
-            } else {
-                balanceOf[w[i]] += share;
-            }
-        }
-        minted += paid;
-        emit ComputeSettled(epoch, emission, paid);
     }
 
     // ------------------------------------------------------------------ withdrawals

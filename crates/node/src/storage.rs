@@ -124,11 +124,20 @@ pub struct StorageConfig {
     pub keys: Vec<BlsSecretKey>,
     /// How long an auditor waits for a provider's block.
     pub audit_timeout: Duration,
+    /// Accounts whose storage-provider ids (without stake, ADR 0012) this node serves: it keeps
+    /// the epochs assigned to them instead of pruning them.
+    pub storage_accounts: Vec<alloy_primitives::Address>,
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self { snapshots: true, prune: true, keys: vec![], audit_timeout: Duration::from_secs(10) }
+        Self {
+            snapshots: true,
+            prune: true,
+            keys: vec![],
+            audit_timeout: Duration::from_secs(10),
+            storage_accounts: vec![],
+        }
     }
 }
 
@@ -350,7 +359,9 @@ impl Storage {
         Ok(())
     }
 
-    /// Validator ids of this node's keys (registered ones).
+    /// Provider ids this node serves: its validator keys' ids (mapped to the key index) and the
+    /// active storage-provider ids of `storage_accounts` (mapped to `usize::MAX`: no key, they
+    /// never sit on a panel).
     fn my_ids(&self) -> Result<HashMap<u32, usize>> {
         let mut out = HashMap::new();
         for (i, k) in self.cfg.keys.iter().enumerate() {
@@ -358,6 +369,19 @@ impl Storage {
             let id = view(&self.chain, STAKING, IStakingManager::idOfPubkeyCall { h })?;
             if id != 0 {
                 out.insert(id, i);
+            }
+        }
+        for account in &self.cfg.storage_accounts {
+            let ids = view(
+                &self.chain,
+                HISTORY,
+                IHistoryRegistry::storageIdsOfCall { account: *account },
+            )?;
+            for id in ids {
+                let p = view(&self.chain, HISTORY, IHistoryRegistry::storageProviderCall { id })?;
+                if p.active {
+                    out.insert(id, usize::MAX);
+                }
             }
         }
         Ok(out)
@@ -377,7 +401,9 @@ impl Storage {
             .panel
             .iter()
             .enumerate()
-            .filter_map(|(m, id)| mine.get(id).map(|k| (m as u16, *k)))
+            .filter_map(|(m, id)| {
+                mine.get(id).filter(|k| **k != usize::MAX).map(|k| (m as u16, *k))
+            })
             .collect();
         if members.is_empty() {
             return Ok(());
@@ -452,13 +478,14 @@ impl Storage {
         let mut validators =
             view(&self.chain, STAKING, IStakingManager::snapshotCall { minAge: 0 })?.ids;
         validators.sort_unstable();
+        let storage = view(&self.chain, HISTORY, IHistoryRegistry::activeStorageProvidersCall {})?;
         let mine = self.my_ids()?;
         for e in 0..=last_old {
             let idx = view(&self.chain, HISTORY, IHistoryRegistry::epochIndexCall { epoch: e })?;
             if idx.is_empty() {
                 continue;
             }
-            let who = bolt_system::history::assignees(&idx, &validators);
+            let who = bolt_system::history::assignees(&idx, &validators, &storage);
             if who.iter().any(|id| mine.contains_key(id)) {
                 let cid = Cid::try_from(idx.as_ref()).context("epoch index cid")?;
                 self.ensure_epoch(cid).await?;

@@ -92,6 +92,24 @@ pub enum WalletCmd {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         rpc: String,
     },
+    /// Register this account as a storage provider without stake (ADR 0012), serving history
+    /// from the node key's peer id. Needs a little BOLT for gas; with `--signed` it only prints a
+    /// signed registration that anyone can submit for you (`wallet send --to <to> --data <data>`).
+    /// Then run the node with `--storage-account <address>`.
+    StorageRegister {
+        /// Account key file (receives the storage rewards).
+        #[arg(long)]
+        wallet: PathBuf,
+        /// The node's identity key (`<datadir>/node.key`).
+        #[arg(long)]
+        node_key: PathBuf,
+        /// Print a signed registration for a relayer instead of sending it.
+        #[arg(long)]
+        signed: bool,
+        /// JSON-RPC endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -280,6 +298,55 @@ pub fn run(cmd: WalletCmd) -> Result<()> {
             let data: Bytes = tx["data"].as_str().context("data")?.parse()?;
             send_tx(&url, &s, bolt_system::addresses::HISTORY, U256::ZERO, data)?;
             println!("validator {id} serves history from {peer}");
+        }
+        WalletCmd::StorageRegister { wallet, node_key, signed, rpc: url } => {
+            use bolt_system::abi::IHistoryRegistry;
+            let s = load_wallet(&wallet)?;
+            let peer = bolt_net::load_or_create_key(&node_key)?.public().to_peer_id();
+            let peer_bytes = Bytes::copy_from_slice(&peer.to_bytes());
+            let history = bolt_system::addresses::HISTORY;
+            if !signed {
+                let data =
+                    IHistoryRegistry::registerStorageCall { peerId: peer_bytes }.abi_encode();
+                send_tx(&url, &s, history, U256::ZERO, data.into())?;
+                println!("{} registered as a storage provider serving from {peer}", s.address());
+                println!("run the node with --storage-account {}", s.address());
+                return Ok(());
+            }
+            let deadline = U256::from(
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs()
+                    + 86_400,
+            );
+            let call = IHistoryRegistry::registrationDigestCall {
+                account: s.address(),
+                peerId: peer_bytes.clone(),
+                deadline,
+            }
+            .abi_encode();
+            let out = rpc(
+                &url,
+                "eth_call",
+                json!([{"to": history, "data": hex::encode_prefixed(call)}, "latest"]),
+            )?;
+            let digest: B256 = out.as_str().context("digest")?.parse()?;
+            let sig = alloy_signer::SignerSync::sign_hash_sync(&s, &digest)?;
+            let data = IHistoryRegistry::registerStorageForCall {
+                account: s.address(),
+                peerId: peer_bytes,
+                deadline,
+                sig: Bytes::from(sig.as_bytes().to_vec()),
+            }
+            .abi_encode();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "to": history,
+                    "data": hex::encode_prefixed(data),
+                    "account": s.address(),
+                    "peerId": peer.to_string(),
+                    "validForSeconds": 86_400,
+                }))?
+            );
         }
     }
     Ok(())

@@ -6,7 +6,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
 use bolt_exec::{BlockExecutor, block::BlockError};
 use bolt_primitives::params::{
-    CHECKPOINT_MINER_BPS, SUPPLY_CAP_WEI, WEI_PER_BOLT, epoch_emission, reward_split,
+    CHECKPOINT_MINER_BPS, WEI_PER_BOLT, consensus_reward, emission_era, share, storage_reward,
 };
 use revm::DatabaseRef;
 
@@ -31,11 +31,13 @@ pub struct EpochRules {
     pub pos_min_stake: U256,
     /// Consecutive epochs the thresholds must hold; minimum stake age for the first committee.
     pub pos_streak: u64,
+    /// Genesis timestamp: emission eras count chain time from it (ADR 0012).
+    pub genesis_timestamp: u64,
 }
 
 impl EpochRules {
     /// Rules of a chain configuration (dev chains may lower the PoS thresholds).
-    pub fn from_config(c: &bolt_primitives::genesis::ChainConfig) -> Self {
+    pub fn from_config(c: &bolt_primitives::genesis::ChainConfig, genesis_timestamp: u64) -> Self {
         let (stakers, stake, streak) = c.pos_thresholds();
         let (cp_stakers, cp_stake) = c.checkpoint_thresholds();
         Self {
@@ -48,6 +50,7 @@ impl EpochRules {
             pos_min_stakers: stakers as u64,
             pos_min_stake: U256::from(stake) * U256::from(WEI_PER_BOLT),
             pos_streak: streak,
+            genesis_timestamp,
         }
     }
 
@@ -139,19 +142,6 @@ where
     C::abi_decode_returns(&out).map_err(|e| BlockError::Evm(format!("decode {to}: {e}")))
 }
 
-/// Circulating supply: RewardDistributor's count plus the compute emission ComputeMarket paid.
-fn supply<D: DatabaseRef>(exec: &mut BlockExecutor<D>) -> Result<U256, BlockError<D::Error>>
-where
-    D::Error: std::error::Error + Send + Sync + 'static,
-{
-    let p = exec.params().input;
-    let mut s = view(exec, REWARDS, IRewardDistributor::supplyCall {})?;
-    if bolt_primitives::forks::active(p.chain_id, bolt_primitives::forks::COMPUTE, p.number) {
-        s += view(exec, COMPUTE, IComputeMarket::mintedCall {})?;
-    }
-    Ok(s)
-}
-
 fn sys<D: DatabaseRef, C: SolCall>(
     exec: &mut BlockExecutor<D>,
     to: Address,
@@ -208,17 +198,17 @@ where
     D::Error: std::error::Error + Send + Sync + 'static,
 {
     let number = exec.params().input.number;
-    let chain_id = exec.params().input.chain_id;
-    let (consensus_bps, storage_bps, compute_bps) = reward_split(chain_id, number);
     // 1. Burn accounting, block reward, participation.
     let burned = U256::from(parent.base_fee_per_gas.unwrap_or(0)) * U256::from(parent.gas_used);
     let mut minted = U256::ZERO;
+    // ADR 0012: each block issues a consensus reward (31, 15, 7, 3, then 1 BOLT, halving every 4
+    // years of chain time) and a 1 BOLT storage reward. Miners get the consensus reward at once
+    // (60% of it in phase B); committees and storage are settled per epoch.
+    let era = emission_era(rules.genesis_timestamp, exec.params().input.timestamp);
     if producer != Producer::Committee {
-        let supply = supply(exec)?;
-        let unissued = SUPPLY_CAP_WEI.saturating_sub(supply);
-        minted = bolt_pow::block_reward(unissued, consensus_bps);
+        minted = consensus_reward(era);
         if producer == Producer::MinerWithCheckpoints {
-            minted = minted * U256::from(CHECKPOINT_MINER_BPS) / U256::from(10_000);
+            minted = share(minted, CHECKPOINT_MINER_BPS);
         }
         if !minted.is_zero() {
             let beneficiary = exec.params().input.beneficiary;
@@ -245,12 +235,13 @@ where
     // (miners were paid per block), the whole consensus share under PoS.
     let before = crate::queries::phase_in(exec)?;
     if epoch >= 1 {
-        let supply = supply(exec)?;
-        let unissued = SUPPLY_CAP_WEI.saturating_sub(supply);
-        let mut emission =
-            epoch_emission(unissued) * U256::from(consensus_bps) / U256::from(10_000);
+        // The previous epoch's blocks, at the reward of its last block (the parent): an epoch
+        // straddling a halving is paid at the new rate, which a day's rounding never matters for.
+        let blocks = U256::from(rules.epoch_slots);
+        let parent_era = emission_era(rules.genesis_timestamp, parent.timestamp);
+        let mut emission = consensus_reward(parent_era) * blocks;
         if before.is_checkpoint_epoch(epoch - 1) {
-            emission = emission * U256::from(10_000 - CHECKPOINT_MINER_BPS) / U256::from(10_000);
+            emission = share(emission, 10_000 - CHECKPOINT_MINER_BPS);
         }
         let payout =
             view(exec, REWARDS, IRewardDistributor::previewCall { epoch: epoch - 1, emission })?;
@@ -262,8 +253,9 @@ where
         if paid != payout {
             return Err(BlockError::Evm(format!("settle paid {paid}, preview said {payout}")));
         }
-        // Storage share: equal parts per audit pass of the previous epoch (ADR 0009).
-        let storage = epoch_emission(unissued) * U256::from(storage_bps) / U256::from(10_000);
+        // Storage reward: 1 BOLT per block of the previous epoch, in equal parts per audit pass
+        // (ADR 0009, 0012); nothing is issued when no audit passed.
+        let storage = storage_reward() * blocks;
         let payout = view(
             exec,
             REWARDS,
@@ -279,26 +271,6 @@ where
         )?;
         if paid != payout {
             return Err(BlockError::Evm(format!("storage paid {paid}, preview said {payout}")));
-        }
-        // Compute share (ADR 0011): verified protocol work of the previous epoch.
-        if compute_bps != 0 {
-            let compute = epoch_emission(unissued) * U256::from(compute_bps) / U256::from(10_000);
-            let payout = view(
-                exec,
-                COMPUTE,
-                IComputeMarket::previewComputeCall { epoch: epoch - 1, emission: compute },
-            )?;
-            if !payout.is_zero() {
-                exec.credit(COMPUTE, payout.to::<u128>())?;
-            }
-            let paid = sys(
-                exec,
-                COMPUTE,
-                IComputeMarket::settleComputeCall { epoch: epoch - 1, emission: compute },
-            )?;
-            if paid != payout {
-                return Err(BlockError::Evm(format!("compute paid {paid}, preview said {payout}")));
-            }
         }
         // The previous epoch's index: the node built it from the envelopes of that epoch.
         let cid = history
@@ -338,9 +310,7 @@ where
     }
     record_audits(exec, history)?;
     // Compute disputes (ADR 0011) waiting for a panel.
-    if compute_bps != 0 {
-        assign_disputes(exec, parent, epoch)?;
-    }
+    assign_disputes(exec, parent, epoch)?;
 
     // 5. Committee of the next epoch.
     let next = epoch + 1;
@@ -398,10 +368,11 @@ where
     let snap = view(exec, STAKING, IStakingManager::snapshotCall { minAge: 0 })?;
     let mut validators = snap.ids;
     validators.sort_unstable();
+    let storage = view(exec, HISTORY, IHistoryRegistry::activeStorageProvidersCall {})?;
     let (mut providers, mut targets, mut heights) = (Vec::new(), Vec::new(), Vec::new());
     for (i, target) in draw_targets(&seed, epoch, last_old).into_iter().enumerate() {
         let cid = view(exec, HISTORY, IHistoryRegistry::epochIndexCall { epoch: target })?;
-        let who = assignees(&cid, &validators);
+        let who = assignees(&cid, &validators, &storage);
         let first = target * rules.epoch_slots + 1;
         if let Some(t) = draw_task(&seed, epoch, i as u32, target, &who, first, rules.epoch_slots) {
             providers.push(t.provider);

@@ -73,6 +73,20 @@ sol! {
         function audits(uint64 epoch) external view returns (uint32[] panel, uint32[] providers,
             uint64[] targets, uint64[] heights, uint8[] states);
         function passed(uint64 epoch) external view returns (uint32[]);
+        function registerStorage(bytes peerId) external returns (uint32);
+        function registerStorageFor(address account, bytes peerId, uint256 deadline, bytes sig)
+            external returns (uint32);
+        function registrationDigest(address account, bytes peerId, uint256 deadline)
+            external view returns (bytes32);
+        function activeStorageProviders() external view returns (uint32[]);
+        function storageProvider(uint32 id) external view returns (address account, bool active,
+            uint64 exitAt, uint256 bond);
+        function storageIdsOf(address account) external view returns (uint32[]);
+        function setStoragePeer(uint32 id, bytes peerId) external;
+        function exitStorage(uint32 id) external;
+        function releaseStorageBond(uint32 id) external;
+        function nonces(address account) external view returns (uint256);
+        function depositEarnings(uint32 id) external payable;
     }
 
     interface IComputeMarket {
@@ -127,10 +141,6 @@ sol! {
         function jobCount() external view returns (uint256);
         function panel(uint64 epoch) external view returns (uint32[]);
         function pendingDisputes() external view returns (uint256[]);
-        function recordWork(uint64 epoch, address provider_, uint256 units) external;
-        function previewCompute(uint64 epoch, uint256 emission) external view returns (uint256);
-        function settleCompute(uint64 epoch, uint256 emission) external returns (uint256);
-        function minted() external view returns (uint256);
         function balanceOf(address account) external view returns (uint256);
         function withdraw(address to) external;
         function payout(address account) external;

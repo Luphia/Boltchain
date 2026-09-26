@@ -93,17 +93,15 @@ fn epoch_indexes_audits_and_storage_rewards() {
     assert!(env2.audits.is_empty());
     drop(r);
 
-    // Block 13 settles epoch 2: the storage share (20% of the epoch emission) goes to the pass.
+    // Block 13 settles epoch 2: the storage reward (1 BOLT per block of the epoch) goes to the pass.
     let before = view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: pass_provider });
     let supply = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
     while chain.head().unwrap().number < 3 * L + 1 {
         produce(&chain, vec![]);
     }
     let after = view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: pass_provider });
-    let storage =
-        bolt_primitives::params::epoch_emission(bolt_primitives::params::SUPPLY_CAP_WEI - supply)
-            * U256::from(2_000)
-            / U256::from(10_000);
+    let _ = supply;
+    let storage = bolt_primitives::params::storage_reward() * U256::from(chain.rules().epoch_slots);
     let gained = after - before;
     assert!(
         gained > storage * U256::from(99) / U256::from(100),

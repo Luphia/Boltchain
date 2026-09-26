@@ -191,9 +191,12 @@ fn main() -> Result<()> {
             println!("slot              {SLOT_SECONDS}s, epoch {EPOCH_SLOTS} slots");
             println!("committee floor   {MIN_COMMITTEE_SIZE}");
             println!("gas limit         {DEFAULT_GAS_LIMIT} (range {GAS_LIMIT_RANGE:?})");
-            println!("supply cap        {SUPPLY_CAP_BOLT} BOLT");
+            println!("supply cap        none");
             println!("min stake         {} BOLT", MIN_STAKE_WEI / WEI_PER_BOLT);
-            println!("emission          half-life {EMISSION_HALF_LIFE_EPOCHS} epochs");
+            println!(
+                "emission          per block: consensus 31/15/7/3 then {TAIL_CONSENSUS_REWARD_BOLT} BOLT (halving every {} days), storage {STORAGE_BLOCK_REWARD_BOLT} BOLT",
+                HALVING_SECONDS / 86_400
+            );
             println!(
                 "mining            RandomBOLT, {POW_BLOCK_SECONDS}s blocks, ASERT half-life {POW_HALF_LIFE_SECONDS}s, reorgs <= {MAX_REORG_DEPTH}"
             );

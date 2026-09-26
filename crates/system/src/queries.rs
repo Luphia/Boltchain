@@ -103,12 +103,7 @@ pub fn supply<D: DatabaseRef>(db: D, chain_id: u64) -> Result<U256, QueryError>
 where
     D::Error: std::fmt::Debug,
 {
-    let s = call(&db, chain_id, REWARDS, IRewardDistributor::supplyCall {})?;
-    // ComputeMarket's emission is part of the supply once it exists (ADR 0011).
-    Ok(match call(&db, chain_id, COMPUTE, IComputeMarket::mintedCall {}) {
-        Ok(m) => s + m,
-        Err(_) => s,
-    })
+    call(&db, chain_id, REWARDS, IRewardDistributor::supplyCall {})
 }
 
 /// Consensus phase (PoW or PoS, ADR 0007).

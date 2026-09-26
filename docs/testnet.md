@@ -83,18 +83,19 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
   --checkpoint <高度>:<雜湊>
 ```
 
-## 硬分叉 `compute`（第 6001 塊）
+## 重新開始（2026-09-26，ADR 0012）
 
-第 6001 塊（epoch 10 的第一塊）起：
+測試網以新的 genesis 重新開始（時間戳 2026-09-26 08:00 UTC，hash `0xfce268e812faaa5f5dc58ffb317dba77f2ca3f8ca201fc7178b02c87cb8aef49`）。舊鏈與它的 `compute` 分叉作廢，餘額、質押與合約部署都不保留；舊的資料目錄要刪掉。
 
-- 發行改為共識 60% / 存儲 20% / 算力 20%（原本 80% / 20%）。挖礦階段每塊獎勵因此變為原本的 3/4。
-- 安裝 AI 算力市場合約 `ComputeMarket`（`0xB017000000000000000000000000000000000006`，ADR 0011）。
-
-**第 6001 塊之前必須升級到含這個分叉的版本**；舊版節點在第 6001 塊之後會分岔出去，並收到「peer 宣告了本軟體不認得的硬分叉」警告。
+- 每塊 32 BOLT（共識 31 + 存儲 1），每 4 年減半，第 5 期起固定為共識 1 + 存儲 1；沒有總量上限。
+- 沒有算力份額；`ComputeMarket` 從 genesis 起就在（`0xB017000000000000000000000000000000000006`）。
+- 存儲抽查開放給未質押節點：`boltchain wallet storage-register --wallet <帳戶> --node-key <datadir>/node.key`（沒有 BOLT 時加 `--signed`，把印出的交易交給任何人代送），然後節點加上 `--storage-account <地址>`。
 
 ## Uniswap v4
 
-測試網部署了 Uniswap v4（core 1.0.2、periphery 1.0.3、UniversalRouter 2.1.0），部署腳本與地址紀錄在 [`scripts/uniswap-v4`](../scripts/uniswap-v4)：
+舊測試網部署過 Uniswap v4（core 1.0.2、periphery 1.0.3、UniversalRouter 2.1.0），部署腳本與地址紀錄在 [`scripts/uniswap-v4`](../scripts/uniswap-v4)：
+
+> 重新開始後要重新部署（`node scripts/uniswap-v4/deploy.mjs`），下表是舊鏈的地址，重新部署後會更新。
 
 | 合約 | 地址 |
 | --- | --- |

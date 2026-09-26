@@ -595,20 +595,20 @@ fn devnet_genesis_hash_is_pinned() {
     let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&g).unwrap(),
-        "0xf7900d96a618b7fe93dfa3d05b40d029f520806d4e398bb7752c4975442588d7"
+        "0x89feb0301648215cbec52e6044fe84f701e7a7f5aa4afee45dd71c42bbd70103"
             .parse::<B256>()
             .unwrap()
     );
-    // The public testnet started before the compute fork: its genesis must not change (no
-    // ComputeMarket at genesis; the fork installs it at block 6001).
+    // The public testnet (restarted with ADR 0012's rules): every chain has ComputeMarket at
+    // genesis.
     let t = Genesis::from_json(include_str!("../../../genesis/testnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&t).unwrap(),
-        "0x4036621660f1990718ec2c59c821657ac17b91a4fa620a654e0c9bc8db137a99"
+        "0xfce268e812faaa5f5dc58ffb317dba77f2ca3f8ca201fc7178b02c87cb8aef49"
             .parse::<B256>()
             .unwrap()
     );
-    assert!(!genesis_alloc(&t).unwrap().contains_key(&COMPUTE));
+    assert!(genesis_alloc(&t).unwrap().contains_key(&COMPUTE));
     // Deterministic across runs (no dependence on the cache).
     assert_eq!(
         crate::genesis::genesis_state_root(&g).unwrap(),

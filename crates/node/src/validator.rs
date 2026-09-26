@@ -1316,6 +1316,11 @@ pub struct StorageArgs {
     /// with a `contracts` map (e.g. `scripts/uniswap-v4/deployments/8018.json`). Repeatable.
     #[arg(long = "explorer-labels", value_name = "FILE")]
     pub explorer_labels: Vec<std::path::PathBuf>,
+    /// Serve history as a storage provider without stake (ADR 0012) for this account's registered
+    /// provider ids: keep the epochs assigned to them. Repeatable. Register first with
+    /// `boltchain storage register-tx`.
+    #[arg(long = "storage-account", value_name = "ADDRESS")]
+    pub storage_accounts: Vec<alloy_primitives::Address>,
 }
 
 /// Runs a validator node until Ctrl-C.
@@ -1346,6 +1351,7 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
             snapshots: !args.storage.no_snapshots,
             prune: !args.storage.archive,
             keys: keys.clone(),
+            storage_accounts: args.storage.storage_accounts.clone(),
             ..Default::default()
         },
     );

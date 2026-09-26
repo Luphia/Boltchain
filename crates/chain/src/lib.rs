@@ -161,7 +161,7 @@ impl Chain {
         Ok(Self {
             store,
             config: genesis.config.clone(),
-            rules: EpochRules::from_config(&genesis.config),
+            rules: EpochRules::from_config(&genesis.config, genesis.timestamp),
             genesis_hash: expected,
             pending: Mutex::new(HashMap::new()),
             pow: Pow::light(algorithm),

@@ -63,6 +63,4 @@ fn disputes_reach_a_panel_at_the_next_epoch() {
     assert!(!panel.is_empty(), "panel drawn from the committee");
     let committee = view(&chain, CONSENSUS, IConsensusRegistry::committeeCall { epoch });
     assert!(panel.iter().all(|m| committee.ids.contains(m)));
-    // Nothing of the compute share is paid without verified work.
-    assert_eq!(view(&chain, COMPUTE, IComputeMarket::mintedCall {}), U256::ZERO);
 }

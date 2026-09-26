@@ -2,17 +2,22 @@
 //! computes the same assignments, tasks and panels.
 
 use alloy_primitives::{B256, keccak256};
-use bolt_primitives::params::{AUDIT_PANEL, AUDIT_TASKS, HISTORY_REPLICATION};
+use bolt_primitives::params::{AUDIT_PANEL, AUDIT_TASKS, HISTORY_REPLICATION, STORAGE_REPLICATION};
 
-/// The validators that keep epoch `index_cid`'s data (rendezvous hashing: the
-/// [`HISTORY_REPLICATION`] ids with the smallest `keccak(cid ‖ id)`).
-pub fn assignees(index_cid: &[u8], validators: &[u32]) -> Vec<u32> {
-    let mut scored: Vec<(B256, u32)> = validators
-        .iter()
-        .map(|id| (keccak256([index_cid, &id.to_be_bytes()].concat()), *id))
-        .collect();
+/// The providers that keep epoch `index_cid`'s data: [`HISTORY_REPLICATION`] validators and, in
+/// addition, [`STORAGE_REPLICATION`] storage providers without stake (ADR 0012), each chosen by
+/// rendezvous hashing (the ids with the smallest `keccak(cid ‖ id)`). Validators come first.
+pub fn assignees(index_cid: &[u8], validators: &[u32], storage: &[u32]) -> Vec<u32> {
+    let mut out = closest(index_cid, validators, HISTORY_REPLICATION as usize);
+    out.extend(closest(index_cid, storage, STORAGE_REPLICATION as usize));
+    out
+}
+
+fn closest(index_cid: &[u8], ids: &[u32], n: usize) -> Vec<u32> {
+    let mut scored: Vec<(B256, u32)> =
+        ids.iter().map(|id| (keccak256([index_cid, &id.to_be_bytes()].concat()), *id)).collect();
     scored.sort();
-    scored.into_iter().take(HISTORY_REPLICATION as usize).map(|(_, id)| id).collect()
+    scored.into_iter().take(n).map(|(_, id)| id).collect()
 }
 
 fn draw(seed: &B256, tag: &[u8], epoch: u64, i: u32) -> u64 {
@@ -70,21 +75,36 @@ mod tests {
     #[test]
     fn assignment_is_stable_and_spread() {
         let vals: Vec<u32> = (1..=100).collect();
-        let a = assignees(b"cid-1", &vals);
+        let a = assignees(b"cid-1", &vals, &[]);
         assert_eq!(a.len(), 16);
-        assert_eq!(a, assignees(b"cid-1", &vals));
-        assert_ne!(a, assignees(b"cid-2", &vals));
+        assert_eq!(a, assignees(b"cid-1", &vals, &[]));
+        assert_ne!(a, assignees(b"cid-2", &vals, &[]));
         // Rendezvous: removing a non-assignee changes nothing; removing an assignee replaces
         // only that one.
         let outsider = *vals.iter().find(|v| !a.contains(v)).unwrap();
         let fewer: Vec<u32> = vals.iter().copied().filter(|v| *v != outsider).collect();
-        assert_eq!(assignees(b"cid-1", &fewer), a);
+        assert_eq!(assignees(b"cid-1", &fewer, &[]), a);
         let gone = a[3];
         let fewer: Vec<u32> = vals.iter().copied().filter(|v| *v != gone).collect();
-        let b = assignees(b"cid-1", &fewer);
+        let b = assignees(b"cid-1", &fewer, &[]);
         assert_eq!(b.iter().filter(|x| a.contains(x)).count(), 15);
         // Small sets: everyone keeps everything.
-        assert_eq!(assignees(b"x", &[3, 1, 2]).len(), 3);
+        assert_eq!(assignees(b"x", &[3, 1, 2], &[]).len(), 3);
+    }
+
+    #[test]
+    fn storage_providers_add_copies_without_displacing_validators() {
+        let vals: Vec<u32> = (1..=100).collect();
+        let base = bolt_primitives::params::STORAGE_ID_BASE;
+        let storage: Vec<u32> = (0..1000).map(|i| base + i).collect();
+        let only_vals = assignees(b"cid-1", &vals, &[]);
+        let both = assignees(b"cid-1", &vals, &storage);
+        assert_eq!(both.len(), 32);
+        assert_eq!(&both[..16], &only_vals[..], "the same 16 validators");
+        assert!(both[16..].iter().all(|id| *id >= base));
+        // Any number of registrations never removes a validator copy.
+        let many: Vec<u32> = (0..100_000).map(|i| base + i).collect();
+        assert_eq!(&assignees(b"cid-1", &vals, &many)[..16], &only_vals[..]);
     }
 
     #[test]

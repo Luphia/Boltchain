@@ -9,6 +9,7 @@ interface IRegistry {
 
 interface IHistoryRewards {
     function passed(uint64 epoch) external view returns (uint32[] memory);
+    function depositEarnings(uint32 id) external payable;
 }
 
 interface IStakingRewards {
@@ -19,9 +20,10 @@ interface IStakingRewards {
 /// @notice New BOLT enters in two ways: while blocks are mined, the node credits each block's
 /// reward to its miner and reports it in `onBlock`; under PoS, the node credits this contract with
 /// the epoch's consensus emission in `settle`, which pays it out by participation (what is not
-/// paid stays in the unissued pool). Burned base fees and slashed stake leave the supply.
+/// paid is never issued). Burned base fees and slashed stake leave the supply; there is no cap
+/// (ADR 0012).
 contract RewardDistributor is SystemContract {
-    /// Circulating supply in wei (cap minus unissued pool).
+    /// Circulating supply in wei: everything issued minus burned fees and slashed stake.
     uint256 public supply;
     /// Votes per committee member per epoch, as 16 packed 16-bit counters per word (512 members).
     mapping(uint64 => uint256[32]) internal votes;
@@ -75,7 +77,7 @@ contract RewardDistributor is SystemContract {
     /// First block of epoch `epoch + 1`: pays epoch `epoch`'s committee in proportion to votes x
     /// seats out of `emission` (nothing for a mined epoch, which has no committee). The node first
     /// calls `preview` and credits exactly the returned amount to this contract; what is not paid
-    /// stays in the unissued pool.
+    /// is never issued.
     function settle(uint64 epoch, uint256 emission) external onlySystem returns (uint256 paid) {
         (uint32[] memory ids, uint256[] memory shares, uint256 total) = _shares(epoch, emission);
         for (uint256 i = 0; i < ids.length; i++) {
@@ -142,6 +144,12 @@ contract RewardDistributor is SystemContract {
     function claim(uint32 id) external returns (uint256 amount) {
         amount = rewards[id];
         rewards[id] = 0;
+        if (id >= 2 ** 31) {
+            // A storage provider without stake (ADR 0012): HistoryRegistry keeps its bond part.
+            emit Claimed(id, Sys.HISTORY, amount);
+            IHistoryRewards(Sys.HISTORY).depositEarnings{value: amount}(id);
+            return amount;
+        }
         (, address to,,,,) = IStakingRewards(Sys.STAKING).validator(id);
         emit Claimed(id, to, amount);
         (bool ok,) = to.call{value: amount}("");
@@ -150,7 +158,7 @@ contract RewardDistributor is SystemContract {
 
     /// Slashed stake leaves the circulating supply.
     function burnSupply(uint256 amount) external {
-        if (msg.sender != Sys.STAKING) revert Unauthorized();
+        if (msg.sender != Sys.STAKING && msg.sender != Sys.HISTORY) revert Unauthorized();
         supply = amount > supply ? 0 : supply - amount;
     }
 

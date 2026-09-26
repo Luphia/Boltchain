@@ -31,36 +31,15 @@ pub struct Fork {
     pub changes: &'static [IrregularChange],
 }
 
-/// ADR 0011: emission 60 / 20 / 20 (consensus / storage / compute) and the `ComputeMarket`
-/// system contract. Part of the genesis rules of every chain except the public testnet, which
-/// started before it.
-pub const COMPUTE: &str = "compute";
-
 /// Chain id of the public testnet.
 pub const TESTNET_CHAIN_ID: u64 = 8018;
 
-/// `ComputeMarket` as installed on the testnet by the compute fork. Pinned (never rebuilt): a
-/// node replaying the fork block must install exactly these bytes.
-pub const TESTNET_COMPUTE_MARKET: &[u8] =
-    include_bytes!("../../../contracts/forks/8018-compute/ComputeMarket.bin");
-
-const TESTNET_FORKS: &[Fork] = &[Fork {
-    name: COMPUTE,
-    // First block of epoch 10 (600-block epochs).
-    activation: 6_001,
-    changes: &[IrregularChange {
-        address: alloy_primitives::address!("0xB017000000000000000000000000000000000006"),
-        code: Some(TESTNET_COMPUTE_MARKET),
-        storage: &[],
-    }],
-}];
-
 /// Hard forks of a chain, in activation order.
 pub fn forks(chain_id: u64) -> &'static [Fork] {
-    match chain_id {
-        TESTNET_CHAIN_ID => TESTNET_FORKS,
-        _ => &[],
-    }
+    // No chain has forked yet: the public testnet restarted with ADR 0012's rules in its genesis
+    // (the `compute` fork it ran at block 6001 is gone with the old chain).
+    let _ = chain_id;
+    &[]
 }
 
 /// Whether the rules named `feature` apply at block `number`: from its fork's activation on a
@@ -230,24 +209,5 @@ mod tests {
         assert_eq!(check(&G, &ours, head, &other), Compatibility::Incompatible);
         // No forks at all (today): equal genesis is all that matters.
         assert_eq!(check(&G, &[], 5, &fork_id(&G, &[], 999)), Compatibility::Compatible);
-    }
-}
-
-#[cfg(test)]
-mod compute_fork_tests {
-    use super::*;
-
-    #[test]
-    fn compute_rules_activate_by_chain() {
-        assert!(!active(TESTNET_CHAIN_ID, COMPUTE, 6_000));
-        assert!(active(TESTNET_CHAIN_ID, COMPUTE, 6_001));
-        assert!(active(8017, COMPUTE, 0), "mainnet launches with them");
-        assert!(active(1337, COMPUTE, 0), "dev chains too");
-        assert_eq!(crate::params::reward_split(TESTNET_CHAIN_ID, 6_000), (8_000, 2_000, 0));
-        assert_eq!(crate::params::reward_split(TESTNET_CHAIN_ID, 6_001), (6_000, 2_000, 2_000));
-        assert_eq!(crate::params::reward_split(8017, 1), (6_000, 2_000, 2_000));
-        // The pinned code is the ComputeMarket runtime (starts like every solc contract).
-        assert!(TESTNET_COMPUTE_MARKET.len() > 10_000);
-        assert_eq!(&TESTNET_COMPUTE_MARKET[..2], &[0x60, 0x80]);
     }
 }

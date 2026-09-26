@@ -11,7 +11,7 @@ use alloy_sol_types::SolCall;
 use bolt_primitives::{
     bls::{dev_key, pubkey_point, signature_point},
     genesis::PowAlgorithm,
-    params::{SUPPLY_CAP_WEI, WEI_PER_BOLT},
+    params::{WEI_PER_BOLT, consensus_reward},
 };
 use bolt_system::{abi::*, addresses::*, queries};
 use std::sync::atomic::AtomicBool;
@@ -142,11 +142,8 @@ fn mined_blocks_pay_the_miner_and_follow_asert() {
     let (h1, o) = mine(&chain, vec![], miner, 12);
     assert_eq!(o, MinedOutcome::Extended);
     assert_eq!(h1.difficulty, U256::from(64), "initial difficulty");
-    let reward = bolt_pow::block_reward(
-        SUPPLY_CAP_WEI - supply0,
-        bolt_primitives::params::CONSENSUS_REWARD_BPS,
-    );
-    assert!(reward > bolt(30) && reward < bolt(300), "{reward}");
+    let reward = consensus_reward(0);
+    assert_eq!(reward, bolt(31), "32 BOLT per block, 1 of it for storage (ADR 0012)");
     assert_eq!(balance(&chain, miner), reward);
     assert_eq!(view(&chain, REWARDS, IRewardDistributor::supplyCall {}), supply0 + reward);
     // Fast blocks raise the difficulty, slow ones lower it.
@@ -457,13 +454,9 @@ fn phase_b_splits_rewards_and_pays_checkpoint_voters() {
     assert_eq!(c4.weights.iter().map(|w| *w as u32).sum::<u32>(), 4);
 
     // Epoch 4: the miner gets 60% of the block reward.
-    let supply = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
     let before = balance(&chain, miner);
     let (h17, _) = mine(&chain, vec![], miner, 12);
-    let full = bolt_pow::block_reward(
-        SUPPLY_CAP_WEI - supply,
-        bolt_primitives::params::CONSENSUS_REWARD_BPS,
-    );
+    let full = consensus_reward(0);
     assert_eq!(balance(&chain, miner) - before, full * U256::from(6) / U256::from(10));
 
     // Blocks carrying checkpoint QCs of epoch 4 record the votes, once per round.
@@ -486,16 +479,12 @@ fn phase_b_splits_rewards_and_pays_checkpoint_voters() {
     while chain.head().unwrap().number < 24 {
         mine(&chain, vec![], miner, 12);
     }
-    let supply = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
     mine(&chain, vec![], miner, 12);
-    let emission = bolt_primitives::params::epoch_emission(SUPPLY_CAP_WEI - supply)
-        * U256::from(bolt_primitives::params::CONSENSUS_REWARD_BPS)
-        / U256::from(10_000);
+    let emission = consensus_reward(0) * U256::from(chain.rules().epoch_slots);
     let paid: U256 = [1u32, 2]
         .iter()
         .map(|id| view(&chain, REWARDS, IRewardDistributor::rewardsCall { id: *id }))
         .sum();
-    // (the settling block's own reward and burn move the unissued pool slightly first)
     let expected = emission * U256::from(4) / U256::from(10);
     let diff = if paid > expected { paid - expected } else { expected - paid };
     assert!(diff < expected / U256::from(1_000), "paid {paid}, expected about {expected}");

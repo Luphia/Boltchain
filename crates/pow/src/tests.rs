@@ -69,22 +69,6 @@ fn asert_keeps_on_schedule_halves_and_doubles() {
 }
 
 #[test]
-fn block_reward_matches_daily_emission() {
-    // 7,200 blocks, each paying from the shrinking pool, issue one day's emission (2,038,588 BOLT
-    // on day one, as in the plan).
-    let mut unissued = bolt_cap();
-    for _ in 0..7_200 {
-        unissued -= block_reward(unissued, 10_000);
-    }
-    let day = (bolt_cap() - unissued) / U256::from(10u128.pow(18));
-    assert!((2_038_550..=2_038_620).contains(&day.to::<u64>()), "{day}");
-}
-
-fn bolt_cap() -> U256 {
-    U256::from(1u64 << 32) * U256::from(10u128.pow(18))
-}
-
-#[test]
 fn search_finds_a_valid_nonce() {
     for algo in [Algorithm::RandomBolt, Algorithm::Keccak] {
         let pow = Pow::light(algo);

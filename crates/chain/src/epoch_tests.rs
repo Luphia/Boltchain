@@ -183,10 +183,8 @@ fn epochs_rotate_committees_and_pay_rewards() {
     assert!(c2.ids.iter().all(|id| (1..=17).contains(id)), "{:?}", c2.ids);
     assert_eq!(c2.weights.iter().map(|w| *w as u32).sum::<u32>(), 8);
     assert_eq!(c2.seats.len(), 16);
-    let emission = bolt_primitives::params::epoch_emission(
-        bolt_primitives::params::SUPPLY_CAP_WEI - supply_before,
-    ) * U256::from(bolt_primitives::params::CONSENSUS_REWARD_BPS)
-        / U256::from(10_000);
+    let emission =
+        bolt_primitives::params::consensus_reward(0) * U256::from(chain.rules().epoch_slots);
     let paid = view(&chain, REWARDS, IRewardDistributor::supplyCall {}) - supply_before;
     // Blocks 2-5 certify heights 1-4: every member voted in all four; votes are counted per
     // block, so the whole emission is paid.
