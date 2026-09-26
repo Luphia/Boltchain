@@ -617,9 +617,36 @@ async fn run(
     let mut relayed: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
     let mut behind_nat = false;
     let mut bootstrap_tick = tokio::time::interval(Duration::from_secs(60));
+    // Chain peers (identify passed the fork check) and when their first connection opened.
+    let mut chain_peers: HashMap<PeerId, std::time::Instant> = HashMap::new();
+    let mut subs_tick = tokio::time::interval(Duration::from_secs(10));
+    let mut last_publish_warn: Option<std::time::Instant> = None;
+    // Peers dropped for missing subscriptions, redialled once their last connection closed (a
+    // dial while an old connection is still open would again be a "second" connection).
+    let mut redial: std::collections::HashSet<PeerId> = std::collections::HashSet::new();
 
     loop {
         tokio::select! {
+            _ = subs_tick.tick() => {
+                // Gossipsub sends its subscriptions only on a peer's first connection. When a
+                // peer restarts while we still hold a stale connection to its old process, its
+                // new connection counts as a second one: it never learns our topics (and we may
+                // never learn its), so it cannot publish to us — the one-sided meshes behind the
+                // testnet finality stalls. A chain peer that announced no topics well after
+                // connecting is dropped and redialled, which exchanges subscriptions afresh.
+                let now = std::time::Instant::now();
+                let silent = stale_subscriptions(
+                    swarm.behaviour().gossipsub.all_peers().map(|(p, t)| (*p, t.len())),
+                    &chain_peers,
+                    now,
+                );
+                for peer in silent {
+                    tracing::warn!(%peer, "peer announced no gossip subscriptions; reconnecting");
+                    chain_peers.remove(&peer);
+                    redial.insert(peer);
+                    let _ = swarm.disconnect_peer_id(peer);
+                }
+            }
             _ = bootstrap_tick.tick() => {
                 let _ = swarm.behaviour_mut().kad.bootstrap();
                 // Gossip health: peers whose score keeps them out of the mesh stop relaying.
@@ -651,7 +678,15 @@ async fn run(
                             continue;
                         }
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ctopic.clone(), data) {
-                            tracing::debug!("publish consensus: {e}");
+                            // A validator that cannot publish stalls its rounds: say so (at most
+                            // every 30 s) rather than only at debug level.
+                            let now = std::time::Instant::now();
+                            if last_publish_warn.is_none_or(|t| now.duration_since(t) > Duration::from_secs(30)) {
+                                last_publish_warn = Some(now);
+                                tracing::warn!("publish consensus message failed: {e}");
+                            } else {
+                                tracing::debug!("publish consensus: {e}");
+                            }
                         }
                     }
                     Command::PublishTx(raw) => {
@@ -714,6 +749,10 @@ async fn run(
                 }
                 SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                     reach.remove(&peer_id);
+                    chain_peers.remove(&peer_id);
+                    if redial.remove(&peer_id) {
+                        let _ = swarm.dial(peer_id);
+                    }
                     storage_rate.remove(&peer_id);
                     relay_candidates.remove(&peer_id);
                 }
@@ -749,6 +788,7 @@ async fn run(
                         ),
                         PeerRules::Compatible => {}
                     }
+                    chain_peers.entry(peer_id).or_insert_with(std::time::Instant::now);
                     if info.protocols.iter().any(|p| p.as_ref() == RELAY_HOP)
                         && let Some(a) = info.listen_addrs.iter().find(|a| {
                             addr_scope(a) == Scope::Public
@@ -927,6 +967,28 @@ fn tx_stateless_ok(raw: &[u8], chain_id: u64) -> bool {
         && tx.recover_signer().is_ok()
 }
 
+/// How long a chain peer may stay connected without announcing any gossip topic.
+const SUBSCRIPTION_GRACE: Duration = Duration::from_secs(20);
+
+/// Chain peers connected longer than [`SUBSCRIPTION_GRACE`] whose gossip subscriptions we never
+/// received (`gossip` lists each gossipsub peer with its number of topics; chain peers missing
+/// from it have not even opened gossipsub).
+fn stale_subscriptions(
+    gossip: impl Iterator<Item = (PeerId, usize)>,
+    chain_peers: &HashMap<PeerId, std::time::Instant>,
+    now: std::time::Instant,
+) -> Vec<PeerId> {
+    let topics: HashMap<PeerId, usize> = gossip.collect();
+    let mut out: Vec<PeerId> = chain_peers
+        .iter()
+        .filter(|(_, since)| now.duration_since(**since) > SUBSCRIPTION_GRACE)
+        .filter(|(p, _)| topics.get(p).copied().unwrap_or(0) == 0)
+        .map(|(p, _)| *p)
+        .collect();
+    out.sort();
+    out
+}
+
 fn short_peer(p: &PeerId) -> String {
     let s = p.to_string();
     s[s.len().saturating_sub(6)..].to_owned()
@@ -1046,6 +1108,23 @@ mod tests;
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+
+    #[test]
+    fn chain_peers_without_subscriptions_are_reconnected_after_a_grace_period() {
+        let now = std::time::Instant::now();
+        let (a, b, c, d) = (PeerId::random(), PeerId::random(), PeerId::random(), PeerId::random());
+        let old = now - SUBSCRIPTION_GRACE - Duration::from_secs(1);
+        let chain: HashMap<PeerId, std::time::Instant> =
+            [(a, old), (b, old), (c, now), (d, old)].into_iter().collect();
+        // a: subscribed; b: known to gossipsub without topics; c: too recent; d: absent.
+        let gossip = [(a, 4usize), (b, 0), (c, 0)].into_iter();
+        let mut want = vec![b, d];
+        want.sort();
+        assert_eq!(stale_subscriptions(gossip, &chain, now), want);
+        // An IPFS client (not a chain peer) without topics is left alone.
+        let ipfs = PeerId::random();
+        assert!(stale_subscriptions([(ipfs, 0)].into_iter(), &HashMap::new(), now).is_empty());
+    }
 
     #[test]
     fn repeats_are_not_republished_within_the_window() {

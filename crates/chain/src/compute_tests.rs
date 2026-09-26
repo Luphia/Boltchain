@@ -18,7 +18,10 @@ fn disputes_reach_a_panel_at_the_next_epoch() {
     let provider: PrivateKeySigner =
         "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d".parse().unwrap();
     produce(&chain, vec![]);
-    let reg = IComputeMarket::registerCall { encKey: B256::repeat_byte(1), peerId: Bytes::from_static(b"p") };
+    let reg = IComputeMarket::registerCall {
+        encKey: B256::repeat_byte(1),
+        peerId: Bytes::from_static(b"p"),
+    };
     produce(&chain, vec![call_tx(&provider, 0, COMPUTE, U256::ZERO, reg.abi_encode())]);
     let now = chain.head().unwrap().timestamp;
     let post = IComputeMarket::postCall {
@@ -36,7 +39,12 @@ fn disputes_reach_a_panel_at_the_next_epoch() {
     produce(&chain, vec![call_tx(&requester, 0, COMPUTE, bolt(2), post.abi_encode())]);
     let id = U256::ZERO;
     let accept = IComputeMarket::acceptCall { id };
-    let deliver = IComputeMarket::deliverCall { id, output: Bytes::from_static(b"out"), tokensIn: 10, tokensOut: 20 };
+    let deliver = IComputeMarket::deliverCall {
+        id,
+        output: Bytes::from_static(b"out"),
+        tokensIn: 10,
+        tokensOut: 20,
+    };
     produce(&chain, vec![call_tx(&provider, 1, COMPUTE, U256::ZERO, accept.abi_encode())]);
     produce(&chain, vec![call_tx(&provider, 2, COMPUTE, U256::ZERO, deliver.abi_encode())]);
     let dispute = IComputeMarket::disputeCall { id, reason: Bytes::new() };
