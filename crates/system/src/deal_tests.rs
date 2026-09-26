@@ -423,12 +423,13 @@ fn the_testnet_fork_keeps_history_state() {
     assert_eq!(evm.view(SWARM, ISwarmStorage::dealSlotsCall { id: d }).providers, vec![id]);
 }
 
-/// The fork installs exactly the SwarmStorage this source tree compiles to (until the fork is
-/// live; after that the pinned copy must never change).
+/// The swarm fork went live on the testnet at block 2401: the code it installed is fixed forever
+/// (a node replaying the chain must install the same bytes), whatever SwarmStorage.sol becomes.
 #[test]
 fn pinned_testnet_swarm_code_is_current() {
+    use sha2::{Digest, Sha256};
     assert_eq!(
-        bolt_primitives::forks::TESTNET_SWARM_STORAGE,
-        crate::artifacts::swarm_storage().deployed.as_ref()
+        hex::encode(Sha256::digest(bolt_primitives::forks::TESTNET_SWARM_STORAGE)),
+        "0314aa912f93115c81c8377394132c70c5b88d92e9bed75bcbe572c68c57ed20"
     );
 }

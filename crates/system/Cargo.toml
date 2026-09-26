@@ -26,3 +26,5 @@ workspace = true
 [dev-dependencies]
 alloy-signer = "2.5"
 alloy-signer-local = "2.5"
+hex.workspace = true
+sha2.workspace = true
