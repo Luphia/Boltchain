@@ -37,4 +37,5 @@ artifact!(staking_manager, "StakingManager.json");
 artifact!(consensus_registry, "ConsensusRegistry.json");
 artifact!(reward_distributor, "RewardDistributor.json");
 artifact!(history_registry, "HistoryRegistry.json");
+artifact!(compute_market, "ComputeMarket.json");
 artifact!(bls_harness, "BLSHarness.json");

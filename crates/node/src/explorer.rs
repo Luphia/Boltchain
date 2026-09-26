@@ -88,6 +88,7 @@ fn label(a: &Address) -> Option<String> {
         CONSENSUS => "ConsensusRegistry",
         REWARDS => "RewardDistributor",
         HISTORY => "HistoryRegistry",
+        COMPUTE => "ComputeMarket",
         SYSTEM => "System",
         _ => return LABELS.get().and_then(|m| m.get(a).cloned()),
     };
@@ -224,7 +225,14 @@ impl Explorer {
         let (cp_stakers, cp_stake) = cfg.checkpoint_thresholds();
         let (pos_stakers, pos_stake, streak) = cfg.pos_thresholds();
         let stats = self.view(r, STAKING, IStakingManager::stakerStatsCall {})?;
-        let supply = self.view(r, REWARDS, IRewardDistributor::supplyCall {})?;
+        let mut supply = self.view(r, REWARDS, IRewardDistributor::supplyCall {})?;
+        if bolt_primitives::forks::active(
+            cfg.chain_id,
+            bolt_primitives::forks::COMPUTE,
+            head.number,
+        ) {
+            supply += self.view(r, COMPUTE, IComputeMarket::mintedCall {})?;
+        }
         let validators = self.view(r, STAKING, IStakingManager::countCall {})?;
         // Hashrate from the work of the last 60 blocks and the time they took.
         let mut hashrate = 0f64;

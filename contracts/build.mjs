@@ -19,6 +19,7 @@ const WANT = [
   'src/ConsensusRegistry.sol:ConsensusRegistry',
   'src/RewardDistributor.sol:RewardDistributor',
   'src/HistoryRegistry.sol:HistoryRegistry',
+  'src/ComputeMarket.sol:ComputeMarket',
 ];
 
 const sources = {};

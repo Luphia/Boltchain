@@ -75,6 +75,67 @@ sol! {
         function passed(uint64 epoch) external view returns (uint32[]);
     }
 
+    interface IComputeMarket {
+        struct Job {
+            address requester;
+            address provider;
+            uint8 state;
+            uint64 model;
+            uint64 deadline;
+            uint64 window;
+            uint64 deliveredAt;
+            uint64 tokensIn;
+            uint64 tokensOut;
+            uint64 maxIn;
+            uint64 maxOut;
+            uint128 priceIn;
+            uint128 priceOut;
+            uint128 relayFee;
+            uint128 escrow;
+            bytes input;
+            bytes output;
+        }
+        function register(bytes32 encKey, bytes peerId) external;
+        function registerFor(address provider_, bytes32 encKey, bytes peerId, uint256 fee, uint256 deadline,
+            bytes sig) external;
+        function setEncryptionKey(bytes32 key) external;
+        function encryptionKey(address account) external view returns (bytes32);
+        function requestExit() external;
+        function releaseBond() external;
+        function provider(address p) external view returns (bool registered, bytes peerId, uint256 bond,
+            uint256 debt, uint32 jobsDone, uint32 faults, uint64 exitEpoch);
+        function jobLimit(address p) external view returns (uint256);
+        function actionDigest(bytes32 action, address signer, bytes data, uint256 deadline)
+            external view returns (bytes32);
+        function nonces(address account) external view returns (uint256);
+        function post(address provider_, uint64 model, bytes input, uint128 priceIn, uint128 priceOut,
+            uint64 maxIn, uint64 maxOut, uint64 deadline, uint64 window, uint128 relayFee)
+            external payable returns (uint256 id);
+        function accept(uint256 id) external;
+        function acceptFor(uint256 id, address provider_, uint256 deadline, bytes sig) external;
+        function shareInput(uint256 id, bytes input) external;
+        function deliver(uint256 id, bytes output, uint64 tokensIn, uint64 tokensOut) external;
+        function deliverFor(uint256 id, address provider_, bytes output, uint64 tokensIn, uint64 tokensOut,
+            uint256 deadline, bytes sig) external;
+        function settle(uint256 id) external;
+        function refund(uint256 id) external;
+        function dispute(uint256 id, bytes reason) external payable;
+        function assignDisputes(uint64 epoch, uint32[] members) external;
+        function recordVerdict(uint256 id, bool providerAtFault) external returns (bool);
+        function expireDispute(uint256 id) external;
+        function job(uint256 id) external view returns (Job);
+        function jobCount() external view returns (uint256);
+        function panel(uint64 epoch) external view returns (uint32[]);
+        function pendingDisputes() external view returns (uint256[]);
+        function recordWork(uint64 epoch, address provider_, uint256 units) external;
+        function previewCompute(uint64 epoch, uint256 emission) external view returns (uint256);
+        function settleCompute(uint64 epoch, uint256 emission) external returns (uint256);
+        function minted() external view returns (uint256);
+        function balanceOf(address account) external view returns (uint256);
+        function withdraw(address to) external;
+        function payout(address account) external;
+    }
+
     interface IBLSHarness {
         function hashToG2(bytes message, bytes dst) external view returns (bytes);
         function expand(bytes message, bytes dst) external pure returns (bytes);

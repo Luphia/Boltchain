@@ -75,12 +75,27 @@ pub const EMISSION_HALF_LIFE_EPOCHS: u64 = 4 * 365;
 /// Per-epoch emission rate `k = 1 - 2^(-1/1460)`, scaled by 1e18.
 pub const EMISSION_RATE_E18: u128 = 474_645_662_939_840;
 
-/// Share of emission paid to consensus participation, in basis points. The rest goes to history
-/// storage ([`STORAGE_REWARD_BPS`]).
-pub const CONSENSUS_REWARD_BPS: u32 = 8_000;
+/// Share of emission paid to consensus participation (mining, then committees), in basis
+/// points (ADR 0011: 60 / 20 / 20).
+pub const CONSENSUS_REWARD_BPS: u32 = 6_000;
 
 /// Share of emission paid to history storage providers that pass audits, in basis points.
-pub const STORAGE_REWARD_BPS: u32 = 10_000 - CONSENSUS_REWARD_BPS;
+pub const STORAGE_REWARD_BPS: u32 = 2_000;
+
+/// Share of emission paid for verified AI compute (ADR 0011), in basis points.
+pub const COMPUTE_REWARD_BPS: u32 = 10_000 - CONSENSUS_REWARD_BPS - STORAGE_REWARD_BPS;
+
+/// Consensus share before the compute fork (ADR 0003: 80 / 20, no compute share).
+pub const LEGACY_CONSENSUS_REWARD_BPS: u32 = 8_000;
+
+/// Emission split `(consensus, storage, compute)` in basis points at block `number`.
+pub fn reward_split(chain_id: u64, number: u64) -> (u32, u32, u32) {
+    if crate::forks::active(chain_id, crate::forks::COMPUTE, number) {
+        (CONSENSUS_REWARD_BPS, STORAGE_REWARD_BPS, COMPUTE_REWARD_BPS)
+    } else {
+        (LEGACY_CONSENSUS_REWARD_BPS, 10_000 - LEGACY_CONSENSUS_REWARD_BPS, 0)
+    }
+}
 
 /// Stake finality start (phase B, ADR 0007 §4): minimum number of stakers.
 pub const CHECKPOINT_MIN_STAKERS: u32 = 32;

@@ -83,6 +83,15 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
   --checkpoint <高度>:<雜湊>
 ```
 
+## 硬分叉 `compute`（第 6001 塊）
+
+第 6001 塊（epoch 10 的第一塊）起：
+
+- 發行改為共識 60% / 存儲 20% / 算力 20%（原本 80% / 20%）。挖礦階段每塊獎勵因此變為原本的 3/4。
+- 安裝 AI 算力市場合約 `ComputeMarket`（`0xB017000000000000000000000000000000000006`，ADR 0011）。
+
+**第 6001 塊之前必須升級到含這個分叉的版本**；舊版節點在第 6001 塊之後會分岔出去，並收到「peer 宣告了本軟體不認得的硬分叉」警告。
+
 ## Uniswap v4
 
 測試網部署了 Uniswap v4（core 1.0.2、periphery 1.0.3、UniversalRouter 2.1.0），部署腳本與地址紀錄在 [`scripts/uniswap-v4`](../scripts/uniswap-v4)：

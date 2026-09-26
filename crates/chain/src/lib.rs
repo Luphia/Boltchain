@@ -1036,6 +1036,8 @@ pub fn max_cost(tx: &TxEnvelope) -> U256 {
 }
 
 #[cfg(test)]
+mod compute_tests;
+#[cfg(test)]
 mod epoch_tests;
 #[cfg(test)]
 mod history_tests;

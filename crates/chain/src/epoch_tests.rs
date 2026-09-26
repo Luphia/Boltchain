@@ -185,7 +185,7 @@ fn epochs_rotate_committees_and_pay_rewards() {
     assert_eq!(c2.seats.len(), 16);
     let emission = bolt_primitives::params::epoch_emission(
         bolt_primitives::params::SUPPLY_CAP_WEI - supply_before,
-    ) * U256::from(8_000)
+    ) * U256::from(bolt_primitives::params::CONSENSUS_REWARD_BPS)
         / U256::from(10_000);
     let paid = view(&chain, REWARDS, IRewardDistributor::supplyCall {}) - supply_before;
     // Blocks 2-5 certify heights 1-4: every member voted in all four; votes are counted per

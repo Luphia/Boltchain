@@ -6,8 +6,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_sol_types::SolCall;
 use bolt_exec::{BlockExecutor, block::BlockError};
 use bolt_primitives::params::{
-    CHECKPOINT_MINER_BPS, CONSENSUS_REWARD_BPS, STORAGE_REWARD_BPS, SUPPLY_CAP_WEI, WEI_PER_BOLT,
-    epoch_emission,
+    CHECKPOINT_MINER_BPS, SUPPLY_CAP_WEI, WEI_PER_BOLT, epoch_emission, reward_split,
 };
 use revm::DatabaseRef;
 
@@ -140,6 +139,19 @@ where
     C::abi_decode_returns(&out).map_err(|e| BlockError::Evm(format!("decode {to}: {e}")))
 }
 
+/// Circulating supply: RewardDistributor's count plus the compute emission ComputeMarket paid.
+fn supply<D: DatabaseRef>(exec: &mut BlockExecutor<D>) -> Result<U256, BlockError<D::Error>>
+where
+    D::Error: std::error::Error + Send + Sync + 'static,
+{
+    let p = exec.params().input;
+    let mut s = view(exec, REWARDS, IRewardDistributor::supplyCall {})?;
+    if bolt_primitives::forks::active(p.chain_id, bolt_primitives::forks::COMPUTE, p.number) {
+        s += view(exec, COMPUTE, IComputeMarket::mintedCall {})?;
+    }
+    Ok(s)
+}
+
 fn sys<D: DatabaseRef, C: SolCall>(
     exec: &mut BlockExecutor<D>,
     to: Address,
@@ -196,13 +208,15 @@ where
     D::Error: std::error::Error + Send + Sync + 'static,
 {
     let number = exec.params().input.number;
+    let chain_id = exec.params().input.chain_id;
+    let (consensus_bps, storage_bps, compute_bps) = reward_split(chain_id, number);
     // 1. Burn accounting, block reward, participation.
     let burned = U256::from(parent.base_fee_per_gas.unwrap_or(0)) * U256::from(parent.gas_used);
     let mut minted = U256::ZERO;
     if producer != Producer::Committee {
-        let supply = view(exec, REWARDS, IRewardDistributor::supplyCall {})?;
+        let supply = supply(exec)?;
         let unissued = SUPPLY_CAP_WEI.saturating_sub(supply);
-        minted = bolt_pow::block_reward(unissued, CONSENSUS_REWARD_BPS);
+        minted = bolt_pow::block_reward(unissued, consensus_bps);
         if producer == Producer::MinerWithCheckpoints {
             minted = minted * U256::from(CHECKPOINT_MINER_BPS) / U256::from(10_000);
         }
@@ -231,10 +245,10 @@ where
     // (miners were paid per block), the whole consensus share under PoS.
     let before = crate::queries::phase_in(exec)?;
     if epoch >= 1 {
-        let supply = view(exec, REWARDS, IRewardDistributor::supplyCall {})?;
+        let supply = supply(exec)?;
         let unissued = SUPPLY_CAP_WEI.saturating_sub(supply);
         let mut emission =
-            epoch_emission(unissued) * U256::from(CONSENSUS_REWARD_BPS) / U256::from(10_000);
+            epoch_emission(unissued) * U256::from(consensus_bps) / U256::from(10_000);
         if before.is_checkpoint_epoch(epoch - 1) {
             emission = emission * U256::from(10_000 - CHECKPOINT_MINER_BPS) / U256::from(10_000);
         }
@@ -249,8 +263,7 @@ where
             return Err(BlockError::Evm(format!("settle paid {paid}, preview said {payout}")));
         }
         // Storage share: equal parts per audit pass of the previous epoch (ADR 0009).
-        let storage =
-            epoch_emission(unissued) * U256::from(STORAGE_REWARD_BPS) / U256::from(10_000);
+        let storage = epoch_emission(unissued) * U256::from(storage_bps) / U256::from(10_000);
         let payout = view(
             exec,
             REWARDS,
@@ -266,6 +279,26 @@ where
         )?;
         if paid != payout {
             return Err(BlockError::Evm(format!("storage paid {paid}, preview said {payout}")));
+        }
+        // Compute share (ADR 0011): verified protocol work of the previous epoch.
+        if compute_bps != 0 {
+            let compute = epoch_emission(unissued) * U256::from(compute_bps) / U256::from(10_000);
+            let payout = view(
+                exec,
+                COMPUTE,
+                IComputeMarket::previewComputeCall { epoch: epoch - 1, emission: compute },
+            )?;
+            if !payout.is_zero() {
+                exec.credit(COMPUTE, payout.to::<u128>())?;
+            }
+            let paid = sys(
+                exec,
+                COMPUTE,
+                IComputeMarket::settleComputeCall { epoch: epoch - 1, emission: compute },
+            )?;
+            if paid != payout {
+                return Err(BlockError::Evm(format!("compute paid {paid}, preview said {payout}")));
+            }
         }
         // The previous epoch's index: the node built it from the envelopes of that epoch.
         let cid = history
@@ -304,6 +337,10 @@ where
         begin_audits(exec, rules, parent, epoch)?;
     }
     record_audits(exec, history)?;
+    // Compute disputes (ADR 0011) waiting for a panel.
+    if compute_bps != 0 {
+        assign_disputes(exec, parent, epoch)?;
+    }
 
     // 5. Committee of the next epoch.
     let next = epoch + 1;
@@ -377,6 +414,34 @@ where
         HISTORY,
         IHistoryRegistry::beginAuditsCall { epoch, panel, providers, targets, heights },
     )?;
+    Ok(())
+}
+
+/// Assigns waiting compute disputes to a verifier panel: drawn from the epoch's committee, or in
+/// the mining phase (no committee) from all stakers. Without either, disputes wait (and settle for
+/// the provider after `VERDICT_TIMEOUT`).
+fn assign_disputes<D: DatabaseRef>(
+    exec: &mut BlockExecutor<D>,
+    parent: &Header,
+    epoch: u64,
+) -> Result<(), BlockError<D::Error>>
+where
+    D::Error: std::error::Error + Send + Sync + 'static,
+{
+    if view(exec, COMPUTE, IComputeMarket::pendingDisputesCall {})?.is_empty() {
+        return Ok(());
+    }
+    let mut pool = view(exec, CONSENSUS, IConsensusRegistry::committeeCall { epoch })?.ids;
+    if pool.is_empty() {
+        pool = view(exec, STAKING, IStakingManager::snapshotCall { minAge: 0 })?.ids;
+    }
+    if pool.is_empty() {
+        return Ok(());
+    }
+    // Independent of the audit panel drawn from the same seed.
+    let seed = alloy_primitives::keccak256([seed(parent).as_slice(), b"compute/disputes"].concat());
+    let members = crate::history::draw_panel(&seed, epoch, &pool);
+    sys(exec, COMPUTE, IComputeMarket::assignDisputesCall { epoch, members })?;
     Ok(())
 }
 

@@ -142,7 +142,10 @@ fn mined_blocks_pay_the_miner_and_follow_asert() {
     let (h1, o) = mine(&chain, vec![], miner, 12);
     assert_eq!(o, MinedOutcome::Extended);
     assert_eq!(h1.difficulty, U256::from(64), "initial difficulty");
-    let reward = bolt_pow::block_reward(SUPPLY_CAP_WEI - supply0, 8_000);
+    let reward = bolt_pow::block_reward(
+        SUPPLY_CAP_WEI - supply0,
+        bolt_primitives::params::CONSENSUS_REWARD_BPS,
+    );
     assert!(reward > bolt(30) && reward < bolt(300), "{reward}");
     assert_eq!(balance(&chain, miner), reward);
     assert_eq!(view(&chain, REWARDS, IRewardDistributor::supplyCall {}), supply0 + reward);
@@ -457,7 +460,10 @@ fn phase_b_splits_rewards_and_pays_checkpoint_voters() {
     let supply = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
     let before = balance(&chain, miner);
     let (h17, _) = mine(&chain, vec![], miner, 12);
-    let full = bolt_pow::block_reward(SUPPLY_CAP_WEI - supply, 8_000);
+    let full = bolt_pow::block_reward(
+        SUPPLY_CAP_WEI - supply,
+        bolt_primitives::params::CONSENSUS_REWARD_BPS,
+    );
     assert_eq!(balance(&chain, miner) - before, full * U256::from(6) / U256::from(10));
 
     // Blocks carrying checkpoint QCs of epoch 4 record the votes, once per round.
@@ -483,7 +489,7 @@ fn phase_b_splits_rewards_and_pays_checkpoint_voters() {
     let supply = view(&chain, REWARDS, IRewardDistributor::supplyCall {});
     mine(&chain, vec![], miner, 12);
     let emission = bolt_primitives::params::epoch_emission(SUPPLY_CAP_WEI - supply)
-        * U256::from(8_000)
+        * U256::from(bolt_primitives::params::CONSENSUS_REWARD_BPS)
         / U256::from(10_000);
     let paid: U256 = [1u32, 2]
         .iter()

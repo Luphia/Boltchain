@@ -22,3 +22,7 @@ thiserror.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+alloy-signer = "2.5"
+alloy-signer-local = "2.5"

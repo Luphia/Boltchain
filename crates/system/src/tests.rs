@@ -260,9 +260,10 @@ fn genesis_deploys_system_contracts() {
     assert!(evm.view(CONSENSUS, IConsensusRegistry::committeeCall { epoch: 0 }).ids.is_empty());
     assert_eq!(evm.view(STAKING, IStakingManager::countCall {}), 0);
     assert_eq!(evm.view(REWARDS, IRewardDistributor::supplyCall {}), U256::ZERO);
-    // Only the system contracts and the two Osaka predeploys exist.
+    // Only the system contracts (ComputeMarket included, ADR 0011) and the two Osaka predeploys.
     let alloc = genesis_alloc(&g).unwrap();
-    assert_eq!(alloc.len(), 6, "{:?}", alloc.keys().collect::<Vec<_>>());
+    assert!(alloc.contains_key(&COMPUTE));
+    assert_eq!(alloc.len(), 7, "{:?}", alloc.keys().collect::<Vec<_>>());
     assert!(alloc.values().all(|a| a.balance.is_zero()));
 }
 
@@ -594,10 +595,20 @@ fn devnet_genesis_hash_is_pinned() {
     let g = Genesis::from_json(include_str!("../../../genesis/devnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&g).unwrap(),
-        "0x641750c7c4e6d5cae1746ffcb1c3796f0b85be0ef54f6bb4d9ce1be2c5543e52"
+        "0xf7900d96a618b7fe93dfa3d05b40d029f520806d4e398bb7752c4975442588d7"
             .parse::<B256>()
             .unwrap()
     );
+    // The public testnet started before the compute fork: its genesis must not change (no
+    // ComputeMarket at genesis; the fork installs it at block 6001).
+    let t = Genesis::from_json(include_str!("../../../genesis/testnet.json")).unwrap();
+    assert_eq!(
+        crate::genesis_hash(&t).unwrap(),
+        "0x4036621660f1990718ec2c59c821657ac17b91a4fa620a654e0c9bc8db137a99"
+            .parse::<B256>()
+            .unwrap()
+    );
+    assert!(!genesis_alloc(&t).unwrap().contains_key(&COMPUTE));
     // Deterministic across runs (no dependence on the cache).
     assert_eq!(
         crate::genesis::genesis_state_root(&g).unwrap(),
