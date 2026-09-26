@@ -199,3 +199,71 @@ fn votes_are_checked_as_one_aggregate_and_forgeries_are_dropped() {
     let check = BlsScheme::new(pks, &[]);
     assert!(check.verify_aggregate(&signers, &msg, qc.sig.as_ref().unwrap()));
 }
+
+/// Runs a single engine that holds every seat until `done` or `steps` actions; returns whether
+/// it asked to fetch a block.
+fn drive(
+    engine: &mut Engine<BlsScheme>,
+    mut queue: std::collections::VecDeque<Action<BlsScheme>>,
+    done: impl Fn(&Engine<BlsScheme>) -> bool,
+) -> bool {
+    let mut fetched = false;
+    for _ in 0..10_000 {
+        if done(engine) {
+            break;
+        }
+        let Some(a) = queue.pop_front() else { break };
+        let out = match a {
+            Action::Broadcast(m) | Action::SendTo(_, m) => engine.on_message(m),
+            Action::Validate(p) => engine.on_validated(p.block.hash, true),
+            Action::Propose { round, qc, tc } => {
+                let hash =
+                    alloy_primitives::keccak256([&round.to_be_bytes()[..], &qc.block[..]].concat());
+                let block = BlockInfo { hash, parent: qc.block, round, height: qc.height + 1 };
+                engine.on_proposed(block, qc, tc, Vec::new())
+            }
+            Action::FetchBlock(_) => {
+                fetched = true;
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        queue.extend(out);
+    }
+    fetched
+}
+
+/// A restarted validator keeps committing: the blocks above its last committed one are part of
+/// its persisted state, so a new certificate can be walked back to it. (Phase B checkpoint rounds
+/// are not in mined headers, so a node that forgot them could not fetch them back.)
+#[test]
+fn resumed_engine_commits_without_refetching_uncommitted_blocks() {
+    let (sks, pks) = bls_set(4);
+    let genesis = B256::repeat_byte(1);
+    let cfg = || {
+        let mut c = Config::genesis(8017, ValidatorSet::equal(4), None, genesis, 1000);
+        c.me = vec![0, 1, 2, 3];
+        c
+    };
+    let mut e = Engine::new(cfg(), BlsScheme::new(pks.clone(), &sks));
+    let start = e.start().into();
+    drive(&mut e, start, |e| e.committed().height >= 5);
+    let saved = e.persisted();
+    assert!(!saved.blocks.is_empty(), "the certified block above the committed one is kept");
+    let json = serde_json::to_vec(&saved).unwrap();
+    let restored: Persisted<BlsScheme> = serde_json::from_slice(&json).unwrap();
+
+    let committed = saved.committed.height;
+    let mut resumed = Engine::resume(cfg(), BlsScheme::new(pks.clone(), &sks), restored);
+    let start = resumed.start().into();
+    let fetched = drive(&mut resumed, start, |e| e.committed().height > committed + 2);
+    assert!(!fetched, "nothing had to be fetched");
+    assert!(resumed.committed().height > committed + 2);
+
+    // State written by the previous release (no `blocks`): the same walk needs a fetch.
+    let mut old = saved.clone();
+    old.blocks.clear();
+    let mut forgetful = Engine::resume(cfg(), BlsScheme::new(pks, &sks), old);
+    let start = forgetful.start().into();
+    assert!(drive(&mut forgetful, start, |e| e.committed().height > committed + 2));
+}

@@ -84,6 +84,11 @@ pub struct Persisted<S: Scheme> {
     pub high_qc: Qc<S>,
     /// Highest round voted or timed out in.
     pub last_voted: Round,
+    /// Blocks above `committed` this engine knows (proposed or fetched). Their rounds are not in
+    /// mined headers (phase B checkpoints), so without them a restarted node could not walk from a
+    /// new certificate back to `committed` and would never commit again.
+    #[serde(default)]
+    pub blocks: Vec<BlockInfo>,
 }
 
 /// What the node must do.
@@ -224,6 +229,11 @@ impl<S: Scheme> Engine<S> {
             e.qcs.insert(p.committed.hash, p.committed_qc.clone());
             e.committed = p.committed;
         }
+        for b in p.blocks {
+            if b.height > e.committed.height {
+                e.blocks.insert(b.hash, b);
+            }
+        }
         e.qcs.insert(p.high_qc.block, p.high_qc.clone());
         e.high_qc = p.high_qc;
         e.last_voted = p.last_voted;
@@ -254,7 +264,22 @@ impl<S: Scheme> Engine<S> {
                 .unwrap_or_else(|| self.anchor_qc()),
             high_qc: self.high_qc.clone(),
             last_voted: self.last_voted,
+            blocks: {
+                let mut v: Vec<BlockInfo> = self
+                    .blocks
+                    .values()
+                    .filter(|b| b.height > self.committed.height)
+                    .cloned()
+                    .collect();
+                v.sort_by_key(|b| (b.height, b.round));
+                v
+            },
         }
+    }
+
+    /// Round in which `block` was certified, if this engine holds its certificate.
+    pub fn certified_round(&self, block: &B256) -> Option<Round> {
+        self.qcs.get(block).map(|q| q.round)
     }
 
     /// Current round.

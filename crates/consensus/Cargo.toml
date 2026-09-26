@@ -17,3 +17,6 @@ serde_ipld_dagcbor.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

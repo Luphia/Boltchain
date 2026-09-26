@@ -284,6 +284,10 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
   - 「sealed block not imported: unknown parent」是算出 nonce 時父區塊已經被重組掉，改成 debug 等級
   - 修剪數為 0 是預期的：歷史副本數 16 大於測試網的 8 位驗證者，所以每個節點都被指派保存全部歷史
 - [x] 投票驗證成本（`boltchain bench votes`，雲端 x86 2 vCPU）：512 席、法定 342 票，逐票驗證 366 ms（每票約 1.07 ms），彙整 34 ms，驗證彙整簽章 25 ms → 1.3 ms（公鑰只在 epoch 開始時解碼一次，委員會的簽章驗證全部改用解碼過的公鑰）。樹莓派約慢 3–5 倍，逐票驗證約 1.1–1.8 秒，占 6 秒出塊的 20–30%。改成延後驗證：下一輪的 leader 收到的票湊滿法定數量後先彙整、只驗一次彙整簽章（約 35 ms），失敗才逐票找出偽造的票並丟掉；同一位簽署者出現兩個不同簽章時立即個別驗證，偽造票無法擋掉真票（`votes_are_checked_as_one_aggregate_and_forgeries_are_dropped`）。新增指標 `consensus_messages_total`、`consensus_bytes_total`、`bls_verifications_total`、`bls_verify_microseconds_total`
+- [x] 測試網觀察 4（2026-09-26）：部署 r14 時 4 個節點依序重啟，之後最終區塊停在 4285，不再前進（檢查點仍持續被認證，但一直沒有提交）。原因是階段 B 的檢查點 round 不在挖出來的區塊 header 裡，只記在記憶體：重啟後，從新憑證往回走到上一個已提交區塊時，重啟前認證過的區塊查不到 round，提交一直等在 FetchBlock。修正：
+  - 共識狀態檔多存已知但尚未提交的區塊（`Persisted.blocks`），重啟後直接接上（`resumed_engine_commits_without_refetching_uncommitted_blocks`）
+  - 舊版狀態檔或真的查不到時：round 改用手上的憑證，再不行用 0（只會被沿路走過，兩鏈規則不可能把它當成 P 與 B 配對）
+  - r15 部署後最終區塊從 4285 追到 4375，之後隨 head 持續前進；再次滾動重啟也沒有中斷
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## M6 追加項目（ADR 0008）

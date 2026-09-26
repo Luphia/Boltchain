@@ -975,10 +975,21 @@ impl Validator {
                     Action::FetchBlock(hash) => {
                         // Blocks are content-addressed: if we have the header (pending or final) we
                         // can describe it; otherwise the catch-up path brings it with a proof.
-                        // Checkpoint rounds are not in mined headers: use the proposal we saw.
+                        // Checkpoint rounds are not in mined headers: use the proposal we saw or the
+                        // certificate we hold. Failing both (an ancestor certified before this
+                        // node restarted), round 0. Such a block is only walked through on the way
+                        // back to the last committed block: the two-chain rule needs P.round + 1 ==
+                        // B.round, and round 0 could only pair with a round-1 block, whose parent
+                        // is the epoch's anchor (already committed).
                         let round_for = |h: &Header| match ctx.mode {
                             Mode::Blocks => round_of(&h.extra_data),
-                            Mode::Checkpoints => rounds.get(&hash).copied(),
+                            Mode::Checkpoints => Some(
+                                rounds
+                                    .get(&hash)
+                                    .copied()
+                                    .or_else(|| ctx.engine.certified_round(&hash))
+                                    .unwrap_or(0),
+                            ),
                         };
                         if let Ok(Some(h)) = self.chain.header_any(&hash)
                             && let Some(round) = round_for(&h)
