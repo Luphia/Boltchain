@@ -1,6 +1,8 @@
-//! Storage-audit votes and certificates (ADR 0009). The epoch's audit panel (16 committee members)
-//! fetches each task's data from its provider and signs the outcome; 2/3 of the panel agreeing
-//! form a certificate that block producers include and the chain verifies before recording it.
+//! Panel votes and certificates. Storage audits (ADR 0009): the epoch's audit panel (16 committee
+//! members) fetches each task's data from its provider and signs the outcome. Compute verdicts
+//! (ADR 0011): the verifier panel a dispute was assigned to signs whether the provider was at
+//! fault. More than 2/3 of a panel agreeing form a certificate that block producers include (in
+//! the envelope's `audits` list) and the chain verifies before recording it.
 
 use crate::bitmap;
 use bolt_primitives::bls::{self, BlsPublicKey, BlsSecretKey, BlsSignature};
@@ -139,6 +141,134 @@ impl AuditCert {
     }
 }
 
+/// The message a verifier signs for a compute dispute.
+pub fn verdict_msg(chain_id: u64, epoch: u64, job: u64, at_fault: bool) -> Vec<u8> {
+    [
+        b"boltchain/verdict/v1".as_slice(),
+        &chain_id.to_be_bytes(),
+        &epoch.to_be_bytes(),
+        &job.to_be_bytes(),
+        &[at_fault as u8],
+    ]
+    .concat()
+}
+
+/// One verifier's vote on a compute dispute (gossiped).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerdictVote {
+    /// Epoch whose verifier panel decides the dispute.
+    pub epoch: u64,
+    /// Disputed job id.
+    pub job: u64,
+    /// Whether the provider was at fault.
+    pub fault: bool,
+    /// Index of the verifier in the epoch's panel.
+    pub member: u16,
+    /// Signature over [`verdict_msg`].
+    pub sig: BlsSignature,
+}
+
+impl VerdictVote {
+    /// Signs a vote.
+    pub fn sign(
+        key: &BlsSecretKey,
+        chain_id: u64,
+        epoch: u64,
+        job: u64,
+        fault: bool,
+        member: u16,
+    ) -> Self {
+        Self { epoch, job, fault, member, sig: key.sign(&verdict_msg(chain_id, epoch, job, fault)) }
+    }
+
+    /// dag-cbor.
+    pub fn encode(&self) -> Vec<u8> {
+        serde_ipld_dagcbor::to_vec(self).expect("vote encodes")
+    }
+
+    /// From dag-cbor.
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        serde_ipld_dagcbor::from_slice(b).ok()
+    }
+
+    /// Whether the signature is `panel[member]`'s.
+    pub fn verify(&self, chain_id: u64, panel: &[BlsPublicKey]) -> bool {
+        panel.get(self.member as usize).is_some_and(|pk| {
+            bls::verify(pk, &verdict_msg(chain_id, self.epoch, self.job, self.fault), &self.sig)
+        })
+    }
+}
+
+/// A verifier-panel certificate on a compute dispute. Encoded with a `job` field (an
+/// [`AuditCert`] has `task`), so the two never decode as each other.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerdictCert {
+    /// Epoch whose panel decided.
+    pub epoch: u64,
+    /// Disputed job id.
+    pub job: u64,
+    /// Whether the provider was at fault.
+    pub fault: bool,
+    /// Signers, as a bitmap over the panel.
+    #[serde(with = "serde_bytes")]
+    pub signers: Vec<u8>,
+    /// Aggregate signature.
+    pub sig: BlsSignature,
+}
+
+impl VerdictCert {
+    /// Aggregates `votes` (same epoch, job and verdict; distinct members) for a panel of `n`.
+    pub fn aggregate(votes: &[VerdictVote], n: usize) -> Option<Self> {
+        let first = votes.first()?;
+        if votes
+            .iter()
+            .any(|v| v.epoch != first.epoch || v.job != first.job || v.fault != first.fault)
+        {
+            return None;
+        }
+        let mut members: Vec<u16> = votes.iter().map(|v| v.member).collect();
+        members.sort_unstable();
+        members.dedup();
+        if members.len() != votes.len() || members.len() * 3 <= n * 2 {
+            return None;
+        }
+        let sigs: Vec<BlsSignature> = votes.iter().map(|v| v.sig).collect();
+        Some(Self {
+            epoch: first.epoch,
+            job: first.job,
+            fault: first.fault,
+            signers: bitmap::encode(&members, n),
+            sig: bls::aggregate(&sigs)?,
+        })
+    }
+
+    /// dag-cbor.
+    pub fn encode(&self) -> Vec<u8> {
+        serde_ipld_dagcbor::to_vec(self).expect("certificate encodes")
+    }
+
+    /// From dag-cbor.
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        serde_ipld_dagcbor::from_slice(b).ok()
+    }
+
+    /// Whether more than 2/3 of `panel` signed this verdict.
+    pub fn verify(&self, chain_id: u64, panel: &[BlsPublicKey]) -> bool {
+        let signers = bitmap::decode(&self.signers);
+        if signers.len() * 3 <= panel.len() * 2
+            || signers.iter().any(|i| *i as usize >= panel.len())
+        {
+            return false;
+        }
+        let pks: Vec<BlsPublicKey> = signers.iter().map(|i| panel[*i as usize]).collect();
+        bls::fast_aggregate_verify(
+            &pks,
+            &verdict_msg(chain_id, self.epoch, self.job, self.fault),
+            &self.sig,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +294,30 @@ mod tests {
         assert!(!forged.verify(7, &panel));
         let v = AuditVote::decode(&votes[0].encode()).unwrap();
         assert_eq!(v, votes[0]);
+    }
+
+    #[test]
+    fn verdict_certificates_are_distinct_from_audit_certificates() {
+        let keys: Vec<BlsSecretKey> = (0..4).map(bls::dev_key).collect();
+        let panel: Vec<BlsPublicKey> = keys.iter().map(|k| k.public_key()).collect();
+        let votes: Vec<VerdictVote> =
+            (0..3u16).map(|m| VerdictVote::sign(&keys[m as usize], 7, 5, 42, true, m)).collect();
+        assert!(votes.iter().all(|v| v.verify(7, &panel)));
+        assert!(VerdictCert::aggregate(&votes[..2], 4).is_none());
+        let cert = VerdictCert::aggregate(&votes, 4).unwrap();
+        assert!(cert.verify(7, &panel));
+        let mut other = cert.clone();
+        other.fault = false;
+        assert!(!other.verify(7, &panel));
+        // Same signers and numbers as an audit: the domains differ, and the encodings never
+        // decode as each other.
+        let audit: Vec<AuditVote> =
+            (0..3u16).map(|m| AuditVote::sign(&keys[m as usize], 7, 5, 42, true, m)).collect();
+        let a = AuditCert::aggregate(&audit, 4).unwrap();
+        assert_ne!(a.sig, cert.sig);
+        assert!(AuditCert::decode(&cert.encode()).is_none());
+        assert!(VerdictCert::decode(&a.encode()).is_none());
+        assert_eq!(VerdictCert::decode(&cert.encode()).unwrap(), cert);
+        assert_eq!(VerdictVote::decode(&votes[1].encode()).unwrap(), votes[1]);
     }
 }

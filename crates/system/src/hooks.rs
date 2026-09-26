@@ -173,6 +173,8 @@ pub struct HistoryInputs {
     pub epoch_index: Option<Vec<u8>>,
     /// Verified audit certificates carried by the block.
     pub audits: Vec<AuditResult>,
+    /// Verified compute verdicts carried by the block (ADR 0011): (job id, provider at fault).
+    pub verdicts: Vec<(u64, bool)>,
 }
 
 /// How the block being executed is produced (for rewards).
@@ -492,6 +494,13 @@ where
             exec,
             SWARM,
             ISwarmStorage::recordAuditCall { epoch: a.epoch, task: a.task, ok: a.passed },
+        )?;
+    }
+    for (job, fault) in &history.verdicts {
+        sys(
+            exec,
+            COMPUTE,
+            IComputeMarket::recordVerdictCall { id: U256::from(*job), providerAtFault: *fault },
         )?;
     }
     Ok(())

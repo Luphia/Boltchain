@@ -7,7 +7,7 @@ pub mod audit;
 pub mod engine;
 pub mod types;
 
-pub use audit::{AuditCert, AuditVote, audit_msg};
+pub use audit::{AuditCert, AuditVote, VerdictCert, VerdictVote, audit_msg, verdict_msg};
 pub use engine::{Action, Config, Engine, Persisted};
 pub use types::*;
 

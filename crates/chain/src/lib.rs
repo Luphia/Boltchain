@@ -345,10 +345,12 @@ impl Chain {
         Ok(root.to_bytes())
     }
 
-    /// Checks storage-audit certificates for block `number` against the panels in the parent
-    /// state `db`: current epoch, pending task, more than 2/3 of the panel. A received block
-    /// (`strict`) must carry only valid ones; a producer drops the rest. Returns the results and
-    /// the certificates kept.
+    /// Checks the panel certificates of block `number` against the parent state `db`:
+    /// storage audits (current epoch, pending task) and, once the `swarm` fork is in force on
+    /// the public testnet (from genesis elsewhere), compute verdicts (a job still disputed and
+    /// assigned to that epoch's verifier panel); each needs more than 2/3 of its panel. A received
+    /// block (`strict`) must carry only valid ones; a producer drops the rest. Returns the audit
+    /// results, the verdicts and the certificates kept.
     #[allow(clippy::type_complexity)]
     fn check_audits<D: revm::DatabaseRef + Copy>(
         &self,
@@ -356,19 +358,70 @@ impl Chain {
         number: u64,
         certs: Vec<Vec<u8>>,
         strict: bool,
-    ) -> Result<(Vec<bolt_system::AuditResult>, Vec<Vec<u8>>)>
+    ) -> Result<(Vec<bolt_system::AuditResult>, Vec<(u64, bool)>, Vec<Vec<u8>>)>
     where
         D::Error: std::fmt::Debug,
     {
         use bolt_system::{abi::*, addresses::*, queries};
         let mut results: Vec<bolt_system::AuditResult> = Vec::new();
+        let mut verdicts: Vec<(u64, bool)> = Vec::new();
         let mut kept = Vec::new();
         if certs.is_empty() {
-            return Ok((results, kept));
+            return Ok((results, verdicts, kept));
         }
-        let epoch = self.rules.epoch_of(number);
         let chain_id = self.config.chain_id;
         let q = |e| ChainError::Exec(format!("{e}"));
+        // Compute verdicts first: they never decode as audit certificates.
+        let verdicts_on =
+            bolt_primitives::forks::active(chain_id, bolt_primitives::forks::SWARM, number);
+        let mut panels: HashMap<u64, Vec<bolt_primitives::bls::BlsPublicKey>> = HashMap::new();
+        let mut rest = Vec::new();
+        for bytes in certs {
+            let Some(c) = bolt_consensus::VerdictCert::decode(&bytes) else {
+                rest.push(bytes);
+                continue;
+            };
+            let mut ok = verdicts_on && !verdicts.iter().any(|(j, _)| *j == c.job);
+            if ok {
+                let id = U256::from(c.job);
+                let d = queries::call(db, chain_id, COMPUTE, IComputeMarket::disputesCall { id })
+                    .map_err(q)?;
+                let j = queries::call(db, chain_id, COMPUTE, IComputeMarket::jobCall { id });
+                // JobState::Disputed = 4.
+                ok = d.panelEpoch == c.epoch && d.panelEpoch != 0 && j.is_ok_and(|j| j.state == 4);
+            }
+            if ok && !panels.contains_key(&c.epoch) {
+                let ids = queries::call(
+                    db,
+                    chain_id,
+                    COMPUTE,
+                    IComputeMarket::panelCall { epoch: c.epoch },
+                )
+                .map_err(q)?;
+                let keys = if ids.is_empty() {
+                    Vec::new()
+                } else {
+                    queries::call(db, chain_id, STAKING, IStakingManager::keysOfCall { ids })
+                        .map_err(q)?
+                        .pubkeys
+                        .chunks_exact(48)
+                        .map(bolt_primitives::bls::BlsPublicKey::from_slice)
+                        .collect()
+                };
+                panels.insert(c.epoch, keys);
+            }
+            if ok && c.verify(chain_id, &panels[&c.epoch]) {
+                verdicts.push((c.job, c.fault));
+                kept.push(bytes);
+            } else if strict {
+                return Err(ChainError::InvalidBlock("invalid verdict certificate".into()));
+            }
+        }
+        let certs = rest;
+        if certs.is_empty() {
+            return Ok((results, verdicts, kept));
+        }
+        let epoch = self.rules.epoch_of(number);
         let audits =
             queries::call(db, chain_id, SWARM, ISwarmStorage::auditsCall { epoch }).map_err(q)?;
         let panel = if audits.panel.is_empty() {
@@ -409,7 +462,7 @@ impl Chain {
                 None => {}
             }
         }
-        Ok((results, kept))
+        Ok((results, verdicts, kept))
     }
 
     /// A certificate carried by a mined block in phase B: a QC of the current epoch's checkpoint
@@ -569,9 +622,10 @@ impl Chain {
             } else {
                 None
             };
-            let (audit_results, audits) =
+            let (audit_results, verdicts, audits) =
                 self.check_audits(&db, number, audits, expected.is_some())?;
-            let history = bolt_system::HistoryInputs { epoch_index, audits: audit_results };
+            let history =
+                bolt_system::HistoryInputs { epoch_index, audits: audit_results, verdicts };
             let mut ex =
                 BlockExecutor::new(&db, params).map_err(|e| ChainError::Exec(e.to_string()))?;
             // Hard forks activating at this block (ADR 0008 §2).

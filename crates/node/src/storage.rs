@@ -9,7 +9,7 @@ use alloy_consensus::Header;
 use alloy_primitives::{B256, U256, keccak256};
 use anyhow::{Context, Result, bail};
 use bolt_chain::Chain;
-use bolt_consensus::{AuditCert, AuditVote};
+use bolt_consensus::{AuditCert, AuditVote, VerdictCert, VerdictVote};
 use bolt_ipld::{
     Cid, Envelope,
     deal::DealIndex,
@@ -35,6 +35,7 @@ use tokio::sync::mpsc;
 const TAG_SNAPSHOT: u8 = 1;
 const TAG_AUDIT: u8 = 2;
 const TAG_DEAL: u8 = 3;
+const TAG_VERDICT: u8 = 4;
 
 /// How often a node announces the deal data it can serve.
 pub const DEAL_ANNOUNCE_EVERY: Duration = Duration::from_secs(20);
@@ -80,6 +81,8 @@ pub enum StorageMsg {
     Audit(AuditVote),
     /// Deal data announcement.
     Deal(DealAnnounce),
+    /// Compute-dispute verdict vote (ADR 0011).
+    Verdict(VerdictVote),
 }
 
 impl StorageMsg {
@@ -101,6 +104,11 @@ impl StorageMsg {
                 v.extend(serde_ipld_dagcbor::to_vec(a).expect("encodes"));
                 v
             }
+            StorageMsg::Verdict(vote) => {
+                let mut v = vec![TAG_VERDICT];
+                v.extend(vote.encode());
+                v
+            }
         }
     }
 
@@ -111,6 +119,7 @@ impl StorageMsg {
             TAG_SNAPSHOT => serde_ipld_dagcbor::from_slice(rest).ok().map(StorageMsg::Snapshot),
             TAG_AUDIT => AuditVote::decode(rest).map(StorageMsg::Audit),
             TAG_DEAL => serde_ipld_dagcbor::from_slice(rest).ok().map(StorageMsg::Deal),
+            TAG_VERDICT => VerdictVote::decode(rest).map(StorageMsg::Verdict),
             _ => None,
         }
     }
@@ -157,6 +166,75 @@ pub struct StorageConfig {
     pub storage_accounts: Vec<alloy_primitives::Address>,
     /// File listing the deal roots this node hosts for its user (kept across restarts).
     pub hosted_file: Option<std::path::PathBuf>,
+    /// How this node's validators judge the compute disputes their verifier panel is given
+    /// (ADR 0011). `None`: they do not vote (a dispute without a verdict settles for the provider
+    /// after 7 days).
+    pub verifier: Option<Arc<dyn Judge>>,
+}
+
+/// A disputed compute job, as a verifier sees it.
+#[derive(Debug, Clone)]
+pub struct DisputedJob {
+    /// Job id.
+    pub id: u64,
+    /// Epoch whose panel decides.
+    pub epoch: u64,
+    /// Requester.
+    pub requester: alloy_primitives::Address,
+    /// Provider.
+    pub provider: alloy_primitives::Address,
+    /// Model id.
+    pub model: u64,
+    /// Input: bolt-vault envelope CID bytes.
+    pub input: Vec<u8>,
+    /// Output: bolt-vault envelope CID bytes.
+    pub output: Vec<u8>,
+    /// Requester's statement: bolt-vault envelope CID bytes.
+    pub reason: Vec<u8>,
+    /// Token counts the provider claimed.
+    pub tokens_in: u64,
+    /// Output tokens the provider claimed.
+    pub tokens_out: u64,
+}
+
+/// Decides a compute dispute: `Some(true)` when the provider is at fault, `Some(false)` when it
+/// is not, `None` to abstain (e.g. the data cannot be read yet). Called on a blocking thread;
+/// may take long (re-running a model).
+pub trait Judge: Send + Sync + std::fmt::Debug + 'static {
+    /// Judges `job`.
+    fn judge(&self, job: &DisputedJob) -> Option<bool>;
+}
+
+/// A [`Judge`] that runs an external program (`--verifier-cmd`): the job is passed in environment
+/// variables (`BOLT_JOB_ID`, `BOLT_EPOCH`, `BOLT_REQUESTER`, `BOLT_PROVIDER`, `BOLT_MODEL`,
+/// `BOLT_INPUT`, `BOLT_OUTPUT`, `BOLT_REASON` as CID strings, `BOLT_TOKENS_IN`,
+/// `BOLT_TOKENS_OUT`); its first output line decides: `fault`, `ok`, anything else abstains.
+#[derive(Debug)]
+pub struct CommandJudge(pub std::path::PathBuf);
+
+impl Judge for CommandJudge {
+    fn judge(&self, job: &DisputedJob) -> Option<bool> {
+        let cid = |b: &[u8]| Cid::try_from(b).map(|c| c.to_string()).unwrap_or_default();
+        let out = std::process::Command::new(&self.0)
+            .env("BOLT_JOB_ID", job.id.to_string())
+            .env("BOLT_EPOCH", job.epoch.to_string())
+            .env("BOLT_REQUESTER", job.requester.to_string())
+            .env("BOLT_PROVIDER", job.provider.to_string())
+            .env("BOLT_MODEL", job.model.to_string())
+            .env("BOLT_INPUT", cid(&job.input))
+            .env("BOLT_OUTPUT", cid(&job.output))
+            .env("BOLT_REASON", cid(&job.reason))
+            .env("BOLT_TOKENS_IN", job.tokens_in.to_string())
+            .env("BOLT_TOKENS_OUT", job.tokens_out.to_string())
+            .output()
+            .map_err(|e| tracing::warn!("verifier command: {e}"))
+            .ok()?;
+        match String::from_utf8_lossy(&out.stdout).lines().next().map(str::trim) {
+            Some("fault") => Some(true),
+            Some("ok") => Some(false),
+            _ => None,
+        }
+    }
 }
 
 impl Default for StorageConfig {
@@ -168,6 +246,7 @@ impl Default for StorageConfig {
             audit_timeout: Duration::from_secs(10),
             storage_accounts: vec![],
             hosted_file: None,
+            verifier: None,
         }
     }
 }
@@ -194,6 +273,18 @@ struct State {
     kept: HashMap<u64, Cid>,
     /// When deal data was last announced.
     deal_announced: Option<Instant>,
+    /// Verdict votes by (epoch, job, fault) and panel position.
+    verdict_votes: HashMap<(u64, u64, bool), BTreeMap<u16, VerdictVote>>,
+    /// Jobs whose verdict was certified here.
+    verdict_certified: HashSet<u64>,
+    /// (job, member) this node has voted on.
+    judged: HashSet<(u64, u16)>,
+    /// When a job was last judged without a decision (retried after a while).
+    abstained: HashMap<u64, Instant>,
+    /// Verifier panel keys by epoch.
+    verdict_panels: HashMap<u64, Vec<BlsPublicKey>>,
+    /// Jobs below this id are settled or refunded (no need to scan them again).
+    job_cursor: u64,
 }
 
 /// The storage service.
@@ -202,14 +293,15 @@ pub struct Storage {
     net: NetHandle,
     cfg: StorageConfig,
     state: Mutex<State>,
-    /// Background jobs running: snapshot, audit, prune, deals.
-    busy: [AtomicBool; 4],
+    /// Background jobs running: snapshot, audit, prune, deals, verdicts.
+    busy: [AtomicBool; 5],
 }
 
 const SNAPSHOT_JOB: usize = 0;
 const AUDIT_JOB: usize = 1;
 const PRUNE_JOB: usize = 2;
 const DEAL_JOB: usize = 3;
+const VERDICT_JOB: usize = 4;
 
 impl std::fmt::Debug for Storage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -335,6 +427,13 @@ impl Storage {
                                 tracing::debug!("deal round: {e:#}");
                             }
                         });
+                        if self.cfg.verifier.is_some() && !self.cfg.keys.is_empty() {
+                            self.spawn_guarded(VERDICT_JOB, |s| async move {
+                                if let Err(e) = s.verdict_round().await {
+                                    tracing::debug!("verdict round: {e:#}");
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -392,6 +491,11 @@ impl Storage {
             Some(StorageMsg::Audit(v)) => {
                 if let Err(e) = self.add_vote(v) {
                     tracing::debug!("audit vote: {e:#}");
+                }
+            }
+            Some(StorageMsg::Verdict(v)) => {
+                if let Err(e) = self.add_verdict_vote(v) {
+                    tracing::debug!("verdict vote: {e:#}");
                 }
             }
             Some(StorageMsg::Deal(a)) => {
@@ -576,6 +680,138 @@ impl Storage {
         };
         let Ok(peer) = PeerId::from_bytes(&peer) else { return false };
         self.net.probe(target, peer, self.cfg.audit_timeout).await.is_ok()
+    }
+
+    /// Keys of the compute verifier panel of `epoch` (ComputeMarket), cached.
+    fn verdict_panel_keys(&self, epoch: u64) -> Result<Vec<BlsPublicKey>> {
+        if let Some(k) = self.state.lock().verdict_panels.get(&epoch) {
+            return Ok(k.clone());
+        }
+        let ids = view(&self.chain, COMPUTE, IComputeMarket::panelCall { epoch })?;
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let keys = view(&self.chain, STAKING, IStakingManager::keysOfCall { ids })?;
+        let keys: Vec<BlsPublicKey> =
+            keys.pubkeys.chunks_exact(48).map(BlsPublicKey::from_slice).collect();
+        let mut st = self.state.lock();
+        st.verdict_panels.insert(epoch, keys.clone());
+        if st.verdict_panels.len() > 64 {
+            let oldest = *st.verdict_panels.keys().min().expect("non-empty");
+            st.verdict_panels.remove(&oldest);
+        }
+        Ok(keys)
+    }
+
+    /// Checks a verdict vote, counts it, and queues the certificate once more than 2/3 of the
+    /// panel agree.
+    fn add_verdict_vote(&self, vote: VerdictVote) -> Result<()> {
+        let chain_id = self.chain.config().chain_id;
+        let panel = self.verdict_panel_keys(vote.epoch)?;
+        if panel.is_empty() || !vote.verify(chain_id, &panel) {
+            bail!("verdict vote does not verify against the panel of epoch {}", vote.epoch);
+        }
+        let mut st = self.state.lock();
+        if st.verdict_certified.contains(&vote.job) {
+            return Ok(());
+        }
+        let votes = st.verdict_votes.entry((vote.epoch, vote.job, vote.fault)).or_default();
+        votes.insert(vote.member, vote.clone());
+        if votes.len() * 3 > panel.len() * 2 {
+            let all: Vec<VerdictVote> = votes.values().cloned().collect();
+            if let Some(cert) = VerdictCert::aggregate(&all, panel.len()) {
+                tracing::info!(
+                    job = vote.job,
+                    fault = vote.fault,
+                    votes = all.len(),
+                    "compute verdict certified"
+                );
+                st.verdict_certified.insert(vote.job);
+                st.verdict_votes.retain(|(_, j, _), _| *j != vote.job);
+                drop(st);
+                self.chain.add_audit_cert(cert.encode());
+            }
+        }
+        Ok(())
+    }
+
+    /// Verifier duty (ADR 0011): for every disputed job assigned to a panel this node's
+    /// validators sit on, judge it once and vote for each of their seats.
+    async fn verdict_round(&self) -> Result<()> {
+        let Some(judge) = self.cfg.verifier.clone() else { return Ok(()) };
+        let count = view(&self.chain, COMPUTE, IComputeMarket::jobCountCall {})?.to::<u64>();
+        let mine = self.my_ids()?;
+        let chain_id = self.chain.config().chain_id;
+        let start = self.state.lock().job_cursor;
+        let mut cursor = start;
+        let mut advancing = true;
+        for id in start..count {
+            let j = view(&self.chain, COMPUTE, IComputeMarket::jobCall { id: U256::from(id) })?;
+            // Settled (5) or refunded (6): final.
+            if advancing && (j.state == 5 || j.state == 6) {
+                cursor = id + 1;
+                continue;
+            }
+            advancing = false;
+            if j.state != 4 || self.state.lock().verdict_certified.contains(&id) {
+                continue;
+            }
+            let d =
+                view(&self.chain, COMPUTE, IComputeMarket::disputesCall { id: U256::from(id) })?;
+            if d.panelEpoch == 0 {
+                continue;
+            }
+            let panel =
+                view(&self.chain, COMPUTE, IComputeMarket::panelCall { epoch: d.panelEpoch })?;
+            let seats: Vec<(u16, usize)> = panel
+                .iter()
+                .enumerate()
+                .filter_map(|(m, v)| {
+                    mine.get(v).filter(|k| **k != usize::MAX).map(|k| (m as u16, *k))
+                })
+                .filter(|(m, _)| !self.state.lock().judged.contains(&(id, *m)))
+                .collect();
+            if seats.is_empty() {
+                continue;
+            }
+            if self
+                .state
+                .lock()
+                .abstained
+                .get(&id)
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(600))
+            {
+                continue;
+            }
+            let job = DisputedJob {
+                id,
+                epoch: d.panelEpoch,
+                requester: j.requester,
+                provider: j.provider,
+                model: j.model,
+                input: j.input.to_vec(),
+                output: j.output.to_vec(),
+                reason: d.reason.to_vec(),
+                tokens_in: j.tokensIn,
+                tokens_out: j.tokensOut,
+            };
+            let judge = judge.clone();
+            let verdict = tokio::task::spawn_blocking(move || judge.judge(&job)).await?;
+            let Some(fault) = verdict else {
+                self.state.lock().abstained.insert(id, Instant::now());
+                continue;
+            };
+            tracing::info!(job = id, fault, "judged compute dispute");
+            for (m, k) in seats {
+                let vote =
+                    VerdictVote::sign(&self.cfg.keys[k], chain_id, d.panelEpoch, id, fault, m);
+                self.state.lock().judged.insert((id, m));
+                let _ = self.net.publish_storage(StorageMsg::Verdict(vote.clone()).encode()).await;
+                self.add_verdict_vote(vote)?;
+            }
+        }
+        self.state.lock().job_cursor = cursor;
+        Ok(())
     }
 
     /// Whether `provider` serves block `index` of deal `id`: the deal index (root and group) is

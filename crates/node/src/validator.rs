@@ -1327,6 +1327,11 @@ pub struct StorageArgs {
     /// on this node, so bind the RPC to localhost when enabling it.
     #[arg(long)]
     pub rpc_storage: bool,
+    /// Program that judges the compute disputes (ADR 0011) given to this node's validators on a
+    /// verifier panel: it receives the job in `BOLT_*` environment variables and prints `fault`
+    /// or `ok` (anything else abstains). Without it the validators do not vote on disputes.
+    #[arg(long, value_name = "PATH")]
+    pub verifier_cmd: Option<std::path::PathBuf>,
 }
 
 /// Runs a validator node until Ctrl-C.
@@ -1359,6 +1364,9 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
             keys: keys.clone(),
             storage_accounts: args.storage.storage_accounts.clone(),
             hosted_file: Some(args.datadir.join("hosted-deals.txt")),
+            verifier: args.storage.verifier_cmd.clone().map(|p| {
+                Arc::new(crate::storage::CommandJudge(p)) as Arc<dyn crate::storage::Judge>
+            }),
             ..Default::default()
         },
     );

@@ -167,6 +167,7 @@ sol! {
         function jobCount() external view returns (uint256);
         function panel(uint64 epoch) external view returns (uint32[]);
         function pendingDisputes() external view returns (uint256[]);
+        function disputes(uint256 id) external view returns (uint64 openedAt, uint64 panelEpoch, bytes reason);
         function balanceOf(address account) external view returns (uint256);
         function withdraw(address to) external;
         function payout(address account) external;
