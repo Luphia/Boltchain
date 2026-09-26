@@ -91,6 +91,14 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 - 沒有算力份額；`ComputeMarket` 從 genesis 起就在（`0xB017000000000000000000000000000000000006`）。
 - 存儲抽查開放給未質押節點：`boltchain wallet storage-register --wallet <帳戶> --node-key <datadir>/node.key`（沒有 BOLT 時加 `--signed`，把印出的交易交給任何人代送），然後節點加上 `--storage-account <地址>`。
 
+## 第二台主機（211.22.118.148）
+
+2026-09-26 加入第二台主機，跑 2 個節點（`cafeca-e-n1`、`cafeca-e-n2`）、8 把驗證者金鑰，一起挖礦，並負責讓測試網達到 PoS 門檻（16 位驗證者、100,000 BOLT）：
+
+- 部署：`deploy/testnet/usermode/setup-second-host.sh 2 4 2 211.22.118.148 cafeca-e`（這台的 8545 已被占用，RPC 用 18545、18546）
+- 這台是 Ubuntu 22.04（glibc 2.35），執行檔要另外建置：`cargo zigbuild --release -p boltchain --target x86_64-unknown-linux-gnu.2.35`，C 編譯參數加 `-DMDBX_HAVE_BUILTIN_CPU_SUPPORTS=0 -mevex512 -Wno-date-time`，並提供一個空的 `asm/cachectl.h`
+- 自動質押：第 3300 塊起，第一台主機的 `fund-host2.sh` 把各節點錢包的 BOLT（保留 30）轉到第二台的質押錢包；第二台的 `stake-t2.sh` 等餘額足夠補齊 100,000 BOLT 後，平均質押 8 把金鑰並公布歷史節點。必須在第 3601 塊（第 6 週期開始）之前完成，PoS 才會在第 6001 塊（第 10 週期）開始
+
 ## 硬分叉 `swarm`（第 2401 塊，ADR 0014）
 
 測試網的 genesis 是 `HistoryRegistry`；第 2401 塊（epoch 4 的第一塊）把 `0xB017…0005` 的程式碼換成 `SwarmStorage`（固定的 bytecode，`contracts/forks/8018-swarm`），原有狀態全部保留。從那個 epoch 起：
