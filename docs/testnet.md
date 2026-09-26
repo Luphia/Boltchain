@@ -103,16 +103,14 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 
 ## Uniswap v4
 
-舊測試網部署過 Uniswap v4（core 1.0.2、periphery 1.0.3、UniversalRouter 2.1.0），部署腳本與地址紀錄在 [`scripts/uniswap-v4`](../scripts/uniswap-v4)：
-
-> 重新開始後要重新部署（`node scripts/uniswap-v4/deploy.mjs`），下表是舊鏈的地址，重新部署後會更新。
+測試網部署了 Uniswap v4（core 1.0.2、periphery 1.0.3、UniversalRouter 2.1.0；2026-09-26 在 v2 重新部署，第 720–761 塊），部署腳本與地址紀錄在 [`scripts/uniswap-v4`](../scripts/uniswap-v4)：
 
 | 合約 | 地址 |
 | --- | --- |
 | PoolManager | `0x5dFd9A046A4bCcfa831909f809E9bA519f1fF47C` |
 | PositionManager | `0x4Efa6167f81e046E7A8427a9E197eB875DfcDc59` |
 | UniversalRouter | `0x7cF5C62E8805D0968230ca232F3bAE22F1F3A9F2` |
-| V4Quoter | `0x6b9fcA1bdd0eCa4E29a0dCcedcA2f18e409b9C40` |
+| V4Quoter | `0xa823a804F0a81317c099eEFd66Bf5FcCf97A79FB` |
 | StateView | `0xAaa79cBAba5aEBAdE64c2ae8367bB72b3380c4D1` |
 | PositionDescriptor | `0xb0f5B41Ba48E8DE03625BCd196C4b691254112C9` |
 | Permit2 | `0x02B5cC3B42C2646a39634374d8cC35B55b8e158C` |
