@@ -122,11 +122,43 @@ Boltchain 要成為 AI 算力的 Airbnb：
 ## 實作紀錄：驗證小組的裁決（2026-09-26）
 
 - 每個 epoch 起點，待處理的爭議交給從委員會抽出的驗證小組（`assignDisputes`）。
-- 小組成員所在的節點用 `Judge` 判定（驗證者節點以 `--verifier-cmd <程式>` 指定）：程式從環境變數取得工作編號、輸入輸出與理由的 CID、宣稱的 token 數，第一行輸出 `fault`（執行者有錯）或 `ok`；其他輸出視為棄權，10 分鐘後重試。沒有設定時不投票，爭議 7 天後判執行者勝。
 - 投票（`VerdictVote`，簽署內容以 `boltchain/verdict/v1` 開頭，與抽查的簽章分開）在 storage topic 上傳播；超過三分之二相同時聚合成 `VerdictCert`，出塊者放進 envelope 的 `audits` 清單（與抽查憑證共用，編碼互不相容，不會混淆）。
 - 鏈在執行區塊前驗證：工作仍在爭議中、爭議分派給憑證的 epoch、簽署者超過小組的三分之二、聚合簽章正確；通過後系統呼叫 `recordVerdict`。收到的區塊只要有一張無效就整塊拒絕。
 - 公開測試網從分叉 `swarm`（第 2401 塊）起接受裁決憑證；其他鏈從 genesis 起。
-- 尚未完成：驗證者公布加密金鑰、委託者把檔案加密給小組、以 llama.cpp 重跑比對的判定程式。
+
+## 實作紀錄：命令列、檔案分享與判定程式（2026-09-26）
+
+**執行者**（`boltchain provider`）
+
+- `register`：在 `ComputeMarket` 登記，公布加密金鑰（由帳戶私鑰衍生，與 `boltchain storage` 相同）。
+- `run --backend <URL> --model <id>=<名稱>`：接受指定給自己、且模型有對應的工作；經由自己的節點（`--rpc-storage`）取得並解密輸入，呼叫 OpenAI 相容的後端（llama.cpp 的 `llama-server`、Ollama、vLLM），把回應加密給委託者與自己後交付；token 數取自後端的 `usage`，並以工作的上限為界。
+- `status`、`collect`（結算已過爭議窗口的工作並提領）。
+- 目前執行者自己付 gas；零 BOLT 的簽名路徑（`acceptFor`、`deliverFor`）已在合約中，中繼服務尚未完成。
+
+**委託者**（`boltchain job`）
+
+- `post --provider <地址> --model <id> --prompt <文字>`（或 `--input` 指定 OpenAI 格式的請求）：加密給執行者與自己，交給自己的節點，第一次使用時登記自己的加密金鑰，託管最大費用。
+- `status`、`result`（取回並解密，印出回答）、`approve`（核可並付款）、`dispute`、`share`、`refund`、`withdraw`。
+- 目前必須指定執行者；開放給任何執行者承接（`shareInput` 流程）尚未完成。
+
+**把爭議檔案交給驗證小組**
+
+- 每位驗證者的節點由 BLS 金鑰衍生一把 X25519 加密金鑰，每分鐘在 storage topic 上公布（以 BLS 簽章，節點驗證後保存；RPC `bolt_verifierKeys`）。
+- 小組指派後，委託者執行 `job share`：用自己的內容金鑰替輸入、輸出與理由各做一份加入小組成員為收件人的新 envelope（不必重新上傳資料），交給自己的節點，並以帳戶私鑰簽署後廣播（`DisputeShare`，RPC `bolt_shareDispute`）。節點驗證簽署者就是該工作的委託者。
+- 委託者不分享，小組無法判定，爭議 7 天後判執行者勝。
+
+**判定程式**（`boltchain judge`，給 `--verifier-cmd` 使用）
+
+- 節點以 `sh -c` 執行判定命令，環境變數帶入工作資料、分享後的 CID、這個節點其中一個席位的加密私鑰（`BOLT_VERIFIER_KEY`）與節點的 RPC 位址。
+- 判定規則（第一版）：
+  1. 還沒分享、讀不到輸入或輸出：棄權，1 分鐘後重試（收到分享時立即重試）。
+  2. 交付的輸出不是 JSON 或沒有回答：執行者有錯。
+  3. 在自己的後端以相同請求重跑（未指定時 temperature = 0）：宣稱的輸入 token 數超過重跑的 110% + 8，或輸出 token 數超過實際回答的 110% + 8（後端有 `/tokenize` 時精確計算，否則以 4 個字元一個 token 估計）：執行者有錯。
+  4. 回答與重跑結果的詞彙重疊（Jaccard）低於 `--min-similarity`（預設 0.3）：執行者有錯。
+  5. 其他：執行者沒錯。
+- 限制：不同 GPU、不同量化的同一模型輸出會不同；相似度門檻要依實際模型與題型調整。之後改用 logits 比對（ADR 0011 原設計）或 TEE（ADR 0013）。
+
+**測試**：`m7_compute` 在開發鏈上跑完整流程：執行者登記、委託、以模擬後端執行與交付、委託者讀回並付款；第二筆工作被爭議，委託者分享檔案，小組成員以 `boltchain judge` 在另一個回答不同的後端重跑，判定執行者有錯，委託者拿回款項、執行者被罰押金。
 
 ## 需要新增的元件
 

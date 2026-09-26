@@ -59,13 +59,24 @@ boltchain storage get --wallet me.json 0 --out report.pdf
 
 ### AI 推論工作：ComputeMarket
 
-> 狀態：**合約已完成**（`0xB017…0006`，每條鏈 genesis 就有）；執行者與委託者的命令列工具、驗證小組的重跑比對尚未完成（ADR 0011）。
+> 狀態：**可在開發鏈上完整使用**（合約 `0xB017…0006`、命令列、驗證小組裁決）；零 BOLT 執行者的中繼服務、開放任何執行者承接尚未完成（ADR 0011）。
 
-- 委託者存入託管款，指定模型與每千個 token 的單價；輸入輸出檔用 bolt-vault 加密，只有雙方看得到。
-- 執行者只需簽名接單、簽名交付收據，由任何人代送交易；收入直接入帳，**從頭到尾不必持有 BOLT**。
+- 委託者存入託管款，指定執行者、模型與每千個 token 的單價；輸入輸出檔用 bolt-vault 加密，只有雙方看得到。
+- 執行者用任何 OpenAI 相容的後端（llama.cpp、Ollama、vLLM）執行，收入直接入帳；押金從收入中扣 20% 累積到 64 BOLT，接單上限 5 BOLT + 10 × 押金。
 - 樂觀結算：委託者核可，或爭議窗口過後任何人都能結算。
-- 爭議時付 1 BOLT 押金，由驗證小組裁決；執行者錯了罰押金 10%，7 天沒有裁決視為執行者勝。
-- 押金從收入中扣 20% 累積到 64 BOLT；接單上限 5 BOLT + 10 × 押金。
+- 爭議時付 1 BOLT 押金；驗證小組拿到委託者分享的檔案後在自己的後端重跑比對，三分之二同意後裁決寫上鏈。執行者錯了罰押金 10%，7 天沒有裁決視為執行者勝。
+
+```sh
+# 執行者（節點要加 --rpc-storage）
+boltchain provider register --wallet me.json --node-key data/node.key
+boltchain provider run --wallet me.json --backend http://127.0.0.1:8080 --model 1=qwen2.5-7b
+# 委託者
+boltchain job post --wallet me.json --provider <地址> --model 1 --prompt "你好" --price-in 0.001 --price-out 0.002
+boltchain job result --wallet me.json <jobId>
+boltchain job approve --wallet me.json <jobId>        # 或 job dispute，小組指派後 job share
+# 驗證者：以重跑判定爭議
+boltchain validator ... --rpc-storage --verifier-cmd "boltchain judge --backend http://127.0.0.1:8080 --model 1=qwen2.5-7b"
+```
 
 ### 長時間執行 AI Agent：TEE 租用
 
@@ -106,7 +117,7 @@ T2 裝置沒有機密 VM，對實體攻擊的防護比 T1 弱得多；三款裝�
 | 儲存層：epoch 索引、狀態快照、檢查點同步、修剪、歷史抽查、IPFS 閘道 | 完成 |
 | 發行改制：固定區塊獎勵、未質押存儲提供者 | 完成 |
 | **SwarmStorage：付費保存使用者資料** | **完成**；測試網第 2401 塊啟用 |
-| **ComputeMarket：AI 推論市場** | **合約完成**；命令列工具與驗證小組重跑待做 |
+| **ComputeMarket：AI 推論市場** | **可用**：合約、`provider` / `job` 命令列、驗證小組重跑判定；中繼與開放承接待做 |
 | bolt-vault：加密分片格式（Rust 與 WASM） | 完成 |
 | 內建區塊鏈瀏覽器（繁中 / 英文） | 完成 |
 | 公開測試網（4 節點、8 位驗證者）、Uniswap v4 | 運行中 |
@@ -116,10 +127,10 @@ T2 裝置沒有機密 VM，對實體攻擊的防護比 T1 弱得多；三款裝�
 
 依重要性排序：
 
-1. **算力市場可以實際使用**（M7）
-   - 驗證小組的裁決憑證（BLS 聚合，比照抽查）；爭議時把檔案加密給小組、小組重跑比對
-   - `boltchain provider` / `boltchain job`（先支援 llama.cpp）、中繼服務、瀏覽器頁面
-   - `ModelRegistry`
+1. **算力市場補完**（M7）
+   - 零 BOLT 執行者的中繼服務（`acceptFor` / `deliverFor` 代送）、開放任何執行者承接、瀏覽器頁面
+   - `ModelRegistry`；判定改用 logits 比對或 TEE
+   - 在公開測試網以真實的 llama.cpp 跑一次完整流程
 2. **TEE Agent 租用**（ADR 0013）
    - 第零期：DGX Spark、Intel AI PC、AMD AI PC 實機確認（TPM、量測開機、開機韌體保護、記憶體加密、IOMMU）
    - 第一期：T2 的 TPM 驗證、`TdxVerifier` 與 `TeeCollateral`、`ImageRegistry`、`EnclaveLease`、Agent 執行環境映像（x86-64 / arm64）、限權錢包

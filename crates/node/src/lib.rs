@@ -2,6 +2,7 @@
 
 pub mod bench;
 pub mod checkpoint;
+pub mod compute;
 pub mod devnet;
 pub mod explorer;
 pub mod follow;

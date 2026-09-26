@@ -36,6 +36,84 @@ const TAG_SNAPSHOT: u8 = 1;
 const TAG_AUDIT: u8 = 2;
 const TAG_DEAL: u8 = 3;
 const TAG_VERDICT: u8 = 4;
+const TAG_VERIFIER_KEY: u8 = 5;
+const TAG_DISPUTE_SHARE: u8 = 6;
+
+/// How often a node announces its validators' verifier encryption keys.
+pub const VERIFIER_KEY_EVERY: Duration = Duration::from_secs(60);
+
+/// A validator's X25519 encryption key for dispute files (ADR 0011), signed with its BLS key.
+/// Requesters encrypt the disputed job's files for the panel members' keys.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifierKey {
+    /// Validator id.
+    pub id: u32,
+    /// X25519 public key.
+    #[serde(with = "serde_bytes")]
+    pub key: Vec<u8>,
+    /// BLS signature over [`verifier_key_msg`].
+    pub sig: bolt_primitives::bls::BlsSignature,
+    /// Sender's clock (unix ms), unsigned: makes each re-announcement a new gossip message
+    /// (gossipsub drops repeats of a recent message), as in [`SnapshotAnnounce`].
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// The message a validator signs to publish its verifier key.
+pub fn verifier_key_msg(chain_id: u64, id: u32, key: &[u8]) -> Vec<u8> {
+    [b"boltchain/verifier-key/v1".as_slice(), &chain_id.to_be_bytes(), &id.to_be_bytes(), key]
+        .concat()
+}
+
+/// The verifier encryption key pair of a validator (derived from its BLS secret key).
+pub fn verifier_vault_key(bls: &BlsSecretKey) -> (bolt_vault::SecretKey, bolt_vault::PublicKey) {
+    let ikm = keccak256([b"boltchain/verifier-key/v1".as_slice(), &bls.to_bytes()].concat());
+    bolt_vault::SecretKey::derive(ikm.as_slice())
+}
+
+/// The disputed job's files re-encrypted for the verifier panel (bolt-vault envelopes that add
+/// the panel members as recipients), signed by the job's requester.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DisputeShare {
+    /// Job id.
+    pub job: u64,
+    /// Input envelope CID.
+    #[serde(with = "serde_bytes")]
+    pub input: Vec<u8>,
+    /// Output envelope CID.
+    #[serde(with = "serde_bytes")]
+    pub output: Vec<u8>,
+    /// Reason envelope CID.
+    #[serde(with = "serde_bytes")]
+    pub reason: Vec<u8>,
+    /// The requester's secp256k1 signature (65 bytes) over [`DisputeShare::digest`].
+    #[serde(with = "serde_bytes")]
+    pub sig: Vec<u8>,
+}
+
+impl DisputeShare {
+    /// The hash the requester signs.
+    pub fn digest(chain_id: u64, job: u64, input: &[u8], output: &[u8], reason: &[u8]) -> B256 {
+        keccak256(
+            [
+                b"boltchain/dispute-share/v1".as_slice(),
+                &chain_id.to_be_bytes(),
+                &job.to_be_bytes(),
+                keccak256(input).as_slice(),
+                keccak256(output).as_slice(),
+                keccak256(reason).as_slice(),
+            ]
+            .concat(),
+        )
+    }
+
+    /// The signer's address, if the signature is valid.
+    pub fn signer(&self, chain_id: u64) -> Option<alloy_primitives::Address> {
+        let sig = alloy_primitives::Signature::from_raw(&self.sig).ok()?;
+        let d = Self::digest(chain_id, self.job, &self.input, &self.output, &self.reason);
+        sig.recover_address_from_prehash(&d).ok()
+    }
+}
 
 /// How often a node announces the deal data it can serve.
 pub const DEAL_ANNOUNCE_EVERY: Duration = Duration::from_secs(20);
@@ -83,6 +161,10 @@ pub enum StorageMsg {
     Deal(DealAnnounce),
     /// Compute-dispute verdict vote (ADR 0011).
     Verdict(VerdictVote),
+    /// A validator's verifier encryption key.
+    VerifierKey(VerifierKey),
+    /// Dispute files re-encrypted for the panel.
+    DisputeShare(DisputeShare),
 }
 
 impl StorageMsg {
@@ -109,6 +191,16 @@ impl StorageMsg {
                 v.extend(vote.encode());
                 v
             }
+            StorageMsg::VerifierKey(k) => {
+                let mut v = vec![TAG_VERIFIER_KEY];
+                v.extend(serde_ipld_dagcbor::to_vec(k).expect("encodes"));
+                v
+            }
+            StorageMsg::DisputeShare(d) => {
+                let mut v = vec![TAG_DISPUTE_SHARE];
+                v.extend(serde_ipld_dagcbor::to_vec(d).expect("encodes"));
+                v
+            }
         }
     }
 
@@ -120,6 +212,12 @@ impl StorageMsg {
             TAG_AUDIT => AuditVote::decode(rest).map(StorageMsg::Audit),
             TAG_DEAL => serde_ipld_dagcbor::from_slice(rest).ok().map(StorageMsg::Deal),
             TAG_VERDICT => VerdictVote::decode(rest).map(StorageMsg::Verdict),
+            TAG_VERIFIER_KEY => {
+                serde_ipld_dagcbor::from_slice(rest).ok().map(StorageMsg::VerifierKey)
+            }
+            TAG_DISPUTE_SHARE => {
+                serde_ipld_dagcbor::from_slice(rest).ok().map(StorageMsg::DisputeShare)
+            }
             _ => None,
         }
     }
@@ -195,6 +293,11 @@ pub struct DisputedJob {
     pub tokens_in: u64,
     /// Output tokens the provider claimed.
     pub tokens_out: u64,
+    /// Whether `input`, `output` and `reason` are the requester's re-encryptions for the panel
+    /// (a [`DisputeShare`]); otherwise they are the original envelopes.
+    pub shared: bool,
+    /// The verifier encryption secret key of one of this node's seats on the panel.
+    pub verifier_key: [u8; 32],
 }
 
 /// Decides a compute dispute: `Some(true)` when the provider is at fault, `Some(false)` when it
@@ -205,17 +308,30 @@ pub trait Judge: Send + Sync + std::fmt::Debug + 'static {
     fn judge(&self, job: &DisputedJob) -> Option<bool>;
 }
 
-/// A [`Judge`] that runs an external program (`--verifier-cmd`): the job is passed in environment
-/// variables (`BOLT_JOB_ID`, `BOLT_EPOCH`, `BOLT_REQUESTER`, `BOLT_PROVIDER`, `BOLT_MODEL`,
-/// `BOLT_INPUT`, `BOLT_OUTPUT`, `BOLT_REASON` as CID strings, `BOLT_TOKENS_IN`,
-/// `BOLT_TOKENS_OUT`); its first output line decides: `fault`, `ok`, anything else abstains.
+/// A [`Judge`] that runs an external command line (`--verifier-cmd`, run by `sh -c`): the job is
+/// passed in environment variables (`BOLT_JOB_ID`, `BOLT_EPOCH`, `BOLT_REQUESTER`,
+/// `BOLT_PROVIDER`, `BOLT_MODEL`, `BOLT_INPUT`, `BOLT_OUTPUT`, `BOLT_REASON` as CID strings,
+/// `BOLT_SHARED` (1 when those are the requester's re-encryptions for the panel),
+/// `BOLT_TOKENS_IN`, `BOLT_TOKENS_OUT`, `BOLT_VERIFIER_KEY` (hex X25519 secret key that opens the
+/// shared envelopes), `BOLT_RPC` (this node's JSON-RPC, for `bolt_getBlocks`)); its first output
+/// line decides: `fault`, `ok`, anything else abstains. `boltchain judge` is such a program.
 #[derive(Debug)]
-pub struct CommandJudge(pub std::path::PathBuf);
+pub struct CommandJudge {
+    /// Command line.
+    pub cmd: String,
+    /// This node's JSON-RPC URL.
+    pub rpc: String,
+}
 
 impl Judge for CommandJudge {
     fn judge(&self, job: &DisputedJob) -> Option<bool> {
         let cid = |b: &[u8]| Cid::try_from(b).map(|c| c.to_string()).unwrap_or_default();
-        let out = std::process::Command::new(&self.0)
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&self.cmd)
+            .env("BOLT_SHARED", if job.shared { "1" } else { "0" })
+            .env("BOLT_VERIFIER_KEY", alloy_primitives::hex::encode(job.verifier_key))
+            .env("BOLT_RPC", &self.rpc)
             .env("BOLT_JOB_ID", job.id.to_string())
             .env("BOLT_EPOCH", job.epoch.to_string())
             .env("BOLT_REQUESTER", job.requester.to_string())
@@ -229,11 +345,25 @@ impl Judge for CommandJudge {
             .output()
             .map_err(|e| tracing::warn!("verifier command: {e}"))
             .ok()?;
-        match String::from_utf8_lossy(&out.stdout).lines().next().map(str::trim) {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let verdict = match text.lines().next().map(str::trim) {
             Some("fault") => Some(true),
             Some("ok") => Some(false),
             _ => None,
+        };
+        let detail: Vec<&str> = text.lines().skip(1).collect();
+        match verdict {
+            Some(fault) => {
+                tracing::info!(job = job.id, fault, detail = ?detail, "verifier command decided")
+            }
+            None => tracing::info!(
+                job = job.id,
+                output = %text.trim(),
+                stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                "verifier command abstained"
+            ),
         }
+        verdict
     }
 }
 
@@ -279,12 +409,19 @@ struct State {
     verdict_certified: HashSet<u64>,
     /// (job, member) this node has voted on.
     judged: HashSet<(u64, u16)>,
-    /// When a job was last judged without a decision (retried after a while).
+    /// When a job was last judged without a decision (retried after a minute, or at once when
+    /// its files are shared).
     abstained: HashMap<u64, Instant>,
     /// Verifier panel keys by epoch.
     verdict_panels: HashMap<u64, Vec<BlsPublicKey>>,
     /// Jobs below this id are settled or refunded (no need to scan them again).
     job_cursor: u64,
+    /// Verifier encryption keys of validators, as announced (checked against their BLS keys).
+    verifier_keys: HashMap<u32, [u8; 32]>,
+    /// Dispute files shared with the panel, by job.
+    shares: HashMap<u64, DisputeShare>,
+    /// When this node last announced its verifier keys.
+    keys_announced: Option<Instant>,
 }
 
 /// The storage service.
@@ -363,12 +500,32 @@ impl Storage {
         Ok(())
     }
 
-    /// Reads blocks locally, fetching the missing ones from the network: first from the providers
-    /// of deal `deal` (if given) and announced sources of `root`.
-    pub async fn fetch(&self, cids: &[Cid], deal: Option<u64>) -> Result<HashMap<Cid, Vec<u8>>> {
+    /// Reads blocks locally, fetching the missing ones from the network: first from the announced
+    /// source of `root` (dialed if needed) and the providers of deal `deal`.
+    pub async fn fetch(
+        &self,
+        cids: &[Cid],
+        deal: Option<u64>,
+        root: Option<Cid>,
+    ) -> Result<HashMap<Cid, Vec<u8>>> {
         let mut peers = Vec::new();
+        if let Some(root) = root {
+            let src = self.state.lock().sources.get(&root).cloned();
+            if let Some((peer, addrs)) = src {
+                if !self.net.peers().await.contains(&peer) {
+                    for a in addrs {
+                        let _ = self.net.dial(a).await;
+                    }
+                }
+                peers.push(peer);
+            }
+        }
         if let Some(id) = deal {
-            peers = self.deal_peers(id, None).await?;
+            for p in self.deal_peers(id, None).await? {
+                if !peers.contains(&p) {
+                    peers.push(p);
+                }
+            }
         }
         get_or_fetch(&self.chain, &self.net, cids, &peers).await
     }
@@ -491,6 +648,16 @@ impl Storage {
             Some(StorageMsg::Audit(v)) => {
                 if let Err(e) = self.add_vote(v) {
                     tracing::debug!("audit vote: {e:#}");
+                }
+            }
+            Some(StorageMsg::VerifierKey(k)) => {
+                if let Err(e) = self.add_verifier_key(&k) {
+                    tracing::debug!("verifier key: {e:#}");
+                }
+            }
+            Some(StorageMsg::DisputeShare(d)) => {
+                if let Err(e) = self.add_share(d) {
+                    tracing::debug!("dispute share: {e:#}");
                 }
             }
             Some(StorageMsg::Verdict(v)) => {
@@ -703,6 +870,90 @@ impl Storage {
         Ok(keys)
     }
 
+    /// Checks an announced verifier key against the validator's BLS key and keeps it.
+    fn add_verifier_key(&self, k: &VerifierKey) -> Result<()> {
+        let key: [u8; 32] = k.key.as_slice().try_into().context("key length")?;
+        if self.state.lock().verifier_keys.get(&k.id) == Some(&key) {
+            return Ok(());
+        }
+        let keys = view(&self.chain, STAKING, IStakingManager::keysOfCall { ids: vec![k.id] })?;
+        let pk =
+            keys.pubkeys.get(..48).map(BlsPublicKey::from_slice).context("unknown validator")?;
+        let chain_id = self.chain.config().chain_id;
+        if !bolt_primitives::bls::verify(&pk, &verifier_key_msg(chain_id, k.id, &key), &k.sig) {
+            bail!("bad signature on the verifier key of validator {}", k.id);
+        }
+        self.state.lock().verifier_keys.insert(k.id, key);
+        Ok(())
+    }
+
+    /// Announces this node's validators' verifier keys (every [`VERIFIER_KEY_EVERY`]).
+    async fn announce_verifier_keys(&self) {
+        {
+            let mut st = self.state.lock();
+            if st.keys_announced.is_some_and(|t| t.elapsed() < VERIFIER_KEY_EVERY) {
+                return;
+            }
+            st.keys_announced = Some(Instant::now());
+        }
+        let Ok(mine) = self.my_ids() else { return };
+        let chain_id = self.chain.config().chain_id;
+        for (id, k) in mine {
+            if k == usize::MAX {
+                continue;
+            }
+            let (_, pk) = verifier_vault_key(&self.cfg.keys[k]);
+            let key = pk.to_bytes().to_vec();
+            let msg = VerifierKey {
+                id,
+                sig: self.cfg.keys[k].sign(&verifier_key_msg(chain_id, id, &key)),
+                key,
+                at: unix_secs() * 1000,
+            };
+            let _ = self.add_verifier_key(&msg);
+            let _ = self.net.publish_storage(StorageMsg::VerifierKey(msg).encode()).await;
+        }
+    }
+
+    /// Verifier keys known for `ids` (hex), in order.
+    pub fn verifier_keys(&self, ids: &[u32]) -> Vec<Option<String>> {
+        let st = self.state.lock();
+        ids.iter()
+            .map(|id| st.verifier_keys.get(id).map(alloy_primitives::hex::encode_prefixed))
+            .collect()
+    }
+
+    /// Checks a dispute share (signed by the job's requester, job still disputed) and keeps it.
+    fn add_share(&self, d: DisputeShare) -> Result<bool> {
+        let chain_id = self.chain.config().chain_id;
+        if self.state.lock().shares.get(&d.job) == Some(&d) {
+            return Ok(false);
+        }
+        let j = view(&self.chain, COMPUTE, IComputeMarket::jobCall { id: U256::from(d.job) })?;
+        if j.state != 4 {
+            bail!("job {} is not disputed", d.job);
+        }
+        if d.signer(chain_id) != Some(j.requester) {
+            bail!("dispute share of job {} not signed by its requester", d.job);
+        }
+        let mut st = self.state.lock();
+        if st.shares.len() >= 4096 {
+            st.shares.clear();
+        }
+        // The files are readable now: judge again without waiting.
+        st.abstained.remove(&d.job);
+        st.shares.insert(d.job, d);
+        Ok(true)
+    }
+
+    /// Accepts a dispute share from this node's user and gossips it to the panel.
+    pub async fn share_dispute(&self, d: DisputeShare) -> Result<()> {
+        self.add_share(d.clone())?;
+        self.state.lock().abstained.remove(&d.job);
+        let _ = self.net.publish_storage(StorageMsg::DisputeShare(d).encode()).await;
+        Ok(())
+    }
+
     /// Checks a verdict vote, counts it, and queues the certificate once more than 2/3 of the
     /// panel agree.
     fn add_verdict_vote(&self, vote: VerdictVote) -> Result<()> {
@@ -779,21 +1030,31 @@ impl Storage {
                 .lock()
                 .abstained
                 .get(&id)
-                .is_some_and(|t| t.elapsed() < Duration::from_secs(600))
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(60))
             {
                 continue;
             }
+            let share = self.state.lock().shares.get(&id).cloned();
+            let (vsk, _) = verifier_vault_key(&self.cfg.keys[seats[0].1]);
             let job = DisputedJob {
                 id,
                 epoch: d.panelEpoch,
                 requester: j.requester,
                 provider: j.provider,
                 model: j.model,
-                input: j.input.to_vec(),
-                output: j.output.to_vec(),
-                reason: d.reason.to_vec(),
+                input: share.as_ref().map(|s| s.input.clone()).unwrap_or_else(|| j.input.to_vec()),
+                output: share
+                    .as_ref()
+                    .map(|s| s.output.clone())
+                    .unwrap_or_else(|| j.output.to_vec()),
+                reason: share
+                    .as_ref()
+                    .map(|s| s.reason.clone())
+                    .unwrap_or_else(|| d.reason.to_vec()),
                 tokens_in: j.tokensIn,
                 tokens_out: j.tokensOut,
+                shared: share.is_some(),
+                verifier_key: vsk.to_bytes(),
             };
             let judge = judge.clone();
             let verdict = tokio::task::spawn_blocking(move || judge.judge(&job)).await?;
@@ -869,6 +1130,7 @@ impl Storage {
         };
         let epoch = self.chain.rules().epoch_of(self.chain.head()?.number + 1);
         self.announce_deals(epoch).await;
+        self.announce_verifier_keys().await;
         if count.is_zero() {
             return Ok(());
         }
@@ -1083,14 +1345,44 @@ impl bolt_rpc::BlockHost for RpcHost {
         self.storage.host(root, &blocks).map_err(|e| format!("{e:#}"))
     }
 
-    fn fetch(&self, cids: Vec<String>, deal: Option<u64>) -> Result<Vec<Vec<u8>>, String> {
+    fn fetch(
+        &self,
+        cids: Vec<String>,
+        deal: Option<u64>,
+        root: Option<String>,
+    ) -> Result<Vec<Vec<u8>>, String> {
         let cids = cids
             .iter()
             .map(|c| c.parse::<Cid>().map_err(|e| format!("cid: {e}")))
             .collect::<Result<Vec<_>, _>>()?;
-        let got =
-            self.rt.block_on(self.storage.fetch(&cids, deal)).map_err(|e| format!("{e:#}"))?;
+        let root = root.map(|r| r.parse::<Cid>()).transpose().map_err(|e| format!("root: {e}"))?;
+        let got = self
+            .rt
+            .block_on(self.storage.fetch(&cids, deal, root))
+            .map_err(|e| format!("{e:#}"))?;
         cids.iter().map(|c| got.get(c).cloned().ok_or_else(|| format!("{c} not found"))).collect()
+    }
+
+    fn verifier_keys(&self, ids: Vec<u32>) -> Vec<Option<String>> {
+        self.storage.verifier_keys(&ids)
+    }
+
+    fn share_dispute(&self, job: u64, envelopes: [String; 3], sig: Vec<u8>) -> Result<(), String> {
+        let [input, output, reason] = envelopes;
+        let d = DisputeShare {
+            job,
+            input: Self::parse_cid(&input)?,
+            output: Self::parse_cid(&output)?,
+            reason: Self::parse_cid(&reason)?,
+            sig,
+        };
+        self.rt.block_on(self.storage.share_dispute(d)).map_err(|e| format!("{e:#}"))
+    }
+}
+
+impl RpcHost {
+    fn parse_cid(s: &str) -> Result<Vec<u8>, String> {
+        s.parse::<Cid>().map(|c| c.to_bytes()).map_err(|e| format!("cid {s}: {e}"))
     }
 }
 

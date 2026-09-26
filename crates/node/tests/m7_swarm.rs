@@ -345,9 +345,9 @@ async fn a_user_file_is_kept_audited_paid_and_read_back() {
     // Another validator node reads the file back through its storage service.
     let reader = (0..3).find(|n| !holders.contains(n)).unwrap_or(0);
     let s = nodes[reader].storage.clone();
-    let env = s.fetch(&[to_ipld(&sealed.envelope.cid)], Some(0)).await.unwrap();
+    let env = s.fetch(&[to_ipld(&sealed.envelope.cid)], Some(0), None).await.unwrap();
     let envelope = env.values().next().unwrap().clone();
-    let all = s.fetch(&listed, Some(0)).await.unwrap();
+    let all = s.fetch(&listed, Some(0), None).await.unwrap();
     let (manifest, back) =
         bolt_vault::open(&envelope, &sk, |c| all.get(&to_ipld(c)).cloned()).unwrap();
     assert_eq!(manifest.name, "notes.bin");

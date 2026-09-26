@@ -1,6 +1,6 @@
 //! Boltchain node binary.
 
-use boltchain::{bench, devnet, follow, keys, swarm, validator, wallet};
+use boltchain::{bench, compute, devnet, follow, keys, swarm, validator, wallet};
 
 use anyhow::{Context, Result};
 use bolt_primitives::Genesis;
@@ -30,6 +30,16 @@ enum Command {
     /// SwarmStorage (ADR 0014): store encrypted files with paid providers, offer storage.
     #[command(subcommand)]
     Storage(swarm::StorageCmd),
+    /// AI compute market (ADR 0011), provider side: register, serve jobs with an
+    /// OpenAI-compatible backend (llama.cpp, Ollama, vLLM), collect earnings.
+    #[command(subcommand)]
+    Provider(compute::ProviderCmd),
+    /// AI compute market, requester side: post a prompt, read the result, approve or dispute.
+    #[command(subcommand)]
+    Job(compute::JobCmd),
+    /// Verifier program for `--verifier-cmd`: re-runs a disputed compute job on an
+    /// OpenAI-compatible backend and prints `fault`, `ok` or `abstain` (job from `BOLT_*`).
+    Judge(compute::JudgeArgs),
     /// Run a single-producer development network with JSON-RPC, announcing blocks over IPFS.
     Devnet(devnet::DevnetArgs),
     /// Follow a producer: sync blocks over IPFS, serve JSON-RPC, forward transactions.
@@ -120,6 +130,20 @@ fn main() -> Result<()> {
         Command::Keys(cmd) => keys::run(cmd)?,
         Command::Wallet(cmd) => wallet::run(cmd)?,
         Command::Storage(cmd) => swarm::run(cmd)?,
+        Command::Provider(cmd) => compute::run_provider(cmd)?,
+        Command::Job(cmd) => compute::run_job(cmd)?,
+        Command::Judge(args) => {
+            let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+            match compute::judge(&args, &env) {
+                Ok((verdict, notes)) => {
+                    println!("{verdict}");
+                    for n in notes {
+                        println!("{n}");
+                    }
+                }
+                Err(e) => println!("abstain\n{e:#}"),
+            }
+        }
         Command::Follow(args) => {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()

@@ -48,8 +48,19 @@ pub trait BlockHost: Send + Sync + std::fmt::Debug + 'static {
     /// Stores `blocks` (each checked against its CID) and announces deal index `root` to storage
     /// providers.
     fn host(&self, root: String, blocks: Vec<(String, Vec<u8>)>) -> Result<(), String>;
-    /// Reads blocks, fetching missing ones from the network (from deal `deal`'s providers first).
-    fn fetch(&self, cids: Vec<String>, deal: Option<u64>) -> Result<Vec<Vec<u8>>, String>;
+    /// Reads blocks, fetching missing ones from the network: from deal `deal`'s providers and the
+    /// announced source of `root` first.
+    fn fetch(
+        &self,
+        cids: Vec<String>,
+        deal: Option<u64>,
+        root: Option<String>,
+    ) -> Result<Vec<Vec<u8>>, String>;
+    /// Verifier encryption keys (hex) announced by validators `ids` (ADR 0011), in order.
+    fn verifier_keys(&self, ids: Vec<u32>) -> Vec<Option<String>>;
+    /// Accepts the requester's re-encryption of a disputed job's files for the verifier panel
+    /// (envelope CIDs and the requester's signature) and gossips it.
+    fn share_dispute(&self, job: u64, envelopes: [String; 3], sig: Vec<u8>) -> Result<(), String>;
 }
 
 /// Forwards raw transactions to the block producer.
@@ -256,14 +267,32 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         Ok(true)
     });
     method!("bolt_getBlocks", |p, c| -> RpcResult<Vec<Bytes>> {
-        let (cids, deal): (Vec<String>, Option<u64>) = p.parse()?;
+        let mut seq = p.sequence();
+        let cids: Vec<String> = seq.next()?;
+        let deal: Option<u64> = seq.optional_next()?.flatten();
+        let root: Option<String> = seq.optional_next()?.flatten();
         let h =
             c.host.as_ref().ok_or_else(|| err(-32601, "block hosting is off (--rpc-storage)"))?;
         if cids.len() > 256 {
             return Err(err(-32602, "at most 256 blocks per call"));
         }
-        let got = h.fetch(cids, deal).map_err(|e| err(-32000, e))?;
+        let got = h.fetch(cids, deal, root).map_err(|e| err(-32000, e))?;
         Ok(got.into_iter().map(Bytes::from).collect())
+    });
+
+    method!("bolt_verifierKeys", |p, c| -> RpcResult<Vec<Option<String>>> {
+        let (ids,): (Vec<u32>,) = p.parse()?;
+        let h =
+            c.host.as_ref().ok_or_else(|| err(-32601, "block hosting is off (--rpc-storage)"))?;
+        Ok(h.verifier_keys(ids))
+    });
+    method!("bolt_shareDispute", |p, c| -> RpcResult<bool> {
+        let (job, input, output, reason, sig): (U64, String, String, String, Bytes) = p.parse()?;
+        let h =
+            c.host.as_ref().ok_or_else(|| err(-32601, "block hosting is off (--rpc-storage)"))?;
+        h.share_dispute(job.to::<u64>(), [input, output, reason], sig.to_vec())
+            .map_err(|e| err(-32000, e))?;
+        Ok(true)
     });
 
     method!("eth_getBlockByNumber", |p, c| -> RpcResult<Option<serde_json::Value>> {
