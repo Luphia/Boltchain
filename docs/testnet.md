@@ -85,7 +85,7 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 
 ## 重新開始（2026-09-26，ADR 0012）
 
-測試網以新的 genesis 重新開始（時間戳 2026-09-26 08:00 UTC，hash `0xfce268e812faaa5f5dc58ffb317dba77f2ca3f8ca201fc7178b02c87cb8aef49`）。舊鏈與它的 `compute` 分叉作廢，餘額、質押與合約部署都不保留；舊的資料目錄要刪掉。
+測試網以新的 genesis 重新開始（時間戳 2026-09-26 10:00 UTC，hash `0x0dd221dfcc1a212819e50717e4700e464cd0bf61065df9ed1c624c426ce162bb`）。舊鏈與它的 `compute` 分叉作廢，餘額、質押與合約部署都不保留；舊的資料目錄要刪掉。
 
 - 每塊 32 BOLT（共識 31 + 存儲 1），每 4 年減半，第 5 期起固定為共識 1 + 存儲 1；沒有總量上限。
 - 沒有算力份額；`ComputeMarket` 從 genesis 起就在（`0xB017000000000000000000000000000000000006`）。

@@ -604,7 +604,7 @@ fn devnet_genesis_hash_is_pinned() {
     let t = Genesis::from_json(include_str!("../../../genesis/testnet.json")).unwrap();
     assert_eq!(
         crate::genesis_hash(&t).unwrap(),
-        "0xfce268e812faaa5f5dc58ffb317dba77f2ca3f8ca201fc7178b02c87cb8aef49"
+        "0x0dd221dfcc1a212819e50717e4700e464cd0bf61065df9ed1c624c426ce162bb"
             .parse::<B256>()
             .unwrap()
     );
