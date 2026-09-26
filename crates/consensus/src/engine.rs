@@ -137,7 +137,10 @@ pub enum Action<S: Scheme> {
 #[derive(Debug)]
 struct VoteSet<S: Scheme> {
     height: u64,
+    /// Votes whose signature was checked.
     sigs: BTreeMap<ValidatorIndex, S::Sig>,
+    /// Votes not checked yet: checked together as one aggregate once they complete a quorum.
+    pending: BTreeMap<ValidatorIndex, S::Sig>,
     done: bool,
 }
 
@@ -667,34 +670,74 @@ impl<S: Scheme> Engine<S> {
         out
     }
 
+    /// A vote for a block this node leads the next round after. Signatures are checked lazily:
+    /// once the votes collected (checked or not) reach a quorum, they are aggregated and the
+    /// aggregate is verified once (one pairing check instead of one per vote). If that fails, the
+    /// unchecked votes are verified one by one and the invalid ones dropped, which costs what
+    /// checking every vote on arrival did, so a forger only loses the saving.
     fn on_vote(&mut self, v: Vote<S>, out: &mut Vec<Action<S>>) {
         if !self.is_me(self.leader(v.round + 1))
             || v.epoch != self.cfg.epoch
             || (v.signer as usize) >= self.cfg.validators.len()
             || v.round + 2 < self.round
-            || !self.scheme.verify(
-                v.signer,
-                &vote_msg(self.cfg.chain_id, self.cfg.epoch, v.round, &v.block),
-                &v.sig,
-            )
         {
             return;
         }
+        let msg = vote_msg(self.cfg.chain_id, self.cfg.epoch, v.round, &v.block);
         let set = self.votes.entry((v.round, v.block)).or_insert_with(|| VoteSet {
             height: v.height,
             sigs: BTreeMap::new(),
+            pending: BTreeMap::new(),
             done: false,
         });
-        if set.done || set.height != v.height {
+        if set.done || set.height != v.height || set.sigs.contains_key(&v.signer) {
             return;
         }
-        set.sigs.insert(v.signer, v.sig);
-        let signers: Vec<ValidatorIndex> = set.sigs.keys().copied().collect();
-        if !self.cfg.validators.is_quorum(self.cfg.validators.weight_of(&signers)) {
+        match set.pending.get(&v.signer) {
+            Some(s) if *s == v.sig => return,
+            // Two different signatures for one signer: at most one is genuine; check both now so
+            // a forged vote that arrived first cannot shut out the real one.
+            Some(_) => {
+                let old = set.pending.remove(&v.signer).expect("present");
+                for sig in [old, v.sig] {
+                    if self.scheme.verify(v.signer, &msg, &sig) {
+                        set.sigs.insert(v.signer, sig);
+                        break;
+                    }
+                }
+            }
+            None => {
+                set.pending.insert(v.signer, v.sig);
+            }
+        }
+        let all: Vec<ValidatorIndex> = set.sigs.keys().chain(set.pending.keys()).copied().collect();
+        if !self.cfg.validators.is_quorum(self.cfg.validators.weight_of(&all)) {
             return;
         }
-        let sigs: Vec<S::Sig> = set.sigs.values().cloned().collect();
-        let Some(agg) = self.scheme.aggregate(&sigs) else { return };
+        let mut signers: Vec<ValidatorIndex> = all;
+        signers.sort_unstable();
+        let sig_of = |i: &ValidatorIndex| set.sigs.get(i).or_else(|| set.pending.get(i)).cloned();
+        let sigs: Vec<S::Sig> = signers.iter().filter_map(sig_of).collect();
+        let mut agg = self
+            .scheme
+            .aggregate(&sigs)
+            .filter(|a| set.pending.is_empty() || self.scheme.verify_aggregate(&signers, &msg, a));
+        if agg.is_none() {
+            // Some vote is invalid: find it.
+            let pending = std::mem::take(&mut set.pending);
+            for (i, sig) in pending {
+                if self.scheme.verify(i, &msg, &sig) {
+                    set.sigs.insert(i, sig);
+                }
+            }
+            signers = set.sigs.keys().copied().collect();
+            if !self.cfg.validators.is_quorum(self.cfg.validators.weight_of(&signers)) {
+                return;
+            }
+            let sigs: Vec<S::Sig> = set.sigs.values().cloned().collect();
+            agg = self.scheme.aggregate(&sigs);
+        }
+        let Some(agg) = agg else { return };
         set.done = true;
         let qc = Qc {
             epoch: self.cfg.epoch,

@@ -263,9 +263,10 @@ pub fn votes(seats: usize) {
     );
     let each = each_prepared;
     println!(
-        "per round a voter checks up to {quorum} votes and the leader aggregates them; with \
-         6 s slots, per-vote checks use {:.0}% of a slot on this machine",
-        each / 60.0
+        "per round the next leader collects up to {quorum} votes: checked one by one {each:.0} ms \
+         ({:.0}% of a 6 s slot); aggregated then checked once (what the engine does) {:.1} ms",
+        each / 60.0,
+        aggregate + fast_prepared
     );
 }
 

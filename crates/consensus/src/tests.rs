@@ -164,3 +164,38 @@ fn bitmap_roundtrip() {
     assert_eq!(bitmap::decode(&bitmap::encode(&s, 512)), s.to_vec());
     assert_eq!(bitmap::encode(&s, 512).len(), 64);
 }
+
+/// The next leader checks a quorum of votes as one aggregate; a forged vote costs it the
+/// fallback to per-vote checks but neither blocks the QC nor gets into it, even when the forgery
+/// arrives before the genuine vote of the same signer.
+#[test]
+fn votes_are_checked_as_one_aggregate_and_forgeries_are_dropped() {
+    let (sks, pks) = bls_set(4);
+    let validators = ValidatorSet::equal(4);
+    let genesis = B256::repeat_byte(1);
+    let leader2 = validators.leader(2);
+    let scheme = BlsScheme::new(pks.clone(), &sks[leader2 as usize..=leader2 as usize]);
+    let cfg = Config::genesis(8017, validators, Some(leader2), genesis, 1000);
+    let mut engine = Engine::new(cfg, scheme);
+    let _ = engine.start();
+    let block = B256::repeat_byte(9);
+    let msg = vote_msg(8017, 0, 1, &block);
+    let vote = |signer: u16, sig| {
+        Message::Vote(Vote { epoch: 0, round: 1, block, height: 1, signer, sig })
+    };
+    let others: Vec<u16> = (0..4u16).filter(|i| *i != leader2).collect();
+    // A forgery for the first signer arrives first (signed with the wrong key).
+    let forged = sks[others[1] as usize].sign(&msg);
+    let _ = engine.on_message(vote(others[0], forged));
+    let _ = engine.on_message(vote(others[1], sks[others[1] as usize].sign(&msg)));
+    let _ = engine.on_message(vote(others[2], sks[others[2] as usize].sign(&msg)));
+    assert_eq!(engine.high_qc().round, 0, "the forged vote kept this from being a quorum");
+    // The genuine vote of the same signer still counts.
+    let _ = engine.on_message(vote(others[0], sks[others[0] as usize].sign(&msg)));
+    let qc = engine.high_qc().clone();
+    assert_eq!((qc.round, qc.block), (1, block));
+    let signers = bitmap::decode(&qc.signers);
+    assert_eq!(signers, others);
+    let check = BlsScheme::new(pks, &[]);
+    assert!(check.verify_aggregate(&signers, &msg, qc.sig.as_ref().unwrap()));
+}

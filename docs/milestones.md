@@ -283,7 +283,7 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
   - 每個節點的日誌約 3,000 行 WARN，九成以上是 gossipsub 拒絕重送同一則共識訊息。重送本來就不會送出去（gossipsub 在 60 秒內會把它當重複訊息），現在在節點內先過濾，60 秒後才會真的重送
   - 「sealed block not imported: unknown parent」是算出 nonce 時父區塊已經被重組掉，改成 debug 等級
   - 修剪數為 0 是預期的：歷史副本數 16 大於測試網的 8 位驗證者，所以每個節點都被指派保存全部歷史
-- [x] 投票驗證成本（`boltchain bench votes`，雲端 x86 2 vCPU）：512 席、法定 342 票，逐票驗證 366 ms（每票約 1.07 ms），彙整 34 ms，驗證彙整簽章 25 ms → 1.3 ms（公鑰只在 epoch 開始時解碼一次，委員會的簽章驗證全部改用解碼過的公鑰）。樹莓派約慢 3–5 倍，逐票驗證約 1.1–1.8 秒，占 6 秒出塊的 20–30%；下一步是同一輪同一區塊的票先彙整再驗一次，失敗才逐票找出壞票。新增指標 `consensus_messages_total`、`consensus_bytes_total`、`bls_verifications_total`、`bls_verify_microseconds_total`
+- [x] 投票驗證成本（`boltchain bench votes`，雲端 x86 2 vCPU）：512 席、法定 342 票，逐票驗證 366 ms（每票約 1.07 ms），彙整 34 ms，驗證彙整簽章 25 ms → 1.3 ms（公鑰只在 epoch 開始時解碼一次，委員會的簽章驗證全部改用解碼過的公鑰）。樹莓派約慢 3–5 倍，逐票驗證約 1.1–1.8 秒，占 6 秒出塊的 20–30%。改成延後驗證：下一輪的 leader 收到的票湊滿法定數量後先彙整、只驗一次彙整簽章（約 35 ms），失敗才逐票找出偽造的票並丟掉；同一位簽署者出現兩個不同簽章時立即個別驗證，偽造票無法擋掉真票（`votes_are_checked_as_one_aggregate_and_forgeries_are_dropped`）。新增指標 `consensus_messages_total`、`consensus_bytes_total`、`bls_verifications_total`、`bls_verify_microseconds_total`
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## M6 追加項目（ADR 0008）
