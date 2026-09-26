@@ -952,7 +952,10 @@ impl Validator {
                     }
                     Action::Propose { round, qc, tc } if ctx.mode == Mode::Checkpoints => {
                         let (chain, itx, epoch) = (self.chain.clone(), itx.clone(), ctx.epoch);
-                        let deadline = ctx.engine.config().base_timeout_ms * 3 / 4;
+                        // Wait for the checkpoint to be buried for most of this round: after
+                        // timeouts the round is longer, and giving up at the base timeout would
+                        // waste it (rounds then only advanced by timeouts, 8x base each).
+                        let deadline = ctx.engine.round_timeout_ms() * 3 / 4;
                         tokio::spawn(async move {
                             match crate::checkpoint::propose(&chain, round, &qc, deadline).await {
                                 Ok(block) => {

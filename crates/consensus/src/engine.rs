@@ -338,6 +338,11 @@ impl<S: Scheme> Engine<S> {
         self.cfg.base_timeout_ms << self.consecutive_timeouts.min(3)
     }
 
+    /// Length of the current round's timer (the base timeout, doubled per consecutive timeout).
+    pub fn round_timeout_ms(&self) -> u64 {
+        self.timeout_ms()
+    }
+
     /// Starts the engine: enters round 1.
     pub fn start(&mut self) -> Vec<Action<S>> {
         let mut out = Vec::new();
