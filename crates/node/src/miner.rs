@@ -165,6 +165,10 @@ pub async fn run(
                     }
                 }
             }
+            // The template's parent was reorganised away while the nonce was being found.
+            Err(bolt_chain::ChainError::UnknownParent(p)) => {
+                tracing::debug!(parent = %p, "sealed block is stale (parent reorganised away)")
+            }
             Err(e) => tracing::warn!("sealed block not imported: {e}"),
         }
     }

@@ -27,8 +27,11 @@ pub enum Kind {
     Pairing,
     /// BLS12-381 pairing precompile (0x0f, EIP-2537).
     BlsPairing,
-    /// Both.
+    /// Execution benchmarks (transfers and both pairings).
     All,
+    /// Consensus vote verification for a full committee (BLS12-381): per-vote checks against
+    /// one aggregate check, to size the per-round cost on small hardware.
+    Votes,
 }
 
 /// Benchmark options.
@@ -40,6 +43,9 @@ pub struct BenchArgs {
     /// Blocks per benchmark (the first is reported separately as a warm-up).
     #[arg(long, default_value_t = 4)]
     pub blocks: u64,
+    /// Committee seats for `votes` (mainnet: 512).
+    #[arg(long, default_value_t = 512)]
+    pub seats: usize,
 }
 
 const DEV_GENESIS: &str = include_str!("../../../genesis/dev.json");
@@ -217,7 +223,57 @@ fn run_one(
 }
 
 /// Runs the requested benchmarks and prints a summary.
+/// Vote-verification costs for a committee of `seats`.
+pub fn votes(seats: usize) {
+    use bolt_primitives::bls;
+    let seats = seats.max(3);
+    let quorum = seats * 2 / 3 + 1;
+    let msg = bolt_consensus::vote_msg(8017, 1, 1, &alloy_primitives::B256::repeat_byte(7));
+    let keys: Vec<_> = (0..seats as u32).map(bls::dev_key).collect();
+    let pks: Vec<_> = keys.iter().map(|k| k.public_key()).collect();
+    let sigs: Vec<_> = keys.iter().map(|k| k.sign(&msg)).collect();
+    let ms = |t: Instant| t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = Instant::now();
+    let ok = (0..quorum).all(|i| bls::verify(&pks[i], &msg, &sigs[i]));
+    let each = ms(t);
+    assert!(ok);
+    let t = Instant::now();
+    let agg = bls::aggregate(&sigs[..quorum]).expect("valid signatures");
+    let aggregate = ms(t);
+    let t = Instant::now();
+    assert!(bls::fast_aggregate_verify(&pks[..quorum], &msg, &agg));
+    let fast = ms(t);
+    let t = Instant::now();
+    let prepared: Vec<_> = pks.iter().map(|p| bls::prepare(p).expect("valid key")).collect();
+    let keys_ms = ms(t);
+    let refs: Vec<_> = prepared[..quorum].iter().collect();
+    let t = Instant::now();
+    assert!(bls::fast_aggregate_verify_prepared(&refs, &msg, &agg));
+    let fast_prepared = ms(t);
+    let t = Instant::now();
+    assert!((0..quorum).all(|i| bls::verify_prepared(&prepared[i], &msg, &sigs[i])));
+    let each_prepared = ms(t);
+    println!(
+        "votes: {seats} seats, quorum {quorum} | verify each vote: {each:.0} ms ({:.2} ms/vote; \
+         {each_prepared:.0} ms with decoded keys) | aggregate: {aggregate:.1} ms | verify \
+         aggregate: {fast:.1} ms ({fast_prepared:.1} ms with decoded keys; decoding all {seats} \
+         keys once: {keys_ms:.1} ms)",
+        each / quorum as f64
+    );
+    let each = each_prepared;
+    println!(
+        "per round a voter checks up to {quorum} votes and the leader aggregates them; with \
+         6 s slots, per-vote checks use {:.0}% of a slot on this machine",
+        each / 60.0
+    );
+}
+
 pub fn run(args: BenchArgs) -> Result<()> {
+    if matches!(args.kind, Kind::Votes) {
+        votes(args.seats);
+        return Ok(());
+    }
     println!(
         "arch {} | {} blocks each (first = warm-up)",
         std::env::consts::ARCH,

@@ -610,6 +610,7 @@ async fn run(
     // How we reached each peer (scope of the remote address of our connection).
     let mut reach: HashMap<PeerId, Scope> = HashMap::new();
     let mut last_at = 0u64;
+    let mut published = RecentlyPublished::default();
     let mut storage_rate: HashMap<PeerId, (u32, std::time::Instant)> = HashMap::new();
     // NAT traversal: relay-capable peers (dialable address with /p2p) and the ones we listen via.
     let mut relay_candidates: HashMap<PeerId, Multiaddr> = HashMap::new();
@@ -638,16 +639,25 @@ async fn run(
                         }
                     }
                     Command::PublishConsensus(data) => {
+                        if !published.fresh(&data) {
+                            continue;
+                        }
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ctopic.clone(), data) {
                             tracing::debug!("publish consensus: {e}");
                         }
                     }
                     Command::PublishTx(raw) => {
+                        if !published.fresh(&raw) {
+                            continue;
+                        }
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ttopic.clone(), raw) {
                             tracing::debug!("publish tx: {e}");
                         }
                     }
                     Command::PublishStorage(data) => {
+                        if !published.fresh(&data) {
+                            continue;
+                        }
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(stopic.clone(), data) {
                             tracing::debug!("publish storage: {e}");
                         }
@@ -767,6 +777,8 @@ async fn run(
                     let _ = swarm.behaviour_mut().gossipsub.report_message_validation_result(
                         &message_id, &propagation_source, gossipsub::MessageAcceptance::Accept,
                     );
+                    bolt_primitives::metrics::CONSENSUS_MSGS.inc();
+                    bolt_primitives::metrics::CONSENSUS_BYTES.add(message.data.len() as u64);
                     deliver(&ev_tx, NetEvent::Consensus { via: propagation_source, data: message.data });
                 }
                 SwarmEvent::Behaviour(BehaviourEvent::Gossipsub(gossipsub::Event::Message {
@@ -907,6 +919,35 @@ fn tx_stateless_ok(raw: &[u8], chain_id: u64) -> bool {
         && tx.recover_signer().is_ok()
 }
 
+/// Messages this node published recently. Gossipsub refuses (and logs a warning for) a message
+/// identical to one it saw within its duplicate-cache window, so repeats (re-broadcast votes,
+/// timeouts, storage messages) are dropped here quietly; after the window a repeat goes out again.
+#[derive(Default)]
+struct RecentlyPublished {
+    seen: HashMap<B256, std::time::Instant>,
+}
+
+impl RecentlyPublished {
+    /// Gossipsub's default duplicate-cache time.
+    const WINDOW: Duration = Duration::from_secs(60);
+
+    /// Whether `data` was not published within the window (and records it).
+    fn fresh(&mut self, data: &[u8]) -> bool {
+        let now = std::time::Instant::now();
+        if self.seen.len() > 4096 {
+            self.seen.retain(|_, t| now.duration_since(*t) < Self::WINDOW);
+        }
+        let id = alloy_primitives::keccak256(data);
+        match self.seen.get(&id) {
+            Some(t) if now.duration_since(*t) < Self::WINDOW => false,
+            _ => {
+                self.seen.insert(id, now);
+                true
+            }
+        }
+    }
+}
+
 /// Peer scoring (gossipsub v1.1): peers that relay invalid messages (undecodable announcements,
 /// malformed or wrongly signed transactions) lose score and are eventually ignored. Delivery-rate
 /// penalties are off: our topics are quiet (a block every few seconds, few transactions), and
@@ -992,6 +1033,17 @@ mod tests;
 #[cfg(test)]
 mod scope_tests {
     use super::*;
+
+    #[test]
+    fn repeats_are_not_republished_within_the_window() {
+        let mut r = RecentlyPublished::default();
+        assert!(r.fresh(b"vote"));
+        assert!(!r.fresh(b"vote"));
+        assert!(r.fresh(b"other"));
+        let id = alloy_primitives::keccak256(b"vote");
+        r.seen.insert(id, std::time::Instant::now() - RecentlyPublished::WINDOW);
+        assert!(r.fresh(b"vote"), "goes out again after the window");
+    }
 
     #[test]
     fn address_scopes() {

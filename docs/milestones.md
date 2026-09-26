@@ -279,6 +279,11 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
   - NAT 穿透：AutoNAT、UPnP、Circuit Relay v2（`--relay-server` 開啟中繼，每條電路最長 30 分鐘、256 MiB）、DCUtR 打洞；AutoNAT 判定在 NAT 後面時自動經由最多 2 個中繼監聽（`relayed_node_serves_blocks`）
   - 防罰沒（doppelganger）：收到自己座位簽的、但不是本機送出的投票或逾時訊息，就停止用那把金鑰簽署並記錄錯誤、`doppelganger` 指標加一；該節點的其他金鑰照常運作（`m4_pos` 驗收）
 - [x] 測試網部署 Uniswap v4（`scripts/uniswap-v4`）：PoolManager、PositionManager、UniversalRouter、V4Quoter、StateView、Permit2、WBOLT；原生 BOLT / tUSD 池加流動性、雙向兌換成功。瀏覽器加上 `--explorer-labels` 顯示合約名稱與常見方法名稱
+- [x] 測試網觀察 3（2026-09-26）：第 3601 塊（epoch 6）如期進入階段 B，委員會確認的最終區塊穩定落後 head 約 33 塊（檢查點深度 32）；共識與匯入零錯誤、抽查憑證 16 張、快照 3 份
+  - 每個節點的日誌約 3,000 行 WARN，九成以上是 gossipsub 拒絕重送同一則共識訊息。重送本來就不會送出去（gossipsub 在 60 秒內會把它當重複訊息），現在在節點內先過濾，60 秒後才會真的重送
+  - 「sealed block not imported: unknown parent」是算出 nonce 時父區塊已經被重組掉，改成 debug 等級
+  - 修剪數為 0 是預期的：歷史副本數 16 大於測試網的 8 位驗證者，所以每個節點都被指派保存全部歷史
+- [x] 投票驗證成本（`boltchain bench votes`，雲端 x86 2 vCPU）：512 席、法定 342 票，逐票驗證 366 ms（每票約 1.07 ms），彙整 34 ms，驗證彙整簽章 25 ms → 1.3 ms（公鑰只在 epoch 開始時解碼一次，委員會的簽章驗證全部改用解碼過的公鑰）。樹莓派約慢 3–5 倍，逐票驗證約 1.1–1.8 秒，占 6 秒出塊的 20–30%；下一步是同一輪同一區塊的票先彙整再驗一次，失敗才逐票找出壞票。新增指標 `consensus_messages_total`、`consensus_bytes_total`、`bls_verifications_total`、`bls_verify_microseconds_total`
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## M6 追加項目（ADR 0008）

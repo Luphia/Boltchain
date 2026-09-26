@@ -19,6 +19,8 @@ use std::{collections::HashMap, sync::Arc};
 #[derive(Clone)]
 pub struct BlsScheme {
     keys: Arc<Vec<BlsPublicKey>>,
+    /// `keys` decoded once (`None` for an invalid key, which then verifies nothing).
+    prepared: Arc<Vec<Option<bls::PreparedKey>>>,
     secrets: Arc<HashMap<ValidatorIndex, BlsSecretKey>>,
 }
 
@@ -41,7 +43,8 @@ impl BlsScheme {
                 }
             }
         }
-        Self { keys: Arc::new(keys), secrets: Arc::new(secrets) }
+        let prepared = keys.iter().map(bls::prepare).collect();
+        Self { keys: Arc::new(keys), prepared: Arc::new(prepared), secrets: Arc::new(secrets) }
     }
 
     /// Committee indices this scheme can sign for.
@@ -66,7 +69,10 @@ impl Scheme for BlsScheme {
     }
 
     fn verify(&self, signer: ValidatorIndex, msg: &[u8], sig: &Self::Sig) -> bool {
-        self.keys.get(signer as usize).is_some_and(|pk| bls::verify(pk, msg, sig))
+        self.prepared
+            .get(signer as usize)
+            .and_then(Option::as_ref)
+            .is_some_and(|pk| bls::verify_prepared(pk, msg, sig))
     }
 
     fn aggregate(&self, sigs: &[Self::Sig]) -> Option<Self::Agg> {
@@ -74,12 +80,14 @@ impl Scheme for BlsScheme {
     }
 
     fn verify_aggregate(&self, signers: &[ValidatorIndex], msg: &[u8], agg: &Self::Agg) -> bool {
-        let Some(pks) =
-            signers.iter().map(|i| self.keys.get(*i as usize).copied()).collect::<Option<Vec<_>>>()
+        let Some(pks) = signers
+            .iter()
+            .map(|i| self.prepared.get(*i as usize).and_then(Option::as_ref))
+            .collect::<Option<Vec<_>>>()
         else {
             return false;
         };
-        !pks.is_empty() && bls::fast_aggregate_verify(&pks, msg, agg)
+        bls::fast_aggregate_verify_prepared(&pks, msg, agg)
     }
 }
 

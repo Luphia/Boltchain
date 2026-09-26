@@ -75,6 +75,10 @@ metrics! {
     counter SNAPSHOTS = "snapshots_total", "State snapshots taken";
     counter BLOCKS_PRUNED = "blocks_pruned_total", "Block bodies pruned";
     counter TXS_ADMITTED = "txs_admitted_total", "Transactions admitted to the pool";
+    counter CONSENSUS_MSGS = "consensus_messages_total", "Consensus messages received (proposals, votes, timeouts)";
+    counter CONSENSUS_BYTES = "consensus_bytes_total", "Bytes of consensus messages received";
+    counter BLS_VERIFIES = "bls_verifications_total", "BLS signature verifications (single and aggregate)";
+    counter BLS_VERIFY_MICROS = "bls_verify_microseconds_total", "Time spent verifying BLS signatures, in microseconds";
     gauge PEERS = "peers", "Connected peers";
     gauge DOPPELGANGER = "doppelganger", "Validator keys of this node seen signing on another node (those keys stopped signing)";
 }
