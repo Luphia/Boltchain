@@ -3,7 +3,11 @@
 # wallet (211.22.118.149 sends its BOLT there too, fund-host2.sh), waits until it covers the
 # missing PoS stake (100,000 BOLT in total; 20,800 already staked), then stakes the 8 local
 # validator keys evenly from the n1 wallet and publishes each validator's history peer.
+# Survives a reboot through a crontab entry (`@reboot sleep 60; …/stake-t2.sh >> …/stake-t2.log`);
+# a marker file stops it once the stakes are in.
 set -u
+DONE=$HOME/boltchain/stake-t2.done
+[ -f "$DONE" ] && { echo "already done"; exit 0; }
 START=${START:-3300}
 NEED=${NEED:-79200}
 B=$HOME/boltchain/bin/boltchain
@@ -33,4 +37,5 @@ for i in 1 2; do
     $B wallet set-peer --wallet $W --key $K --node-key $HOME/boltchain/n$i/data/node.key --rpc $R
   done
 done
+touch "$DONE"
 echo "$(date -Is) done"
