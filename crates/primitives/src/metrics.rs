@@ -80,6 +80,7 @@ metrics! {
     counter BLS_VERIFIES = "bls_verifications_total", "BLS signature verifications (single and aggregate)";
     counter BLS_VERIFY_MICROS = "bls_verify_microseconds_total", "Time spent verifying BLS signatures, in microseconds";
     gauge PEERS = "peers", "Connected peers";
+    gauge CONSENSUS_ROUND = "consensus_round", "Current consensus round";
     gauge DOPPELGANGER = "doppelganger", "Validator keys of this node seen signing on another node (those keys stopped signing)";
 }
 

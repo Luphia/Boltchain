@@ -447,8 +447,21 @@ impl Validator {
         let mut actions = ctx.engine.start();
         actions.extend(self.replay(&mut ctx, &mut future));
         let mut reannounce = tokio::time::interval(REANNOUNCE);
+        let mut logged = (0, 0);
         loop {
             self.handle(&mut ctx, actions, &itx, &sources, &rounds, &mut future, &mut dg).await;
+            let after = (ctx.engine.round(), ctx.engine.high_qc().round);
+            if after != logged {
+                logged = after;
+                bolt_primitives::metrics::CONSENSUS_ROUND.set(after.0);
+                tracing::debug!(
+                    round = after.0,
+                    high_qc = after.1,
+                    committed = ctx.engine.committed().height,
+                    leader = ctx.engine.validators().leader(after.0),
+                    "consensus round"
+                );
+            }
             if ctx.mode == Mode::Checkpoints {
                 // Mined blocks carry the latest checkpoint QC: it pays its signers.
                 let qc = ctx.engine.high_qc();
@@ -468,6 +481,22 @@ impl Validator {
                         Some(msg) => {
                             self.watch_equivocation(&ctx, &msg, &mut seen);
                             self.watch_doppelganger(&ctx, &msg, &data, &mut dg);
+                            match &msg {
+                                Message::Proposal(p) => tracing::debug!(
+                                    round = p.block.round, height = p.block.height,
+                                    proposer = p.proposer, qc = p.qc.round,
+                                    tc = p.tc.as_ref().map(|t| t.round), local = ctx.engine.round(),
+                                    "proposal received"
+                                ),
+                                Message::Vote(v) => tracing::debug!(
+                                    round = v.round, height = v.height, signer = v.signer,
+                                    local = ctx.engine.round(), "vote received"
+                                ),
+                                Message::Timeout(t) => tracing::debug!(
+                                    round = t.round, high_qc = t.high_qc.round, signer = t.signer,
+                                    local = ctx.engine.round(), "timeout received"
+                                ),
+                            }
                             if let Message::Proposal(p) = &msg {
                                 sources.insert(p.block.hash, via);
                                 rounds.insert(p.block.hash, p.block.round);
@@ -526,7 +555,13 @@ impl Validator {
                     Some(Internal::Validated(e, h, ok)) if e == ctx.epoch => ctx.engine.on_validated(h, ok),
                     Some(Internal::Built(b)) if b.epoch == ctx.epoch => {
                         let Built { block, qc, tc, payload, .. } = *b;
-                        ctx.engine.on_proposed(block, qc, tc, payload)
+                        let (round, height) = (block.round, block.height);
+                        let out = ctx.engine.on_proposed(block, qc, tc, payload);
+                        tracing::debug!(
+                            round, height, local = ctx.engine.round(), sent = !out.is_empty(),
+                            "own proposal built"
+                        );
+                        out
                     }
                     Some(Internal::Fetched(e, b)) if e == ctx.epoch => ctx.engine.on_block(b),
                     Some(_) => vec![], // from an epoch we left

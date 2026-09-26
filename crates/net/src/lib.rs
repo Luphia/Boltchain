@@ -622,6 +622,14 @@ async fn run(
         tokio::select! {
             _ = bootstrap_tick.tick() => {
                 let _ = swarm.behaviour_mut().kad.bootstrap();
+                // Gossip health: peers whose score keeps them out of the mesh stop relaying.
+                let g = &swarm.behaviour().gossipsub;
+                let mesh = g.mesh_peers(&ctopic.hash()).count();
+                let scores: Vec<String> = g
+                    .all_peers()
+                    .filter_map(|(p, _)| g.peer_score(p).map(|s| format!("{}:{s:.1}", short_peer(p))))
+                    .collect();
+                tracing::info!(consensus_mesh = mesh, scores = %scores.join(" "), "gossip");
             }
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };
@@ -917,6 +925,11 @@ fn tx_stateless_ok(raw: &[u8], chain_id: u64) -> bool {
         && !tx.is_eip4844()
         && tx.chain_id() == Some(chain_id)
         && tx.recover_signer().is_ok()
+}
+
+fn short_peer(p: &PeerId) -> String {
+    let s = p.to_string();
+    s[s.len().saturating_sub(6)..].to_owned()
 }
 
 /// Messages this node published recently. Gossipsub refuses (and logs a warning for) a message
