@@ -24,7 +24,21 @@ use std::{
 pub enum WalletCmd {
     /// Create a new account key file (0600; refuses to overwrite).
     New {
-        /// Output file.
+        /// Output file: a Web3 Secret Storage v3 keystore (the geth / MetaMask format) encrypted
+        /// with a password (asked on the terminal, or `BOLT_PASSWORD_FILE`).
+        #[arg(long)]
+        out: PathBuf,
+        /// Write the key unencrypted instead (test machines only).
+        #[arg(long)]
+        plain: bool,
+    },
+    /// Encrypt an existing plain account file into a new v3 keystore (the plain file is left in
+    /// place: delete it once the new one works).
+    Encrypt {
+        /// Plain account file.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Output keystore.
         #[arg(long)]
         out: PathBuf,
     },
@@ -119,16 +133,45 @@ struct WalletFile {
     private_key: String,
 }
 
-/// Loads an account key file.
+/// Loads an account key file (v3 keystore or plain).
 pub fn load_wallet(path: &Path) -> Result<PrivateKeySigner> {
-    let f: WalletFile = serde_json::from_str(
+    let v: Value = serde_json::from_str(
         &std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
     )?;
+    if crate::keystore::is_encrypted(&v) {
+        let s = crate::keystore::unlock(&format!("account {}", path.display()), |p| {
+            let key = crate::keystore::v3_decrypt(&v, p)?;
+            PrivateKeySigner::from_slice(&key).context("invalid private key")
+        })?;
+        if let Some(a) = v.get("address").and_then(Value::as_str)
+            && a.trim_start_matches("0x").to_lowercase() != hex::encode(s.address())
+        {
+            bail!("keystore address does not match its key");
+        }
+        return Ok(s);
+    }
+    let f: WalletFile = serde_json::from_value(v)?;
     let s: PrivateKeySigner = f.private_key.parse().context("invalid private key")?;
     if s.address() != f.address {
         bail!("wallet file address does not match its key");
     }
     Ok(s)
+}
+
+fn write_wallet(out: &Path, s: &PrivateKeySigner, encrypt: bool) -> Result<()> {
+    if out.exists() {
+        bail!("{} already exists; refusing to overwrite a key", out.display());
+    }
+    let json = if encrypt {
+        let password = crate::keystore::password(&format!("new account {}", out.display()), true)?;
+        crate::keystore::v3_encrypt(&s.to_bytes()[..], s.address().as_slice(), &password)?
+    } else {
+        serde_json::to_value(WalletFile {
+            address: s.address(),
+            private_key: hex::encode_prefixed(s.to_bytes()),
+        })?
+    };
+    crate::keys::write_secret(out, &serde_json::to_string_pretty(&json)?)
 }
 
 /// Parses a decimal BOLT amount into wei.
@@ -245,26 +288,21 @@ pub fn current_epoch(url: &str) -> Result<u64> {
 /// Runs a wallet command.
 pub fn run(cmd: WalletCmd) -> Result<()> {
     match cmd {
-        WalletCmd::New { out } => {
-            if out.exists() {
-                bail!("{} already exists; refusing to overwrite a key", out.display());
-            }
-            if let Some(dir) = out.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
+        WalletCmd::New { out, plain } => {
             let s = PrivateKeySigner::random();
-            let f = WalletFile {
-                address: s.address(),
-                private_key: hex::encode_prefixed(s.to_bytes()),
-            };
-            std::fs::write(&out, serde_json::to_string_pretty(&f)? + "\n")?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&out, std::fs::Permissions::from_mode(0o600))?;
-            }
+            write_wallet(&out, &s, !plain)?;
             println!("address {}", s.address());
             println!("saved to {} (keep it secret; back it up)", out.display());
+        }
+        WalletCmd::Encrypt { wallet, out } => {
+            let raw: Value = serde_json::from_str(&std::fs::read_to_string(&wallet)?)?;
+            if crate::keystore::is_encrypted(&raw) {
+                bail!("{} is already encrypted", wallet.display());
+            }
+            let s = load_wallet(&wallet)?;
+            write_wallet(&out, &s, true)?;
+            println!("address {}", s.address());
+            println!("encrypted to {}; delete {} once it works", out.display(), wallet.display());
         }
         WalletCmd::Balance { wallet, address, rpc: url } => {
             let a = match (wallet, address) {

@@ -25,7 +25,7 @@
 use crate::keys;
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use bolt_chain::{Chain, EXTRA_DATA_LEN};
 use bolt_consensus::{
     Action, BlockInfo, BlsScheme, Cert, CommitProof, Config, Engine, Message, Persisted, Proposal,
@@ -1339,7 +1339,21 @@ pub struct StorageArgs {
 /// Runs a validator node until Ctrl-C.
 pub async fn run(args: ValidatorArgs) -> Result<()> {
     let genesis = crate::devnet::load_genesis(&args.genesis)?;
-    let keys = args.key.iter().map(|p| keys::load_key(p)).collect::<Result<Vec<_>>>()?;
+    let mut keys = Vec::new();
+    for p in &args.key {
+        let (k, encrypted) = keys::load_key_file(p)?;
+        if !encrypted {
+            // Mainnet (the only non-dev chain) refuses unencrypted validator keys.
+            if !genesis.dev {
+                bail!(
+                    "{} is not encrypted; convert it with `boltchain keys encrypt` before running on mainnet",
+                    p.display()
+                );
+            }
+            tracing::warn!(key = %p.display(), "validator key is not encrypted (`boltchain keys encrypt`)");
+        }
+        keys.push(k);
+    }
     let chain = Arc::new(Chain::open(&args.datadir, &genesis)?);
     let cfg = chain.config().clone();
     let pool = Arc::new(TxPool::new(bolt_txpool::PoolConfig::new(

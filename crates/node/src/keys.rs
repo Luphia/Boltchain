@@ -1,7 +1,8 @@
 //! Validator key tooling.
 //!
 //! Becoming a validator is the same for everyone (ADR 0007): nobody is listed in genesis.
-//! 1. `boltchain keys new --out validator.key` on the validator machine (the secret stays there).
+//! 1. `boltchain keys new --out validator.key` on the validator machine (the secret stays there,
+//!    in an EIP-2335 keystore encrypted with a password).
 //! 2. `boltchain keys register-tx --key validator.key --fee-recipient <addr>` prints the
 //!    `StakingManager.register` transaction (key, proof of possession); send it from the wallet
 //!    that will own the stake, with at least 64 BOLT.
@@ -16,7 +17,8 @@ use bolt_primitives::{
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// On-disk validator key (plain; an encrypted EIP-2335 keystore arrives with M6).
+/// Plain on-disk validator key (development keys and files from before encryption; new keys are
+/// EIP-2335 keystores, see [`crate::keystore`]).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyFile {
@@ -31,7 +33,21 @@ pub struct KeyFile {
 pub enum KeysCmd {
     /// Generate a new random BLS validator key.
     New {
-        /// Output file (created with 0600 permissions; refuses to overwrite).
+        /// Output file (created with 0600 permissions; refuses to overwrite). An EIP-2335 keystore
+        /// encrypted with a password (asked on the terminal, or `BOLT_PASSWORD_FILE`).
+        #[arg(long)]
+        out: PathBuf,
+        /// Write the secret unencrypted instead (test machines only).
+        #[arg(long)]
+        plain: bool,
+    },
+    /// Encrypt an existing plain key file into a new EIP-2335 keystore (the plain file is left
+    /// in place: delete it once the new one works).
+    Encrypt {
+        /// Plain key file.
+        #[arg(long)]
+        key: PathBuf,
+        /// Output keystore.
         #[arg(long)]
         out: PathBuf,
     },
@@ -72,53 +88,105 @@ pub enum KeysCmd {
     },
 }
 
-fn write_key(path: &Path, key: &BlsSecretKey) -> Result<()> {
+fn write_key(path: &Path, key: &BlsSecretKey, encrypt: bool) -> Result<()> {
     if path.exists() {
         bail!("{} already exists; refusing to overwrite a key", path.display());
     }
+    let json = if encrypt {
+        let password = crate::keystore::password(&format!("new key {}", path.display()), true)?;
+        let ks = crate::keystore::eip2335_encrypt(
+            &key.to_bytes(),
+            key.public_key().as_slice(),
+            &password,
+        )?;
+        serde_json::to_string_pretty(&ks)?
+    } else {
+        serde_json::to_string_pretty(&KeyFile {
+            bls_public_key: key.public_key(),
+            bls_secret_key: hex::encode_prefixed(key.to_bytes()),
+        })?
+    };
+    write_secret(path, &json)
+}
+
+/// Writes a secret file with 0600 permissions (creating its directory).
+pub fn write_secret(path: &Path, json: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let file = KeyFile {
-        bls_public_key: key.public_key(),
-        bls_secret_key: hex::encode_prefixed(key.to_bytes()),
-    };
-    std::fs::write(path, serde_json::to_string_pretty(&file)? + "\n")?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        use std::{io::Write, os::unix::fs::OpenOptionsExt};
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("creating {}", path.display()))?;
+        f.write_all(format!("{json}\n").as_bytes())?;
     }
+    #[cfg(not(unix))]
+    std::fs::write(path, format!("{json}\n"))?;
     Ok(())
 }
 
-/// Loads a key file.
+/// Loads a key file (EIP-2335 keystore or plain).
 pub fn load_key(path: &Path) -> Result<BlsSecretKey> {
-    let file: KeyFile = serde_json::from_str(
-        &std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?,
-    )?;
+    Ok(load_key_file(path)?.0)
+}
+
+/// Loads a key file; also tells whether it was encrypted.
+pub fn load_key_file(path: &Path) -> Result<(BlsSecretKey, bool)> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let v: serde_json::Value = serde_json::from_str(&text)?;
+    if crate::keystore::is_encrypted(&v) {
+        let ks: crate::keystore::Eip2335 = serde_json::from_value(v)?;
+        let key = crate::keystore::unlock(&format!("validator key {}", path.display()), |p| {
+            let bytes = crate::keystore::eip2335_decrypt(&ks, p)?;
+            BlsSecretKey::from_bytes(&bytes).context("invalid BLS secret key")
+        })?;
+        if hex::encode(key.public_key().as_slice()) != ks.pubkey.trim_start_matches("0x") {
+            bail!("keystore public key does not match its secret");
+        }
+        return Ok((key, true));
+    }
+    let file: KeyFile = serde_json::from_value(v)?;
     let bytes = hex::decode(&file.bls_secret_key)?;
     let key = BlsSecretKey::from_bytes(&bytes).context("invalid BLS secret key")?;
     if key.public_key() != file.bls_public_key {
         bail!("key file public key does not match its secret");
     }
-    Ok(key)
+    Ok((key, false))
 }
 
 /// Runs a key command.
 pub fn run(cmd: KeysCmd) -> Result<()> {
     match cmd {
-        KeysCmd::New { out } => {
+        KeysCmd::New { out, plain } => {
             let k = BlsSecretKey::random();
-            write_key(&out, &k)?;
+            write_key(&out, &k, !plain)?;
             println!("BLS public key      {}", k.public_key());
             println!("proof of possession {}", k.proof_of_possession());
             println!("saved to {} (keep it secret; back it up offline)", out.display());
         }
         KeysCmd::Dev { index, out } => {
             let k = bls::dev_key(index);
-            write_key(&out, &k)?;
+            write_key(&out, &k, false)?;
             println!("INSECURE development key {index}: {}", k.public_key());
+        }
+        KeysCmd::Encrypt { key, out } => {
+            let (k, encrypted) = load_key_file(&key)?;
+            if encrypted {
+                bail!("{} is already encrypted", key.display());
+            }
+            write_key(&out, &k, true)?;
+            println!("BLS public key {}", k.public_key());
+            println!(
+                "encrypted to {}; delete {} once the node starts with it",
+                out.display(),
+                key.display()
+            );
         }
         KeysCmd::Show { key } => {
             let k = load_key(&key)?;

@@ -14,9 +14,9 @@ chmod +x "$ROOT/bin/boltchain" "$ROOT/node.sh" "$ROOT/start.sh" "$ROOT/stop.sh"
 for i in $(seq 1 "$N"); do
   D=$ROOT/n$i
   mkdir -p "$D/keys" && chmod 700 "$D" "$D/keys"
-  [ -f "$D/wallet.json" ] || "$B" wallet new --out "$D/wallet.json" >/dev/null
+  [ -f "$D/wallet.json" ] || "$B" wallet new --plain --out "$D/wallet.json" >/dev/null
   for k in $(seq 1 "$KEYS"); do
-    [ -f "$D/keys/v$k.json" ] || "$B" keys new --out "$D/keys/v$k.json" >/dev/null
+    [ -f "$D/keys/v$k.json" ] || "$B" keys new --plain --out "$D/keys/v$k.json" >/dev/null
   done
   "$B" node-id --node-key "$D/data/node.key" > "$D/peer-id"
 done

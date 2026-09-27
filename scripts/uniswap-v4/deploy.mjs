@@ -6,7 +6,7 @@
 //
 // Environment:
 //   RPC          JSON-RPC endpoint (default http://127.0.0.1:8545)
-//   WALLET       `boltchain wallet new` key file, or PRIVATE_KEY=0x...
+//   WALLET       `boltchain wallet new` key file (encrypted: BOLT_PASSWORD_FILE or BOLT_PASSWORD), or PRIVATE_KEY=0x...
 //   LIQUIDITY    liquidity of the smoke-test position, in units of 1e18 (default 100)
 //   SKIP_SMOKE   set to skip the pool / liquidity / swap test
 //
@@ -159,11 +159,21 @@ const PERMIT2_ABI = [
 // ---------------------------------------------------------------------------------------------
 // Wallet, network, bookkeeping
 
-function signer(provider) {
+async function signer(provider) {
   let key = process.env.PRIVATE_KEY;
   if (!key && process.env.WALLET) {
     const f = process.env.WALLET.replace(/^~(?=\/)/, os.homedir());
-    key = JSON.parse(fs.readFileSync(f, "utf8")).privateKey;
+    const text = fs.readFileSync(f, "utf8");
+    const json = JSON.parse(text);
+    if (json.crypto || json.Crypto) {
+      // Encrypted v3 keystore (`boltchain wallet new`): same password sources as boltchain.
+      const pw = process.env.BOLT_PASSWORD_FILE
+        ? fs.readFileSync(process.env.BOLT_PASSWORD_FILE, "utf8").replace(/[\r\n]+$/, "")
+        : process.env.BOLT_PASSWORD;
+      if (pw === undefined) throw new Error(`${f} is encrypted: set BOLT_PASSWORD_FILE or BOLT_PASSWORD`);
+      return (await ethers.Wallet.fromEncryptedJson(text, pw)).connect(provider);
+    }
+    key = json.privateKey;
   }
   if (!key) throw new Error("set WALLET=<boltchain wallet file> or PRIVATE_KEY=0x...");
   return new ethers.Wallet(key, provider);
@@ -174,7 +184,7 @@ const provider = new ethers.JsonRpcProvider(process.env.RPC ?? "http://127.0.0.1
   batchMaxCount: 1,
   pollingInterval: 1000,
 });
-const wallet = signer(provider);
+const wallet = await signer(provider);
 const me = wallet.address;
 const { chainId } = await provider.getNetwork();
 const deployFile = path.join(here, "deployments", `${chainId}.json`);

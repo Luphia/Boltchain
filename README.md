@@ -176,10 +176,12 @@ cargo run --release -p boltchain -- mine --genesis genesis/pow-dev.json --datadi
 ### 成為驗證者
 
 ```sh
-boltchain keys new --out validator-key.json                 # 權限 0600；請離線備份
+boltchain keys new --out validator-key.json                 # 以密碼加密（EIP-2335），權限 0600；請離線備份
 boltchain wallet stake --wallet me.json --key validator-key.json --amount 64
 boltchain wallet set-peer --wallet me.json --key validator-key.json --node-key data/node.key
 ```
+
+金鑰與錢包預設以密碼加密：驗證者金鑰是 EIP-2335 keystore，錢包是 geth / MetaMask 通用的 v3 keystore（scrypt，開啟約 1 秒）。密碼依序取自 `BOLT_PASSWORD_FILE`（存放密碼的檔案）、`BOLT_PASSWORD`、終端機輸入；同一個節點的多把金鑰用同一個密碼只問一次。舊的未加密檔案仍可使用，用 `boltchain keys encrypt --key 舊檔 --out 新檔`、`boltchain wallet encrypt --wallet 舊檔 --out 新檔` 轉換；主網拒絕未加密的驗證者金鑰。`--plain` 可寫出未加密的檔案，只適合測試機。
 
 驗證者同時負責確認區塊、擔任抽查與爭議的驗證小組，並保存分到的鏈歷史；沒有公布提供資料的節點，抽查一律算失敗（每次罰 1% 質押）。
 

@@ -22,7 +22,7 @@
 - [ ] 外部安全稽核：共識（HotStuff-2、BLS 聚合與延後驗證、檢查點）、系統合約（質押、罰沒、SwarmStorage、ComputeMarket）、分叉機制
 - [ ] 測試網在 PoS 下連續 2–4 週未停鏈，期間有外部驗證者加入、快照同步、修剪與抽查正常；gossip 重送警告查明
 - [ ] 主網 genesis：7 位驗證者以 `boltchain keys` 產生 BLS 公鑰、PoP 與綁定簽章並填入範本
-- [ ] 金鑰保護：驗證者金鑰加密保存（EIP-2335），質押擁有者錢包也加密
+- [x] 金鑰保護：驗證者金鑰預設為 EIP-2335 keystore（通過 EIP-2335 測試向量）、錢包為 v3 keystore（與 eth-account 互通）；`keys encrypt` / `wallet encrypt` 轉換舊檔；主網拒絕未加密的驗證者金鑰；密碼取自 `BOLT_PASSWORD_FILE`、`BOLT_PASSWORD` 或終端機
 - [ ] 安全升級：簽章發布清單、可重現建置與 CI 建置證明、`--auto-update notify`
 - [ ] 規模與硬體：128 位驗證者 / 1,000 萬 BOLT 規模的模擬或測試網演練、樹莓派實測、修剪巡檢改成游標與事件驅動
 
@@ -124,7 +124,7 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 - [ ] leader 依質押權重做 VRF 抽樣，委員會由系統合約決定（M4）
 - [ ] 投票直送下一任 leader，不走 gossip 廣播（M4/M6）
 - [ ] 模擬器加入能精準分割誠實節點的對手，用來抓「同輪兩票」這類變異（M4）
-- [ ] 加密 keystore（EIP-2335）（M6）
+- [x] 加密 keystore（EIP-2335）（M6，2026-09-27）
 - [ ] 主網 genesis 填入 7 位驗證者的 BLS 公鑰、PoP 和綁定簽章（由各驗證者用 `boltchain keys` 產生）
 
 ## M4 結果（2026-09-25）

@@ -20,9 +20,9 @@ install -m 644 "$SRC/testnet.json" /opt/boltchain/testnet.json
 install -m 644 "$SRC/boltchain.service" /etc/systemd/system/boltchain.service
 
 # Keys stay on this host: an account (mining rewards, stake owner), validator keys, node identity.
-[ -f /etc/boltchain/wallet.json ] || "$BIN" wallet new --out /etc/boltchain/wallet.json >/dev/null
+[ -f /etc/boltchain/wallet.json ] || "$BIN" wallet new --plain --out /etc/boltchain/wallet.json >/dev/null
 for i in $(seq 1 "$KEYS"); do
-  [ -f "/etc/boltchain/keys/v$i.json" ] || "$BIN" keys new --out "/etc/boltchain/keys/v$i.json" >/dev/null
+  [ -f "/etc/boltchain/keys/v$i.json" ] || "$BIN" keys new --plain --out "/etc/boltchain/keys/v$i.json" >/dev/null
 done
 "$BIN" node-id --node-key /var/lib/boltchain/node.key > /etc/boltchain/peer-id
 chown -R boltchain:boltchain /etc/boltchain /var/lib/boltchain

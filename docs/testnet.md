@@ -73,6 +73,7 @@ $B wallet set-peer --wallet ~/.boltchain-testnet/wallet.json --key ~/.boltchain-
 
 - `set-peer` 公布你的節點是這位驗證者保存歷史資料的地方。沒有公布的驗證者被抽查時一律算失敗，每次罰 1% 質押。
 - 之後用 `validator` 取代 `mine` 重新啟動節點。參數相同，另外加上 `--key ~/.boltchain-testnet/validator.json`；如果還要繼續挖礦，加上 `--mine`。
+- `wallet new` 與 `keys new` 會要求設定密碼並加密保存。節點在背景執行時，把密碼放進只有自己能讀的檔案（`chmod 600`），啟動時設定 `BOLT_PASSWORD_FILE=<檔案>`。
 
 ## 從快照加入（不必從 genesis 同步）
 
