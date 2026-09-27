@@ -142,7 +142,7 @@ impl Explorer {
     pub fn respond(&self, req: &str) -> Option<Response> {
         let target = req.split_whitespace().nth(1).unwrap_or("/");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
-        if path == "/" || path == "/index.html" || path == "/explorer" {
+        if path == "/" || path == "/index.html" || path == "/explorer" || is_page(path) {
             return Some((200, "text/html; charset=utf-8", INDEX_HTML.as_bytes().to_vec()));
         }
         let api = path.strip_prefix("/api/")?;
@@ -862,6 +862,21 @@ fn decode_call(to: Option<Address>, input: &Bytes) -> Option<Value> {
     }
 }
 
+/// A page of the single-page interface (`/blocks`, `/block/12`, `/tx/0x…`, …): the browser asks
+/// for it on a reload or a shared link, and the page's script routes on the path.
+fn is_page(path: &str) -> bool {
+    let mut parts = path.trim_start_matches('/').split('/');
+    let (page, arg, rest) = (parts.next().unwrap_or(""), parts.next(), parts.next());
+    rest.is_none()
+        && match page {
+            "blocks" | "validators" => arg.is_none_or(str::is_empty),
+            "block" | "tx" | "address" | "validator" | "epoch" => {
+                arg.is_some_and(|a| !a.is_empty())
+            }
+            _ => false,
+        }
+}
+
 /// Serves the explorer (and the IPFS gateway behind it) on `addr`.
 pub async fn start(
     addr: std::net::SocketAddr,
@@ -957,6 +972,22 @@ mod tests {
         assert_eq!((s, ct), (200, "text/html; charset=utf-8"));
         assert!(String::from_utf8(body).unwrap().contains("Boltchain"));
         assert!(ex.respond("GET /ipfs/x HTTP/1.1\r\n\r\n").is_none(), "left to the gateway");
+        for page in [
+            "/blocks",
+            "/blocks?before=26",
+            "/block/12",
+            "/tx/0xab",
+            "/address/0x01",
+            "/validators",
+            "/validator/3",
+            "/epoch/4",
+        ] {
+            let (s, ct, _) = ex.respond(&format!("GET {page} HTTP/1.1\r\n\r\n")).unwrap();
+            assert_eq!((s, ct), (200, "text/html; charset=utf-8"), "{page}");
+        }
+        for other in ["/block", "/block/1/x", "/favicon.ico", "/blockz/1"] {
+            assert!(ex.respond(&format!("GET {other} HTTP/1.1\r\n\r\n")).is_none(), "{other}");
+        }
     }
 
     #[test]
