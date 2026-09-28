@@ -26,7 +26,7 @@ use crate::keys;
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, Bytes};
 use anyhow::{Context, Result, bail};
-use bolt_chain::{Chain, EXTRA_DATA_LEN};
+use bolt_chain::{Chain, ChainError, EXTRA_DATA_LEN};
 use bolt_consensus::{
     Action, BlockInfo, BlsScheme, Cert, CommitProof, Config, Engine, Message, Persisted, Proposal,
     Qc, Tc, ValidatorIndex, ValidatorSet, decode_cert, encode_cert, randao_msg,
@@ -425,6 +425,7 @@ impl Validator {
         let mut sources: HashMap<B256, PeerId> = HashMap::new();
         let mut rounds: HashMap<B256, u64> = HashMap::new();
         let mut future: VecDeque<Message<BlsScheme>> = VecDeque::new();
+        let orphans = Orphans::default();
         let cert_slot: crate::miner::CertSlot = Default::default();
         // Mines until PoS starts (it stops by itself then).
         let miner = self.miner.clone().map(|cfg| {
@@ -449,7 +450,8 @@ impl Validator {
         let mut reannounce = tokio::time::interval(REANNOUNCE);
         let mut logged = (0, 0);
         loop {
-            self.handle(&mut ctx, actions, &itx, &sources, &rounds, &mut future, &mut dg).await;
+            self.handle(&mut ctx, actions, &itx, &sources, &rounds, &mut future, &mut dg, &orphans)
+                .await;
             let after = (ctx.engine.round(), ctx.engine.high_qc().round);
             if after != logged {
                 logged = after;
@@ -888,6 +890,7 @@ impl Validator {
         rounds: &HashMap<B256, u64>,
         future: &mut VecDeque<Message<BlsScheme>>,
         dg: &mut Doppelganger,
+        orphans: &Orphans,
     ) {
         let mut queue: VecDeque<Action<BlsScheme>> = actions.into();
         while !queue.is_empty() {
@@ -929,10 +932,14 @@ impl Validator {
                         let via = sources.get(&p.block.hash).copied();
                         let (epoch, keys) = (ctx.epoch, ctx.committee.pubkeys.clone());
                         let mode = ctx.mode;
+                        let orphans = orphans.clone();
                         tokio::spawn(async move {
                             let hash = p.block.hash;
                             let res = match mode {
-                                Mode::Blocks => validate(&chain, &net, &p, via, &keys).await,
+                                Mode::Blocks => {
+                                    validate_with_ancestors(&chain, &net, &p, via, &keys, &orphans)
+                                        .await
+                                }
                                 Mode::Checkpoints => crate::checkpoint::validate(&chain, &p).await,
                             };
                             let ok = match res {
@@ -1185,6 +1192,147 @@ async fn propose(
         BlockInfo { hash: built.hash, parent: qc.block, round, height: built.header.number },
         payload,
     ))
+}
+
+/// Proposals this node could not validate because it did not have their parent yet (it missed
+/// the parent's proposal, e.g. while restarting). Without them every later proposal fails the
+/// same way: each one builds on the previous proposal, which this node never kept, while the
+/// catch-up import of committed blocks stays a block or two behind. A proposal whose parent is
+/// one of these validates that parent (and its cached ancestors) first.
+#[derive(Clone, Default)]
+struct Orphans(Arc<parking_lot::Mutex<VecDeque<Proposal<BlsScheme>>>>);
+
+/// Cached orphan proposals and how many ancestors one proposal may pull in.
+const ORPHANS: usize = 64;
+const ORPHAN_DEPTH: usize = 16;
+
+impl Orphans {
+    fn keep(&self, p: &Proposal<BlsScheme>) {
+        let mut q = self.0.lock();
+        if q.iter().any(|x| x.block.hash == p.block.hash) {
+            return;
+        }
+        if q.len() >= ORPHANS {
+            q.pop_front();
+        }
+        q.push_back(p.clone());
+    }
+
+    /// Cached ancestors of `p`, oldest first.
+    fn ancestors(&self, p: &Proposal<BlsScheme>) -> Vec<Proposal<BlsScheme>> {
+        let q = self.0.lock();
+        let mut out = Vec::new();
+        let mut want = p.block.parent;
+        while out.len() < ORPHAN_DEPTH {
+            let Some(a) = q.iter().find(|x| x.block.hash == want) else { break };
+            want = a.block.parent;
+            out.push(a.clone());
+        }
+        out.reverse();
+        out
+    }
+}
+
+fn unknown_parent(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| matches!(c.downcast_ref::<ChainError>(), Some(ChainError::UnknownParent(_))))
+}
+
+/// [`validate`], first validating the proposal's cached orphan ancestors when its parent is
+/// unknown; keeps it as an orphan if the parent is still missing.
+async fn validate_with_ancestors(
+    chain: &Arc<Chain>,
+    net: &NetHandle,
+    p: &Proposal<BlsScheme>,
+    via: Option<PeerId>,
+    committee_keys: &[bls::BlsPublicKey],
+    orphans: &Orphans,
+) -> Result<()> {
+    let first = validate(chain, net, p, via, committee_keys).await;
+    let Err(e) = first else { return Ok(()) };
+    if !unknown_parent(&e) {
+        return Err(e);
+    }
+    let ancestors = orphans.ancestors(p);
+    // The oldest block we have a proposal for builds on one we never saw (proposed while this
+    // node was away, and by now final elsewhere): fetch that stretch by its envelopes.
+    let root = ancestors.first().unwrap_or(p);
+    if let Err(e) = fetch_missing_parents(chain, net, root, via).await {
+        tracing::debug!(height = root.block.height, "could not fetch missing parents: {e:#}");
+    }
+    let mut last = Err(e);
+    if !ancestors.is_empty() {
+        let mut ok = true;
+        for a in &ancestors {
+            if let Err(e) = validate(chain, net, a, None, committee_keys).await {
+                tracing::debug!(height = a.block.height, "orphan ancestor still invalid: {e:#}");
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            tracing::info!(
+                height = p.block.height,
+                ancestors = ancestors.len(),
+                "validated missed parent proposals"
+            );
+            last = validate(chain, net, p, via, committee_keys).await;
+        }
+    } else {
+        last = validate(chain, net, p, via, committee_keys).await;
+    }
+    if let Err(e) = &last
+        && unknown_parent(e)
+    {
+        orphans.keep(p);
+    }
+    last
+}
+
+/// Fetches, by walking envelope parents from `p`'s, the blocks between this node's known blocks
+/// and `p`'s parent, and verifies them as pending blocks (oldest first). They are ones the
+/// committee already finalized or voted for, served by the peers that have them; they are
+/// executed and checked here like any block, and committed only through consensus.
+async fn fetch_missing_parents(
+    chain: &Arc<Chain>,
+    net: &NetHandle,
+    p: &Proposal<BlsScheme>,
+    via: Option<PeerId>,
+) -> Result<()> {
+    let a = Announce::decode(&p.payload).context("payload is not an announcement")?;
+    let env = Envelope::decode(&a.envelope)?;
+    let mut peers: Vec<PeerId> = via.into_iter().collect();
+    peers.extend(net.peers().await.into_iter().filter(|x| Some(*x) != via));
+    let mut missing: Vec<Envelope> = Vec::new();
+    let mut next = env.parent;
+    while let Some(cid) = next {
+        anyhow::ensure!(missing.len() < ORPHAN_DEPTH, "more than {ORPHAN_DEPTH} blocks behind");
+        let bytes = net.fetch(&[cid], &peers).await?.remove(&cid).context("envelope not served")?;
+        verify(&cid, &bytes)?;
+        let e = Envelope::decode(&bytes)?;
+        let hash = e.block_hash().context("envelope without a block hash")?;
+        if chain.header_of(&hash)?.is_some() {
+            break;
+        }
+        next = e.parent;
+        missing.push(e);
+    }
+    for e in missing.into_iter().rev() {
+        let mut want = vec![e.header];
+        want.extend(e.chunks.iter().copied());
+        let have = net.fetch(&want, &peers).await?;
+        for (c, b) in &have {
+            verify(c, b)?;
+        }
+        let (height, certs) = (e.height, bolt_chain::Certs::of(&e));
+        let block = decode_block(e, |c| have.get(c).cloned())?;
+        let chain = chain.clone();
+        tokio::task::spawn_blocking(move || {
+            chain.verify_block(&block.header, block.transactions, certs)
+        })
+        .await??;
+        tracing::debug!(height, "fetched a missed parent block");
+    }
+    Ok(())
 }
 
 /// Checks a proposal: data present and verified against CIDs, certificate and RANDAO reveal
