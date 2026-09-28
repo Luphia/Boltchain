@@ -111,6 +111,7 @@ pub async fn serve(addr: SocketAddr, handler: Handler) -> Result<SocketAddr> {
                     }
                     body.truncate(got.min(len));
                 }
+                let cache = cache_control(&req);
                 let (status, ctype, body) =
                     tokio::task::spawn_blocking(move || handler(&req, &body)).await.unwrap_or((
                         500,
@@ -118,9 +119,10 @@ pub async fn serve(addr: SocketAddr, handler: Handler) -> Result<SocketAddr> {
                         b"internal error".to_vec(),
                     ));
                 let head = format!(
-                    "HTTP/1.1 {status} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {status} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
                     reason(status),
-                    body.len()
+                    body.len(),
+                    if status == 200 { cache } else { "no-store" }
                 );
                 let _ = sock.write_all(head.as_bytes()).await;
                 let _ = sock.write_all(&body).await;
@@ -169,6 +171,18 @@ impl Limits {
         } else {
             false
         }
+    }
+}
+
+/// Caching of a response: content-addressed blocks and versioned files (`?v=`) never change;
+/// everything else (pages, API answers) is revalidated, so proxies such as Cloudflare do not
+/// serve an old page or library.
+fn cache_control(head: &str) -> &'static str {
+    let target = head.split_whitespace().nth(1).unwrap_or("/");
+    if target.starts_with("/ipfs/") || target.contains("?v=") {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
     }
 }
 

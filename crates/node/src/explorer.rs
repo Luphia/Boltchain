@@ -24,6 +24,16 @@ const INDEX_HTML: &str = include_str!("explorer/index.html");
 /// Evidence verification library (issue #1), used by the page and as its hashing Worker.
 const VERIFY_JS: &str = include_str!("explorer/verify.js");
 
+/// The page, with the library's URL versioned by its content (`/verify.js?v=<hash>`), so a
+/// cached old library is never used with a new page.
+fn index_html() -> &'static str {
+    static PAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PAGE.get_or_init(|| {
+        let v = alloy_primitives::keccak256(VERIFY_JS.as_bytes());
+        INDEX_HTML.replace("__VERIFY_VERSION__", &hex::encode(&v[..8]))
+    })
+}
+
 /// Largest page size.
 const MAX_LIMIT: usize = 50;
 
@@ -159,7 +169,7 @@ impl Explorer {
         let target = req.split_whitespace().nth(1).unwrap_or("/");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         if path == "/" || path == "/index.html" || path == "/explorer" || is_page(path) {
-            return Some((200, "text/html; charset=utf-8", INDEX_HTML.as_bytes().to_vec()));
+            return Some((200, "text/html; charset=utf-8", index_html().as_bytes().to_vec()));
         }
         if path == "/verify.js" {
             return Some((200, "text/javascript; charset=utf-8", VERIFY_JS.as_bytes().to_vec()));
@@ -1124,6 +1134,14 @@ mod tests {
         let (s, ct, body) = ex.respond("GET /verify.js HTTP/1.1\r\n\r\n", &[]).unwrap();
         assert_eq!((s, ct), (200, "text/javascript; charset=utf-8"));
         assert!(String::from_utf8(body).unwrap().contains("verifyEvidence"));
+        let (_, _, page) = ex.respond("GET /verify HTTP/1.1\r\n\r\n", &[]).unwrap();
+        let page = String::from_utf8(page).unwrap();
+        assert!(!page.contains("__VERIFY_VERSION__"));
+        assert!(page.contains("/verify.js?v="), "the library URL is versioned");
+        let (_, _, page) = ex.respond("GET /verify HTTP/1.1\r\n\r\n", &[]).unwrap();
+        let page = String::from_utf8(page).unwrap();
+        assert!(!page.contains("__VERIFY_VERSION__"));
+        assert!(page.contains("/verify.js?v="), "the library URL is versioned");
         for page in [
             "/blocks",
             "/blocks?before=26",

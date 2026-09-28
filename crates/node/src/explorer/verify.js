@@ -1205,8 +1205,10 @@
     for (const b of blocks) { dv.setUint32(o, b.length); out.set(b, o + 4); o += 4 + b.length; }
     return out;
   }
-  /// The manifest kept in the storage deal: hashes and sizes (and the blocks, when public); no names.
-  const certManifest = (files, chunks) => utf8(canonicalJson({ v: 1, type: "boltchain-certificate", files: files.map((f, i) => ({ keccak256: f.keccak256, sha256: f.sha256, size: f.size, ...(chunks ? { chunks: chunks[i] } : {}) })) }));
+  /// The manifest kept in the storage deal: hashes and sizes (and the blocks, when public); no
+  /// names. The certificate's salt makes it unique, so the same files can be certified again
+  /// (a deal index backs only one certificate).
+  const certManifest = (files, chunks, salt) => utf8(canonicalJson({ v: 1, type: "boltchain-certificate", salt, files: files.map((f, i) => ({ keccak256: f.keccak256, sha256: f.sha256, size: f.size, ...(chunks ? { chunks: chunks[i] } : {}) })) }));
   /// Call data of Certificates.issue.
   function issueCalldata(o) {
     const sig = parseSignature(CERT_ISSUE);

@@ -162,8 +162,17 @@ footer.wrap { color: var(--muted); font-size: 12px; padding: 20px 16px 32px; bor
 .flist .f { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 10px; border-radius: 8px; background: var(--panel2); min-width: 0; }
 .flist .f span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .flist .f button { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px; }
-.switch { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; cursor: pointer; }
-.switch input { margin-top: 3px; width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.switch { display: flex; gap: 12px; align-items: flex-start; font-size: 14px; cursor: pointer; }
+.switch .tg { position: relative; flex: none; width: 46px; height: 26px; margin-top: 1px; }
+.switch .tg input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; z-index: 1; }
+.switch .tg i { position: absolute; inset: 0; border-radius: 999px; background: #3a4a60; border: 1px solid #4a5b73; transition: background .2s, border-color .2s; }
+:root[data-theme="light"] .switch .tg input:not(:checked) + i { background: #cbd3de; border-color: #b8c2d0; }
+.switch .tg i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.35); transition: transform .2s; }
+.switch .tg input:checked + i { background: linear-gradient(135deg, #4d9bf0, #2f6fcf); border-color: transparent; }
+.switch .tg input:checked + i::after { transform: translateX(20px); }
+.switch .tg input:focus-visible + i { outline: 2px solid var(--accent2); outline-offset: 2px; }
+.switch .tg input:disabled + i { opacity: .5; }
+@media (prefers-reduced-motion: reduce) { .switch .tg i, .switch .tg i::after { transition: none; } }
 .btn.lg { height: 46px; font-size: 15px; font-weight: 650; padding: 0 20px; border-radius: 10px; }
 .cv-status { font-size: 13px; color: var(--muted); min-height: 18px; overflow-wrap: anywhere; }
 .cert { position: relative; padding: 28px 28px 22px; overflow: hidden; }
@@ -216,7 +225,7 @@ footer.wrap { color: var(--muted); font-size: 12px; padding: 20px 16px 32px; bor
 </header>
 <main class="wrap" id="app"></main>
 <footer class="wrap" id="foot"></footer>
-<script src="/verify.js"></script>
+<script src="/verify.js?v=__VERIFY_VERSION__"></script>
 <script>
 "use strict";
 // ---------- i18n ----------
@@ -806,6 +815,8 @@ async function verifyBlock(b) {
 
 // ---------- evidence verification (issue #1) ----------
 const V = window.BoltVerify;
+// Versioned like the <script> above, so caches never mix an old library with a new page.
+const VERIFY_URL = "/verify.js?v=__VERIFY_VERSION__";
 const vstate = { tab: "proof", proofText: null, proofName: null, file: null, hashes: null, report: null, anchorType: "log" };
 function dropBox(id, accept) {
   return `<div class="drop" id="${id}-drop"><label class="btn"><input type="file" id="${id}" ${accept ? `accept="${accept}"` : ""}>${t("v.pick")}</label><div class="nm muted" id="${id}-nm">${t("v.none")}</div></div>`;
@@ -876,7 +887,7 @@ async function pickFile(f) {
   const out = document.getElementById("vhash");
   out.textContent = t("v.hashing");
   try {
-    vstate.hashes = await V.hashFile(f, (p) => { if (vstate.file === f) out.textContent = `${t("v.hashing")} ${Math.round(p * 100)}%`; }, "/verify.js");
+    vstate.hashes = await V.hashFile(f, (p) => { if (vstate.file === f) out.textContent = `${t("v.hashing")} ${Math.round(p * 100)}%`; }, VERIFY_URL);
     if (vstate.file === f) showHashes();
   } catch (e) { out.textContent = e.message; }
 }
@@ -1107,7 +1118,7 @@ function renderNew(cfg) {
   box.innerHTML = `
     <label class="bigdrop" id="cdrop"><input type="file" id="cfiles" multiple>${t("cv.drop")} <b>${t("cv.pick")}</b></label>
     ${cstate.files.length ? `<div class="flist">${cstate.files.map((f, i) => `<div class="f"><span>${esc(f.file.name)}</span><span class="muted">${bytesFmt(f.file.size)} ${f.hashes ? "" : "…"}</span><button data-rm="${i}" title="✕" ${cstate.busy ? "disabled" : ""}>✕</button></div>`).join("")}<div class="hint">${t("cv.files", { n: cstate.files.length, size: bytesFmt(total) })}</div></div>` : ""}
-    <label class="switch"><input type="checkbox" id="cpub" ${cstate.public ? "checked" : ""} ${cstate.busy ? "disabled" : ""}><span>${t("cv.public")}<br><span class="hint">${t("cv.public.h")}</span></span></label>
+    <label class="switch"><span class="tg"><input type="checkbox" role="switch" id="cpub" ${cstate.public ? "checked" : ""} ${cstate.busy ? "disabled" : ""}><i></i></span><span>${t("cv.public")}<br><span class="hint">${t("cv.public.h")}</span></span></label>
     ${q ? `<div class="hint">${q.error ? esc(q.error) : t("cv.fee", { fee: `<b>${boltFmt(q.cost)}</b>`, n: q.replicas, until: dayOf(q.until) })}</div>` : ""}
     ${secure ? "" : `<div class="note">${t("cv.https", { url: `<a href="https://boltchain.cafeca.io/verify">https://boltchain.cafeca.io</a>` })}</div>`}
     <div><button class="btn acc lg" id="cpay" ${ready && secure && !(cstate.busy && !cstate.prepared) ? "" : "disabled"}>${payLabel}</button></div>
@@ -1130,7 +1141,7 @@ async function addFiles(list, cfg) {
   resetPrepared();
   renderNew(cfg);
   for (const f of cstate.files) {
-    if (!f.hashes) { f.hashes = await V.hashFile(f.file, null, "/verify.js"); renderNew(cfg); }
+    if (!f.hashes) { f.hashes = await V.hashFile(f.file, null, VERIFY_URL); renderNew(cfg); }
   }
   requote(cfg);
 }
@@ -1202,14 +1213,14 @@ async function prepare(cfg, account) {
     await flush();
   }
   setStatus(t("cv.s.prepare"));
-  const manifest = V.certManifest(files, chunks);
+  const salt = V.toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const manifest = V.certManifest(files, chunks, salt);
   const mcid = V.rawCid(manifest);
   const up = await fetch("/api/upload", { method: "POST", body: V.uploadBody([manifest]) }).then((r) => r.json());
   if (up.error || up.cids[0] !== mcid) throw new Error(up.error || "manifest upload");
   const idx = await fetch("/api/deal-index", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entry: mcid, blocks: [mcid, ...blocks] }) }).then((r) => r.json());
   if (idx.error) throw new Error(idx.error);
   const quote = await api(`storage/quote?size=${idx.size}`);
-  const salt = V.toHex(crypto.getRandomValues(new Uint8Array(32)));
   const root = V.certTree(files).root;
   const code = V.certCode(root, account, salt);
   const data = V.issueCalldata({ salt, files, publicFiles: cstate.public, manifest: V.toHex(V.cidBytes(mcid)), dealRoot: idx.rootBytes, blocks: idx.blocks, size: idx.size, replicas: quote.replicas, epochs: quote.epochs, price: quote.price });
@@ -1287,7 +1298,7 @@ async function pageCert(arg) {
       row.className = "row";
       row.innerHTML = `<span class="n">${esc(file.name)}</span><span class="muted">${t("v.hashing")}</span>`;
       out.appendChild(row);
-      const h = await V.hashFile(file, null, "/verify.js");
+      const h = await V.hashFile(file, null, VERIFY_URL);
       const i = L.ok ? V.matchFile(L.files, h) : -1;
       if (i >= 0) matched.add(i);
       row.innerHTML = `<span class="badge ${i >= 0 ? "ok" : "bad"}">${i >= 0 ? "✓" : "✗"}</span><span class="n">${esc(file.name)}</span><span>${i >= 0 ? t("ct.m.yes", { i: i + 1 }) : t("ct.m.no")}</span>`;
