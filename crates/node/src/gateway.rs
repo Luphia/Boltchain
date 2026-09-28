@@ -20,14 +20,17 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Starts the gateway; returns the bound address.
 pub async fn start(addr: SocketAddr, chain: Arc<Chain>) -> Result<SocketAddr> {
-    let bound = serve(addr, Arc::new(move |req: &str| respond(&chain, req))).await?;
+    let bound = serve(addr, Arc::new(move |req: &str, _: &[u8]| respond(&chain, req))).await?;
     tracing::info!(%bound, "IPFS gateway listening");
     Ok(bound)
 }
 
-/// A request handler: raw request head in, (status, content type, body) out. Runs on a
-/// blocking thread.
-pub type Handler = Arc<dyn Fn(&str) -> Response + Send + Sync>;
+/// A request handler: raw request head and body in, (status, content type, body) out. Runs on
+/// a blocking thread.
+pub type Handler = Arc<dyn Fn(&str, &[u8]) -> Response + Send + Sync>;
+
+/// Largest request body accepted (the explorer's uploads send files in pieces of this size).
+pub const MAX_BODY: usize = 8 << 20;
 
 /// Minimal HTTP/1.1 server (one request per connection, GET only in practice) shared by the
 /// gateway and the metrics endpoint.
@@ -75,10 +78,45 @@ pub async fn serve(addr: SocketAddr, handler: Handler) -> Result<SocketAddr> {
                         break;
                     }
                 }
-                let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                let (status, ctype, body) = tokio::task::spawn_blocking(move || handler(&req))
-                    .await
-                    .unwrap_or((500, "text/plain", b"internal error".to_vec()));
+                // Split off the head; read a POST body up to its Content-Length.
+                let head_end = buf[..n].windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4);
+                let req = String::from_utf8_lossy(&buf[..head_end.unwrap_or(n)]).to_string();
+                let length = content_length(&req);
+                let mut body = Vec::new();
+                if let (Some(end), Some(len)) = (head_end, length) {
+                    if len > MAX_BODY {
+                        let msg = "request body too large";
+                        let head = format!(
+                            "HTTP/1.1 413 Payload Too Large\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            msg.len()
+                        );
+                        let _ = sock.write_all(head.as_bytes()).await;
+                        let _ = sock.write_all(msg.as_bytes()).await;
+                        let _ = sock.shutdown().await;
+                        return;
+                    }
+                    body.extend_from_slice(&buf[end..n]);
+                    body.resize(len.max(body.len()), 0);
+                    let mut got = n - end;
+                    while got < len {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(30),
+                            sock.read(&mut body[got..len]),
+                        )
+                        .await
+                        {
+                            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                            Ok(Ok(k)) => got += k,
+                        }
+                    }
+                    body.truncate(got.min(len));
+                }
+                let (status, ctype, body) =
+                    tokio::task::spawn_blocking(move || handler(&req, &body)).await.unwrap_or((
+                        500,
+                        "text/plain",
+                        b"internal error".to_vec(),
+                    ));
                 let head = format!(
                     "HTTP/1.1 {status} {}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n",
                     reason(status),
@@ -134,12 +172,22 @@ impl Limits {
     }
 }
 
+/// `Content-Length` of a request head, if any.
+fn content_length(head: &str) -> Option<usize> {
+    head.lines().find_map(|l| {
+        let (k, v) = l.split_once(':')?;
+        k.trim().eq_ignore_ascii_case("content-length").then(|| v.trim().parse().ok())?
+    })
+}
+
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Payload Too Large",
         429 => "Too Many Requests",
         503 => "Service Unavailable",
         _ => "Internal Server Error",

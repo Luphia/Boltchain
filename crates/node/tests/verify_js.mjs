@@ -89,6 +89,27 @@ for (const m of vec.merkle) {
 throws(() => V.merkleRoot("sum-packed-v1", { types: ["uint256"], values: ["1"] }, { sums: [0] }, [{ hash: "0x" + "00".repeat(32), sums: ["-1"] }], 0), "negative sum");
 throws(() => V.pathBits("0x4", 2), "path bits beyond siblings");
 
+// Certificates (ADR 0016): same vectors as the Rust tests of the contract and the explorer.
+{
+  const f = [0, 1, 2].map((i) => ({ keccak256: V.toHex(V.keccak256(Uint8Array.of(i))), sha256: V.toHex(V.keccak256(Uint8Array.of(i, i))), size: 1000 + i }));
+  const tree = V.certTree(f);
+  eq(tree.root, "0x375eda9e3fe392f99312159cfa518829c276e41b43cad1f60542ee22d31b3e72", "certificate root");
+  eq(V.certCode(tree.root, "0x" + "d0".repeat(20), "0x" + "07".repeat(32)), "0x29edf803c3d2d84b57d0", "certificate code");
+  for (let i = 0; i < 3; i++) {
+    const p = tree.proof(i);
+    const r = V.merkleRoot("prefixed-abi-v1", { types: ["bytes32", "bytes32", "uint64"], values: [f[i].keccak256, f[i].sha256, String(f[i].size)] }, {}, p.siblings, p.path);
+    eq(r.root.hash, tree.root, `certificate proof ${i} is a prefixed-abi-v1 proof`);
+  }
+  eq(V.encodeCode("0x0019324b647d96afc8e1"), "00CK4JV4FPBAZJ71", "code encoding");
+  eq(V.decodeCode("00ck-4jv4-fpba-zj7l"), "0x0019324b647d96afc8e1", "code decoding forgives case, dashes and l");
+  eq(V.decodeCode("UUUUUUUUUUUUUUUU"), null, "U is not Crockford");
+  eq(V.rawCid(V.utf8("hello")), "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq", "raw CID");
+  eq(V.cidString(V.cidBytes("bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq")), "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq", "CID bytes roundtrip");
+  throws(() => V.checkCid("bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq", V.utf8("hellO")), "CID mismatch");
+  const body = V.uploadBody([Uint8Array.of(1, 2), Uint8Array.of(3)]);
+  eq(V.toHex(body), "0x00000002010200000001" + "03", "upload body");
+}
+
 // Report hash covers everything but itself and ignores key order.
 const r1 = { b: 1n, a: [{ y: "x", z: 2 }], reportHash: "0x" };
 const r2 = { a: [{ z: 2, y: "x" }], b: "1" };

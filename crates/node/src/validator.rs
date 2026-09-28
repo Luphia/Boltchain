@@ -1464,6 +1464,13 @@ pub struct StorageArgs {
     /// with a `contracts` map (e.g. `scripts/uniswap-v4/deployments/8018.json`). Repeatable.
     #[arg(long = "explorer-labels", value_name = "FILE")]
     pub explorer_labels: Vec<std::path::PathBuf>,
+    /// `Certificates` contract for the explorer's evidence certificates (ADR 0016): the explorer
+    /// then accepts uploads for certificate storage deals and announces them to providers.
+    #[arg(long, value_name = "ADDRESS")]
+    pub certificates: Option<alloy_primitives::Address>,
+    /// CAFECA wallet the certificate page pays with.
+    #[arg(long, default_value = "https://cafeca.io")]
+    pub cafeca_wallet: String,
     /// Serve history as a storage provider without stake (ADR 0012) for this account's registered
     /// provider ids: keep the epochs assigned to them. Repeatable. Register first with
     /// `boltchain wallet storage-register`. The node also keeps the SwarmStorage deals assigned
@@ -1541,7 +1548,7 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
             rt: tokio::runtime::Handle::current(),
         }) as Arc<dyn bolt_rpc::BlockHost>
     });
-    let storage_task = tokio::spawn(storage.run(storage_rx));
+    let storage_task = tokio::spawn(storage.clone().run(storage_rx));
     if args.storage.explorer {
         crate::explorer::spawn_address_index(chain.clone())?;
         if !args.storage.explorer_labels.is_empty() {
@@ -1549,7 +1556,25 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
             tracing::info!(contracts = n, "explorer labels loaded");
         }
         let addr = args.storage.gateway.unwrap_or(([127, 0, 0, 1], 8080).into());
-        let ex = crate::explorer::Explorer { chain: chain.clone(), pool: Some(pool.clone()) };
+        let certs = args.storage.certificates.map(|a| {
+            let st = storage.clone();
+            let announce: Arc<dyn Fn(bolt_ipld::Cid) + Send + Sync> = Arc::new(move |root| {
+                if let Err(e) = st.host(root, &[]) {
+                    tracing::warn!("announcing certificate deal {root}: {e:#}");
+                }
+            });
+            Arc::new(crate::certificates::Certs::new(
+                a,
+                args.storage.cafeca_wallet.clone(),
+                Some(announce),
+                Some(args.datadir.join("cert-uploads.json")),
+            ))
+        });
+        let ex = crate::explorer::Explorer {
+            chain: chain.clone(),
+            pool: Some(pool.clone()),
+            certs: certs.clone(),
+        };
         crate::explorer::start(addr, ex).await?;
     } else if let Some(addr) = args.storage.gateway {
         crate::gateway::start(addr, chain.clone()).await?;

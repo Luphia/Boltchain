@@ -16,6 +16,8 @@ pub use genesis::{genesis_alloc, genesis_hash, genesis_header, genesis_state_roo
 pub use hooks::{AuditResult, CertVotes, EpochRules, HistoryInputs, Phase, Producer, pre_block};
 
 #[cfg(test)]
+mod certificate_tests;
+#[cfg(test)]
 mod compute_tests;
 #[cfg(test)]
 mod deal_tests;

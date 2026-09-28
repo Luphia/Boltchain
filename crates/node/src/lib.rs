@@ -1,6 +1,7 @@
 //! Boltchain node library: devnet producer, follower, benchmarks, used by the `boltchain` binary.
 
 pub mod bench;
+pub mod certificates;
 pub mod checkpoint;
 pub mod compute;
 pub mod devnet;

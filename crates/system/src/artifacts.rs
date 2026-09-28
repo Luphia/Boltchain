@@ -39,3 +39,4 @@ artifact!(reward_distributor, "RewardDistributor.json");
 artifact!(swarm_storage, "SwarmStorage.json");
 artifact!(compute_market, "ComputeMarket.json");
 artifact!(bls_harness, "BLSHarness.json");
+artifact!(certificates, "Certificates.json");

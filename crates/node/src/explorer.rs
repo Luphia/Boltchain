@@ -34,9 +34,22 @@ pub struct Explorer {
     pub chain: Arc<Chain>,
     /// Pool (pending transactions), if the node has one.
     pub pool: Option<Arc<TxPool>>,
+    /// Evidence certificates (ADR 0016), when a `Certificates` contract is configured.
+    pub certs: Option<Arc<crate::certificates::Certs>>,
 }
 
 type ApiResult = Result<Value, (u16, String)>;
+
+fn json_response(res: ApiResult) -> Response {
+    match res {
+        Ok(v) => (200, "application/json", serde_json::to_vec(&v).unwrap_or_default()),
+        Err((status, msg)) => (
+            status,
+            "application/json",
+            serde_json::to_vec(&json!({ "error": msg })).unwrap_or_default(),
+        ),
+    }
+}
 
 fn not_found(what: impl Into<String>) -> (u16, String) {
     (404, what.into())
@@ -131,7 +144,7 @@ fn known_method(sel: [u8; 4]) -> Option<&'static str> {
         .copied()
 }
 
-fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+pub(crate) fn query_param<'a>(query: &'a str, name: &str) -> Option<&'a str> {
     query.split('&').find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
 }
 
@@ -141,7 +154,8 @@ fn limit(query: &str, default: usize) -> usize {
 
 impl Explorer {
     /// Answers a request head. `/api/...` is JSON; everything else serves the web interface.
-    pub fn respond(&self, req: &str) -> Option<Response> {
+    pub fn respond(&self, req: &str, body: &[u8]) -> Option<Response> {
+        let method = req.split_whitespace().next().unwrap_or("GET");
         let target = req.split_whitespace().nth(1).unwrap_or("/");
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         if path == "/" || path == "/index.html" || path == "/explorer" || is_page(path) {
@@ -151,6 +165,14 @@ impl Explorer {
             return Some((200, "text/javascript; charset=utf-8", VERIFY_JS.as_bytes().to_vec()));
         }
         let api = path.strip_prefix("/api/")?;
+        if method == "POST" {
+            let res = match api {
+                "upload" => self.upload(body),
+                "deal-index" => self.deal_index(body),
+                _ => Err((405, "only GET is supported here".to_string())),
+            };
+            return Some(json_response(res));
+        }
         let r = match self.chain.store().reader() {
             Ok(r) => r,
             Err(e) => return Some(text(500, e.to_string())),
@@ -170,16 +192,11 @@ impl Explorer {
             ["raw", "block", id] => self.raw_block(&r, id),
             ["proof", a] => self.proof(&r, a, query),
             ["call"] => self.call(&r, query),
+            ["cert", code] => self.certificate(&r, code),
+            ["storage", "quote"] => self.quote(&r, query),
             _ => Err(not_found("unknown API path")),
         };
-        Some(match res {
-            Ok(v) => (200, "application/json", serde_json::to_vec(&v).unwrap_or_default()),
-            Err((status, msg)) => (
-                status,
-                "application/json",
-                serde_json::to_vec(&json!({ "error": msg })).unwrap_or_default(),
-            ),
-        })
+        Some(json_response(res))
     }
 
     fn view<C: SolCall>(
@@ -189,6 +206,10 @@ impl Explorer {
         c: C,
     ) -> Result<C::Return, (u16, String)> {
         queries::call(&StateView::latest(r), self.chain.config().chain_id, to, c).map_err(internal)
+    }
+
+    pub(crate) fn head_header(&self, r: &Tx<'_, RO>) -> Result<Header, (u16, String)> {
+        self.head(r)
     }
 
     fn head(&self, r: &Tx<'_, RO>) -> Result<Header, (u16, String)> {
@@ -258,6 +279,7 @@ impl Explorer {
         Ok(json!({
             "chainId": cfg.chain_id,
             "version": concat!("boltchain/v", env!("CARGO_PKG_VERSION")),
+            "certificates": self.certs.as_ref().map(|c| json!({ "contract": c.address, "wallet": c.wallet })),
             "genesis": self.chain.genesis_hash(),
             "head": self.block_summary(r, &head),
             "finalized": if stage == "pos" { head.number } else { finalized },
@@ -960,7 +982,7 @@ fn is_page(path: &str) -> bool {
     rest.is_none()
         && match page {
             "blocks" | "validators" | "verify" => arg.is_none_or(str::is_empty),
-            "block" | "tx" | "address" | "validator" | "epoch" => {
+            "block" | "tx" | "address" | "validator" | "epoch" | "cert" => {
                 arg.is_some_and(|a| !a.is_empty())
             }
             _ => false,
@@ -973,8 +995,12 @@ pub async fn start(
     explorer: Explorer,
 ) -> anyhow::Result<std::net::SocketAddr> {
     let chain = explorer.chain.clone();
-    let handler = move |req: &str| {
-        explorer.respond(req).unwrap_or_else(|| crate::gateway::respond(&chain, req))
+    let explorer = Arc::new(explorer);
+    if explorer.certs.is_some() {
+        crate::certificates::spawn_collector(explorer.clone());
+    }
+    let handler = move |req: &str, body: &[u8]| {
+        explorer.respond(req, body).unwrap_or_else(|| crate::gateway::respond(&chain, req))
     };
     let bound = crate::gateway::serve(addr, Arc::new(handler)).await?;
     tracing::info!(%bound, "block explorer and IPFS gateway listening");
@@ -1018,7 +1044,7 @@ mod tests {
 
     fn get(ex: &Explorer, path: &str) -> (u16, Value) {
         let (status, _, body) =
-            ex.respond(&format!("GET {path} HTTP/1.1\r\n\r\n")).expect("handled");
+            ex.respond(&format!("GET {path} HTTP/1.1\r\n\r\n"), &[]).expect("handled");
         (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
     }
 
@@ -1033,7 +1059,7 @@ mod tests {
             w.enable_address_index().unwrap();
             w.commit().unwrap();
         }
-        let ex = Explorer { chain, pool: None };
+        let ex = Explorer { chain, pool: None, certs: None };
         let (s, v) = get(&ex, "/api/status");
         assert_eq!(s, 200);
         assert_eq!(v["chainId"], 1337);
@@ -1091,11 +1117,11 @@ mod tests {
         assert_eq!(get(&ex, "/api/call?to=0x01").0, 400);
         assert_eq!(get(&ex, "/api/tx/0x00").0, 400);
         assert_eq!(get(&ex, "/api/nope").0, 404);
-        let (s, ct, body) = ex.respond("GET / HTTP/1.1\r\n\r\n").unwrap();
+        let (s, ct, body) = ex.respond("GET / HTTP/1.1\r\n\r\n", &[]).unwrap();
         assert_eq!((s, ct), (200, "text/html; charset=utf-8"));
         assert!(String::from_utf8(body).unwrap().contains("Boltchain"));
-        assert!(ex.respond("GET /ipfs/x HTTP/1.1\r\n\r\n").is_none(), "left to the gateway");
-        let (s, ct, body) = ex.respond("GET /verify.js HTTP/1.1\r\n\r\n").unwrap();
+        assert!(ex.respond("GET /ipfs/x HTTP/1.1\r\n\r\n", &[]).is_none(), "left to the gateway");
+        let (s, ct, body) = ex.respond("GET /verify.js HTTP/1.1\r\n\r\n", &[]).unwrap();
         assert_eq!((s, ct), (200, "text/javascript; charset=utf-8"));
         assert!(String::from_utf8(body).unwrap().contains("verifyEvidence"));
         for page in [
@@ -1109,11 +1135,11 @@ mod tests {
             "/epoch/4",
             "/verify",
         ] {
-            let (s, ct, _) = ex.respond(&format!("GET {page} HTTP/1.1\r\n\r\n")).unwrap();
+            let (s, ct, _) = ex.respond(&format!("GET {page} HTTP/1.1\r\n\r\n"), &[]).unwrap();
             assert_eq!((s, ct), (200, "text/html; charset=utf-8"), "{page}");
         }
         for other in ["/block", "/block/1/x", "/favicon.ico", "/blockz/1"] {
-            assert!(ex.respond(&format!("GET {other} HTTP/1.1\r\n\r\n")).is_none(), "{other}");
+            assert!(ex.respond(&format!("GET {other} HTTP/1.1\r\n\r\n"), &[]).is_none(), "{other}");
         }
     }
 

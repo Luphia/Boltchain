@@ -67,7 +67,7 @@ pub async fn start(
     chain: Arc<Chain>,
     pool: Option<Arc<TxPool>>,
 ) -> Result<SocketAddr> {
-    let handler = move |req: &str| {
+    let handler = move |req: &str, _body: &[u8]| {
         let path = req.split_whitespace().nth(1).unwrap_or("/");
         let s = status(&chain, pool.as_deref());
         match path {

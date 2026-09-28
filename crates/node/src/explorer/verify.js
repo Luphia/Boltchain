@@ -1046,6 +1046,188 @@
     return report;
   }
 
+  // ---------------------------------------------------------------------------------------
+  // evidence certificates (ADR 0016)
+  // ---------------------------------------------------------------------------------------
+  const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+  /// 10 bytes (hex or bytes) -> 16 Crockford base-32 characters.
+  function encodeCode(b) {
+    const x = bytesToBig(fromHex(b));
+    let s = "";
+    for (let i = 15; i >= 0; i--) s += CROCKFORD[Number((x >> BigInt(5 * i)) & 31n)];
+    return s;
+  }
+  /// Parses a code (any case, dashes and spaces ignored, I/L = 1, O = 0) -> "0x" + 10 bytes, or null.
+  function decodeCode(str) {
+    const t = String(str || "").toUpperCase().replace(/[\s-]/g, "").replace(/[IL]/g, "1").replace(/O/g, "0");
+    if (t.length !== 16) return null;
+    let x = 0n;
+    for (const ch of t) { const d = CROCKFORD.indexOf(ch); if (d < 0) return null; x = (x << 5n) | BigInt(d); }
+    return toHex(bigToBytes(x, 10));
+  }
+  const formatCode = (c) => c.replace(/(.{4})(?=.)/g, "$1-");
+
+  const B32 = "abcdefghijklmnopqrstuvwxyz234567";
+  function base32(bytes) {
+    let bits = 0, val = 0, out = "";
+    for (const b of bytes) { val = (val << 8) | b; bits += 8; while (bits >= 5) { out += B32[(val >>> (bits - 5)) & 31]; bits -= 5; } }
+    if (bits > 0) out += B32[(val << (5 - bits)) & 31];
+    return out;
+  }
+  function unbase32(s) {
+    let bits = 0, val = 0; const out = [];
+    for (const ch of s) { const d = B32.indexOf(ch); if (d < 0) throw new Error("bad base32"); val = (val << 5) | d; bits += 5; if (bits >= 8) { out.push((val >>> (bits - 8)) & 255); bits -= 8; } }
+    return Uint8Array.from(out);
+  }
+  /// CIDv1 string of a raw (0x55) sha-256 block.
+  const rawCid = (data) => "b" + base32(concat(Uint8Array.of(0x01, 0x55, 0x12, 0x20), sha256(data)));
+  /// CID string <-> binary CID bytes (base32 CIDv1 only).
+  const cidBytes = (cid) => { if (cid[0] !== "b") throw new Error("unsupported CID"); return unbase32(cid.slice(1)); };
+  const cidString = (bytes) => "b" + base32(fromHex(bytes));
+  /// Checks a block against its CID (sha-256 or keccak-256 multihash).
+  function checkCid(cid, data) {
+    const d = cidDigest(cid);
+    const got = d.code === 0x12 ? sha256(data) : d.code === 0x1b ? keccak256(data) : null;
+    if (!got || toHex(got).slice(2) !== d.digest) throw new Error(`block ${cid} does not match its CID`);
+  }
+  function cidDigest(cid) {
+    const out = cidBytes(cid);
+    let i = 0;
+    const varint = () => { let x = 0, sh = 0, b; do { b = out[i++]; x |= (b & 0x7f) << sh; sh += 7; } while (b & 0x80); return x; };
+    varint(); varint(); const code = varint(); const len = varint();
+    return { code, digest: toHex(out.subarray(i, i + len)).slice(2) };
+  }
+
+  const CERT_EVENT = "Issued(bytes10 indexed code, address indexed issuer, bytes32 root, uint256 deal, bool publicFiles, bytes32[] keccak, bytes32[] sha, uint64[] sizes, bytes manifest, bytes dealRoot)";
+  const CERT_ISSUE = "issue(bytes32 salt, bytes32[] k, bytes32[] s, uint64[] sizes, bool publicFiles, bytes manifest, bytes dealRoot, uint64 blocks, uint64 size, uint8 replicas, uint64 epochs, uint128 price)";
+  const CHUNK_SIZE = 256 * 1024;
+  /// Leaf of a file in a certificate (the contract's leafOf).
+  const certLeafContent = (f) => keccak256(abiEncode(["bytes32", "bytes32", "uint64"], [f.keccak256, f.sha256, String(f.size)]));
+  /// Merkle root of a certificate's files and the proof of each (prefixed-abi-v1, lone node up).
+  function certTree(files) {
+    if (!files.length) throw new Error("no files");
+    const S = SCHEMES["prefixed-abi-v1"];
+    const layers = [files.map((f) => S.leaf({ hash: toHex(certLeafContent(f)) }).hash)];
+    while (layers[layers.length - 1].length > 1) {
+      const cur = layers[layers.length - 1], next = [];
+      for (let i = 0; i < cur.length; i += 2) next.push(i + 1 < cur.length ? S.node({ hash: cur[i] }, { hash: cur[i + 1] }).hash : cur[i]);
+      layers.push(next);
+    }
+    const proof = (index) => {
+      const siblings = []; let path = 0n, idx = index;
+      for (let l = 0; l < layers.length - 1; l++) {
+        const isRight = idx % 2 === 1, sib = isRight ? idx - 1 : idx + 1;
+        if (sib < layers[l].length) { if (isRight) path |= 1n << BigInt(siblings.length); siblings.push(toHex(layers[l][sib])); }
+        idx = Math.floor(idx / 2);
+      }
+      return { siblings, path: "0x" + path.toString(16) };
+    };
+    return { root: toHex(layers[layers.length - 1][0]), proof };
+  }
+  const certCode = (root, issuer, salt) => toHex(keccak256(abiEncode(["bytes32", "address", "bytes32"], [root, issuer, salt])).subarray(0, 10));
+
+  /// Loads a certificate and checks its Issued event against the block hash (header -> receipt
+  /// trie). Returns { cert (API view), event (decoded), files, checks, ok }.
+  async function loadCertificate(code, fetchJson) {
+    const cert = await fetchJson(`cert/${encodeURIComponent(code)}`);
+    const checks = [];
+    const check = (id, ok, detail, trust) => checks.push({ id, ok: !!ok, detail, trust: trust || "verified", decisive: true });
+    const raw = await fetchJson(`raw/block/${cert.block}`);
+    const H = decodeHeader(raw.header);
+    check("block.header", lc(H.hash) === lc(raw.hash) && H.number === BigInt(raw.number), `keccak256(header) = ${H.hash}`);
+    check("block.receipts", lc(orderedTrieRoot(raw.receipts)) === lc(H.receiptsRoot), `receiptsRoot ${H.receiptsRoot}`);
+    const ev = parseSignature(CERT_EVENT);
+    const topic1 = toHex(concat(fromHex(cert.codeHex), new Uint8Array(22)));
+    let found = null;
+    for (const r of raw.receipts.map(decodeReceipt)) {
+      if (!r.status) continue;
+      for (const l of r.logs) {
+        if (lc(l.address) === lc(cert.contract) && lc(l.topics[0]) === ev.topic && lc(l.topics[1] || "") === lc(topic1)) found = l;
+      }
+    }
+    if (!found) {
+      check("cert.event", false, `no Issued event for ${cert.code} in block ${cert.block}`);
+      return { cert, event: null, files: [], checks, ok: false, timestamp: H.timestamp };
+    }
+    const d = decodeLog(ev, found).args;
+    const files = Array.from({ length: d.keccak.length }, (_, i) => ({ keccak256: d.keccak[i], sha256: d.sha[i], size: Number(d.sizes[i]) }));
+    check("cert.event", true, `Issued event of ${found.address} in block ${cert.block}`);
+    const root = certTree(files).root;
+    check("cert.root", lc(root) === lc(d.root) && lc(root) === lc(cert.root), `Merkle root of ${files.length} file(s) = ${root}`);
+    check("cert.issuer", lc(d.issuer) === lc(cert.issuer), `issuer ${d.issuer}`);
+    const manifest = d.manifest && d.manifest !== "0x" ? cidString(d.manifest) : null;
+    return {
+      cert, files, checks, ok: checks.every((c) => c.ok), timestamp: H.timestamp, blockHash: raw.hash,
+      event: { root: d.root, issuer: d.issuer, deal: String(d.deal), publicFiles: d.publicFiles, manifest, dealRoot: d.dealRoot },
+    };
+  }
+  /// Index of each file (by its hashes and size) in the certificate, or -1.
+  const matchFile = (files, h) => files.findIndex((f) => lc(f.keccak256) === lc(h.keccak256) && lc(f.sha256) === lc(h.sha256) && f.size === h.size);
+  /// Downloads file `i` of a public certificate from the gateway, checking every block against
+  /// its CID and the file against the certificate's hashes. Returns a Blob.
+  async function downloadFile(loaded, i, fetchRaw, onProgress) {
+    const m = loaded.event && loaded.event.manifest;
+    if (!m) throw new Error("this certificate has no manifest");
+    const mb = await fetchRaw(m);
+    checkCid(m, mb);
+    const man = JSON.parse(new TextDecoder().decode(mb));
+    const entry = man.files && man.files[i];
+    const want = loaded.files[i];
+    if (!entry || !entry.chunks || !entry.chunks.length) throw new Error("this file is not public");
+    if (lc(entry.sha256) !== lc(want.sha256)) throw new Error("the manifest does not match the certificate");
+    const parts = [];
+    const k = new Keccak256(), s = new Sha256();
+    for (let j = 0; j < entry.chunks.length; j++) {
+      const b = await fetchRaw(entry.chunks[j]);
+      checkCid(entry.chunks[j], b);
+      k.update(b); s.update(b); parts.push(b);
+      if (onProgress) onProgress((j + 1) / entry.chunks.length);
+    }
+    if (lc(toHex(k.digest())) !== lc(want.keccak256) || lc(toHex(s.digest())) !== lc(want.sha256)) throw new Error("the downloaded file does not match the certificate");
+    return new Blob(parts);
+  }
+  /// Cuts a file into CHUNK_SIZE blocks: [{ cid, data }], calling `each` as it goes.
+  async function chunkFile(blob, each) {
+    const out = [];
+    for (let o = 0; o < blob.size || (o === 0 && blob.size === 0); o += CHUNK_SIZE) {
+      const data = new Uint8Array(await blob.slice(o, o + CHUNK_SIZE).arrayBuffer());
+      const c = { cid: rawCid(data), data };
+      out.push(c.cid);
+      if (each) await each(c);
+      if (blob.size === 0) break;
+    }
+    return out;
+  }
+  /// Body of POST /api/upload: [u32 length][bytes]…
+  function uploadBody(blocks) {
+    const n = blocks.reduce((a, b) => a + 4 + b.length, 0);
+    const out = new Uint8Array(n); const dv = new DataView(out.buffer); let o = 0;
+    for (const b of blocks) { dv.setUint32(o, b.length); out.set(b, o + 4); o += 4 + b.length; }
+    return out;
+  }
+  /// The manifest kept in the storage deal: hashes and sizes (and the blocks, when public); no names.
+  const certManifest = (files, chunks) => utf8(canonicalJson({ v: 1, type: "boltchain-certificate", files: files.map((f, i) => ({ keccak256: f.keccak256, sha256: f.sha256, size: f.size, ...(chunks ? { chunks: chunks[i] } : {}) })) }));
+  /// Call data of Certificates.issue.
+  function issueCalldata(o) {
+    const sig = parseSignature(CERT_ISSUE);
+    return toHex(concat(fromHex(sig.selector), abiEncode(sig.params.map((p) => p.type), [
+      o.salt, o.files.map((f) => f.keccak256), o.files.map((f) => f.sha256), o.files.map((f) => String(f.size)), !!o.publicFiles,
+      o.manifest, o.dealRoot, String(o.blocks), String(o.size), String(o.replicas), String(o.epochs), String(o.price),
+    ])));
+  }
+  /// A proof file (docs/evidence-proof-format.md) for file `i` of a certificate.
+  function certProofFile(loaded, i, chainId) {
+    const f = loaded.files[i];
+    const p = certTree(loaded.files).proof(i);
+    return {
+      version: 1, chainId,
+      anchor: { type: "call", to: loaded.cert.contract, function: "certificate(bytes10 code) view returns ((address issuer, uint64 issuedAt, uint64 blockNumber, uint32 files, bool publicFiles, bytes32 root, uint256 deal, bytes manifest) c)", args: [loaded.cert.codeHex], field: "c.root" },
+      scheme: "prefixed-abi-v1",
+      leaf: { types: ["bytes32", "bytes32", "uint64"], values: [f.keccak256, f.sha256, String(f.size)], names: ["keccak256", "sha256", "size"] },
+      siblings: p.siblings, path: p.path,
+    };
+  }
+
   const api = {
     toHex, fromHex, concat, eqBytes, utf8, toBig, bigToBytes, bytesToBig,
     Keccak256, keccak256, Sha256, sha256,
@@ -1055,6 +1237,8 @@
     SCHEMES, merkleRoot, pathBits,
     canonicalJson, plain, reportHash,
     hashFile, hashBlob, verifyEvidence, findInTransaction, mappingSlot,
+    encodeCode, decodeCode, formatCode, rawCid, cidBytes, cidString, checkCid, CHUNK_SIZE, CERT_EVENT, CERT_ISSUE,
+    certTree, certCode, certLeafContent, loadCertificate, matchFile, downloadFile, chunkFile, uploadBody, certManifest, issueCalldata, certProofFile,
   };
   // As a Worker: hash the posted file.
   if (typeof WorkerGlobalScope !== "undefined" && G instanceof WorkerGlobalScope) {

@@ -1,6 +1,7 @@
 //! ABI bindings for the calls the node makes (and tests use).
 
 #![allow(missing_docs)]
+#![allow(clippy::too_many_arguments)] // ICertificates::issue
 
 use alloy_sol_types::sol;
 
@@ -179,5 +180,28 @@ sol! {
         function verify(bytes pk, bytes message, bytes sig) external view returns (bool);
         function verifyPop(bytes pk, bytes pubkey, bytes pop) external view returns (bool);
         function compress(bytes pk) external pure returns (bytes);
+    }
+
+    /// Evidence certificates (ADR 0016); an ordinary contract, not a system contract.
+    interface ICertificates {
+        struct Certificate {
+            address issuer;
+            uint64 issuedAt;
+            uint64 blockNumber;
+            uint32 files;
+            bool publicFiles;
+            bytes32 root;
+            uint256 deal;
+            bytes manifest;
+        }
+        event Issued(bytes10 indexed code, address indexed issuer, bytes32 root, uint256 deal, bool publicFiles, bytes32[] keccak, bytes32[] sha, uint64[] sizes, bytes manifest, bytes dealRoot);
+        function codeOf(bytes32 root, address issuer, bytes32 salt) external pure returns (bytes10);
+        function leafOf(bytes32 k, bytes32 s, uint64 size) external pure returns (bytes32);
+        function rootOf(bytes32[] k, bytes32[] s, uint64[] sizes) external pure returns (bytes32);
+        function issue(bytes32 salt, bytes32[] k, bytes32[] s, uint64[] sizes, bool publicFiles, bytes manifest, bytes dealRoot, uint64 blocks, uint64 size, uint8 replicas, uint64 epochs, uint128 price) external payable returns (bytes10 code);
+        function extend(bytes10 code, uint64 epochs) external payable;
+        function certificate(bytes10 code) external view returns (Certificate memory);
+        function codeOfDeal(bytes32 dealRootHash) external view returns (bytes10);
+        function count() external view returns (uint256);
     }
 }

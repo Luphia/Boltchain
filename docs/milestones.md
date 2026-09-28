@@ -362,6 +362,17 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - [ ] 完整狀態歷史與歷史 `eth_getProof`（有需求再做）
 - [ ] 公開瀏覽器走 HTTPS（反向代理）
 
+## 存證證書（ADR 0016）：已實作
+
+決定（2026-09-28）：在瀏覽器上傳檔案建立證書，以 CAFECA 支付 BOLT，手續費全部付給 SwarmStorage 儲存提供者；證書有 16 碼代碼，可選擇公開原始檔案供下載；證書頁有認證標章，可以上傳檔案比對。鏈上只記錄雜湊與大小，不記錄檔名。
+
+- [x] `Certificates` 合約（一般合約，沒有管理員）：合約自行計算 root、代碼、建立委託（合約擁有、無法取消）、任何人可延長；`boltchain wallet deploy-certificates`
+- [x] 瀏覽器節點：`POST /api/upload`、`POST /api/deal-index`（向提供者公告）、`/api/storage/quote`、`/api/cert/<代碼>`；未付款的上傳有上限、6 小時後清理；閘道支援 POST（本體最大 8 MiB）；`--certificates`、`--cafeca-wallet`
+- [x] 介面：`/verify` 只剩查詢與建立；`/cert/<代碼>` 證書頁（認證標章、檔案比對、公開檔案下載、列印）；證明檔驗證移到「進階」
+- [x] 測試：合約、瀏覽器節點（上傳、清理）、跨語言向量、Chromium 端到端（CAFECA 以測試替身代替）
+- [ ] 以真實 CAFECA 帳戶在測試網付款（需要 Passkey，人工測試）
+- [ ] 延長保存的介面
+
 ## TEE Agent 租用（ADR 0013）：已採納，未實作
 
 決定（2026-09-26）：必須支援 DGX Spark、Intel AI PC、AMD AI PC（沒有機密 VM，新增 T2「量測開機裝置」等級，靠 TPM 與驗證小組）；接受驗證小組背書；公開機器 ID；檢查點每小時上鏈；LLM 呼叫外部 API；映像開放登記；同版本雙簽罰沒全部押金。

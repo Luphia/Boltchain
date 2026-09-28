@@ -146,6 +146,42 @@ footer.wrap { color: var(--muted); font-size: 12px; padding: 20px 16px 32px; bor
 .checks .main div { white-space: normal !important; overflow-wrap: anywhere; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 16px; }
 .print-only { display: none; }
+.cv-hero { padding: 26px 22px; margin-bottom: 16px; }
+.cv-hero h1 { margin: 0 0 6px; }
+.cv-hero p { margin: 0; color: var(--muted); max-width: 760px; }
+.cv-find { display: flex; gap: 8px; }
+.cv-find input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); color: var(--text); padding: 0 14px; font: 16px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .06em; text-transform: uppercase; }
+.cv-find input::placeholder { text-transform: none; letter-spacing: 0; font-size: 14px; }
+.cv-find button { height: 44px; padding: 0 18px; }
+.cv-body { padding: 16px; display: grid; gap: 12px; }
+.bigdrop { border: 2px dashed var(--line); border-radius: 14px; padding: 26px 16px; text-align: center; color: var(--muted); cursor: pointer; }
+.bigdrop.over { border-color: var(--accent); background: var(--accent-soft); color: var(--text); }
+.bigdrop input { display: none; }
+.bigdrop b { color: var(--link); font-weight: 600; }
+.flist { display: grid; gap: 4px; font-size: 13px; }
+.flist .f { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 10px; border-radius: 8px; background: var(--panel2); min-width: 0; }
+.flist .f span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.flist .f button { border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 15px; }
+.switch { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; cursor: pointer; }
+.switch input { margin-top: 3px; width: 18px; height: 18px; accent-color: var(--accent); flex: none; }
+.btn.lg { height: 46px; font-size: 15px; font-weight: 650; padding: 0 20px; border-radius: 10px; }
+.cv-status { font-size: 13px; color: var(--muted); min-height: 18px; overflow-wrap: anywhere; }
+.cert { position: relative; padding: 28px 28px 22px; overflow: hidden; }
+.cert::before { content: ""; position: absolute; inset: 8px; border: 1px solid var(--line); border-radius: 8px; pointer-events: none; }
+.cert-top { display: flex; gap: 20px; align-items: center; justify-content: space-between; flex-wrap: wrap; position: relative; }
+.cert-top h1 { margin: 0; font-size: 24px; letter-spacing: .04em; }
+.cert-top .sub { color: var(--muted); font-size: 12px; letter-spacing: .18em; text-transform: uppercase; }
+.cert-code { font: 600 26px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .08em; margin: 14px 0 4px; overflow-wrap: anywhere; }
+.seal { width: 150px; height: 150px; flex: none; }
+.cert table.kv { table-layout: fixed; }
+.cert table.kv td { overflow-wrap: anywhere; }
+.cert table.kv td:first-child { width: 150px; }
+.cert-state { display: inline-flex; gap: 6px; align-items: center; font-weight: 650; }
+.match { display: grid; gap: 4px; margin-top: 8px; font-size: 13px; }
+.match .row { display: flex; gap: 8px; align-items: center; padding: 6px 10px; border-radius: 8px; background: var(--panel2); min-width: 0; }
+.match .row span.n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+@media (max-width: 560px) { .cert { padding: 20px 16px; } .seal { width: 110px; height: 110px; } .cert-code { font-size: 19px; } }
+@media print { .cert { border: 2px solid #999; } .bigdrop, .cv-find { display: none !important; } }
 #vres table.kv { table-layout: fixed; }
 #vres table.kv td { overflow-wrap: anywhere; word-break: break-word; }
 @media print {
@@ -231,7 +267,25 @@ const T = {
     "pruned": "本節點已清除此區塊內容，可透過 IPFS 向保存者取得。",
     "foot": "資料直接來自這個 Boltchain 節點。所有區塊都以 IPFS 內容定址，可自行驗證。",
     "sys": "系統合約", "pendingtx": "等待上鏈", "peers": "連線節點", "chain": "Chain ID",
-    "nav.verify": "存證驗證",
+    "nav.verify": "存證",
+    "cv.title": "區塊鏈存證", "cv.lead": "把檔案的指紋（雜湊）寫上 Boltchain，取得一張任何人都能查證的證書。檔案在你的瀏覽器裡計算，除非選擇公開，否則不會離開你的電腦。",
+    "cv.find": "查詢證書", "cv.find.ph": "輸入 16 碼證書代碼，例如 7K3M-9XQ2-P4TA-1HVB", "cv.find.go": "查詢", "cv.find.bad": "證書代碼是 16 個英文字母與數字",
+    "cv.new": "建立證書", "cv.drop": "拖入檔案，或", "cv.pick": "選擇檔案", "cv.files": "{n} 個檔案 · {size}",
+    "cv.public": "公開原始檔案，任何人都能從證書頁下載", "cv.public.h": "不公開時只保存證據（雜湊），費用較低。",
+    "cv.fee": "費用 {fee} BOLT，由 {n} 位儲存提供者各保存一份到 {until}", "cv.fee.none": "目前沒有儲存提供者開放空間，暫時無法建立證書",
+    "cv.pay": "以 CAFECA 付款並建立", "cv.confirm": "確認付款 {fee} BOLT", "cv.https": "建立證書需要安全連線（HTTPS），請改用 {url}。查詢與驗證不受影響。",
+    "cv.s.hash": "計算檔案指紋…", "cv.s.signin": "請在 CAFECA 視窗中登入…", "cv.s.upload": "上傳公開檔案… {p}%", "cv.s.prepare": "準備保存委託…",
+    "cv.s.ready": "已連接 CAFECA：{acct}。按下方按鈕付款。", "cv.s.pay": "請在 CAFECA 視窗中確認付款…", "cv.s.wait": "等待上鏈…", "cv.s.fail": "付款沒有完成：{e}",
+    "cv.adv": "以證明檔進階驗證", "cv.back": "回到存證",
+    "ct.title": "存證證書", "ct.sub": "Certificate of Record", "ct.code": "證書代碼", "ct.issued": "建立時間", "ct.block": "區塊", "ct.issuer": "建立者",
+    "ct.files": "檔案", "ct.public": "公開原始檔案", "ct.public.y": "是，可下載", "ct.public.n": "否，只保存證據", "ct.keep": "保存",
+    "ct.keep.v": "{n} 份副本，到 {until}", "ct.keep.over": "保存委託已結束（證據仍在鏈上）", "ct.root": "證據根雜湊",
+    "ct.ok": "已驗證", "ct.ok.d": "證書內容已對區塊雜湊核對，與鏈上紀錄一致。", "ct.bad": "無法驗證", "ct.bad.d": "證書與鏈上紀錄不一致，請勿採信。",
+    "ct.verify": "驗證檔案", "ct.verify.h": "拖入檔案比對是否為這張證書所證明的檔案。檔案只在你的瀏覽器裡計算。",
+    "ct.m.yes": "符合第 {i} 個檔案", "ct.m.no": "不在這張證書中", "ct.m.all": "全部 {n} 個檔案都已比對相符",
+    "ct.dl": "下載公開檔案", "ct.dl.btn": "下載", "ct.dl.ing": "下載中 {p}%", "ct.copy": "複製連結", "ct.print": "列印",
+    "ct.none": "找不到這張證書", "ct.file": "檔案 {i}", "ct.seal": "區塊鏈存證",
+    "c.cert.event": "鏈上的建立紀錄", "c.cert.root": "檔案重算出證據根雜湊", "c.cert.issuer": "建立者相符",
     "v.title": "存證與託管證據驗證",
     "v.intro": "上傳你手上的檔案或證明檔，比對它是否符合鏈上的證據。檔案只在你的瀏覽器裡計算雜湊，不會上傳到任何伺服器；鏈上資料會對區塊雜湊逐一核對，不必相信這個節點。",
     "v.tab.proof": "證明檔", "v.tab.file": "檔案雜湊",
@@ -316,7 +370,25 @@ const T = {
     "pruned": "This node pruned the block body; it is available over IPFS from its keepers.",
     "foot": "Data comes straight from this Boltchain node. Every block is content-addressed on IPFS and can be verified independently.",
     "sys": "System contract", "pendingtx": "pending", "peers": "peers", "chain": "Chain ID",
-    "nav.verify": "Verify",
+    "nav.verify": "Records",
+    "cv.title": "Blockchain records", "cv.lead": "Put your files' fingerprints (hashes) on Boltchain and get a certificate anyone can check. Files are hashed in your browser and never leave your computer unless you choose to make them public.",
+    "cv.find": "Find a certificate", "cv.find.ph": "16-character code, e.g. 7K3M-9XQ2-P4TA-1HVB", "cv.find.go": "Find", "cv.find.bad": "A code is 16 letters and digits",
+    "cv.new": "Create a certificate", "cv.drop": "Drop files here, or", "cv.pick": "choose files", "cv.files": "{n} file(s) · {size}",
+    "cv.public": "Make the files public: anyone can download them from the certificate", "cv.public.h": "Otherwise only the evidence (hashes) is kept, for a lower fee.",
+    "cv.fee": "Fee {fee} BOLT; {n} storage providers each keep a copy until {until}", "cv.fee.none": "No storage provider offers space right now, so certificates cannot be created",
+    "cv.pay": "Pay with CAFECA and create", "cv.confirm": "Confirm payment of {fee} BOLT", "cv.https": "Creating a certificate needs a secure (HTTPS) connection: use {url}. Finding and checking work here.",
+    "cv.s.hash": "Hashing files…", "cv.s.signin": "Sign in in the CAFECA window…", "cv.s.upload": "Uploading public files… {p}%", "cv.s.prepare": "Preparing the storage deal…",
+    "cv.s.ready": "Connected to CAFECA: {acct}. Press the button below to pay.", "cv.s.pay": "Confirm the payment in the CAFECA window…", "cv.s.wait": "Waiting for the block…", "cv.s.fail": "The payment did not go through: {e}",
+    "cv.adv": "Advanced: verify with a proof file", "cv.back": "Back to records",
+    "ct.title": "Certificate of Record", "ct.sub": "Boltchain", "ct.code": "Code", "ct.issued": "Issued", "ct.block": "Block", "ct.issuer": "Issued by",
+    "ct.files": "Files", "ct.public": "Public files", "ct.public.y": "Yes, downloadable", "ct.public.n": "No, evidence only", "ct.keep": "Storage",
+    "ct.keep.v": "{n} copies until {until}", "ct.keep.over": "The storage deal has ended (the evidence stays on chain)", "ct.root": "Evidence root",
+    "ct.ok": "Verified", "ct.ok.d": "Checked against the block hash: the certificate matches the record on chain.", "ct.bad": "Not verified", "ct.bad.d": "The certificate does not match the record on chain. Do not rely on it.",
+    "ct.verify": "Check files", "ct.verify.h": "Drop files to check whether this certificate covers them. They are hashed in your browser.",
+    "ct.m.yes": "Matches file {i}", "ct.m.no": "Not in this certificate", "ct.m.all": "All {n} files checked and matching",
+    "ct.dl": "Public files", "ct.dl.btn": "Download", "ct.dl.ing": "Downloading {p}%", "ct.copy": "Copy link", "ct.print": "Print",
+    "ct.none": "No certificate with this code", "ct.file": "File {i}", "ct.seal": "BLOCKCHAIN RECORD",
+    "c.cert.event": "Record on chain", "c.cert.root": "Files rebuild the evidence root", "c.cert.issuer": "Issuer matches",
     "v.title": "Evidence and custody verification",
     "v.intro": "Upload the file or proof file you hold to check it against the evidence on chain. Files are hashed in your browser and never uploaded; chain data is checked against block hashes, so you do not have to trust this node.",
     "v.tab.proof": "Proof file", "v.tab.file": "File hash",
@@ -748,6 +820,7 @@ function wireDrop(id, onFile) {
 function pageVerify() {
   const tab = vstate.tab;
   $app.innerHTML = `
+    <div class="no-print" style="margin-bottom:8px"><a href="/verify">← ${t("cv.back")}</a></div>
     <h1 class="no-print">${t("v.title")}</h1>
     <div class="note no-print" style="background:var(--accent-soft);color:var(--text)">${t("v.intro")}</div>
     <div class="tabs no-print"><button class="btn ${tab === "proof" ? "acc" : ""}" data-vtab="proof">${t("v.tab.proof")}</button><button class="btn ${tab === "file" ? "acc" : ""}" data-vtab="file">${t("v.tab.file")}</button></div>
@@ -945,10 +1018,326 @@ function showReport(r) {
   document.getElementById("vprint").onclick = () => window.print();
 }
 
+// ---------- evidence certificates (ADR 0016) ----------
+const cstate = { files: [], public: false, quote: null, status: "", busy: false, channel: null, prepared: null, sdk: null };
+const bytesFmt = (n) => (n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : n < 1 << 30 ? `${(n / 1048576).toFixed(1)} MB` : `${(n / 1073741824).toFixed(2)} GB`);
+const boltFmt = (w) => bolt(w, 4).replace(" BOLT", "");
+const dayOf = (ts) => new Date(ts * 1000).toLocaleDateString(lang === "zh" ? "zh-TW" : "en-US", { year: "numeric", month: "long", day: "numeric" });
+let certInfo = null; // status.certificates: { contract, wallet }
+async function certConfig() {
+  if (certInfo !== null) return certInfo;
+  const st = await api("status");
+  certInfo = st.certificates || false;
+  certInfo && (certInfo.chainId = st.chainId);
+  return certInfo;
+}
+function loadSdk(wallet) {
+  if (window.CafecaConnect) return Promise.resolve(window.CafecaConnect);
+  return (cstate.sdk = cstate.sdk || new Promise((res, rej) => {
+    const el = document.createElement("script");
+    el.src = wallet.replace(/\/$/, "") + "/sdk/cafeca-connect.js";
+    el.onload = () => (window.CafecaConnect ? res(window.CafecaConnect) : rej(new Error("CAFECA SDK")));
+    el.onerror = () => { cstate.sdk = null; rej(new Error("cannot load the CAFECA SDK")); };
+    document.head.appendChild(el);
+  }));
+}
+
+/// A rosette seal. `ok` null = pending, true = verified, false = failed.
+function seal(code, date, ok) {
+  const id = "s" + Math.random().toString(36).slice(2, 8);
+  const c1 = ok === false ? "#c9443c" : ok === null ? "#8b9ab0" : "#2f6fcf";
+  const c2 = ok === false ? "#ff8a80" : ok === null ? "#c0cad6" : "#6cc3bb";
+  const pts = [];
+  for (let i = 0; i < 48; i++) {
+    const a = (i / 48) * Math.PI * 2, r = i % 2 ? 91 : 99;
+    pts.push(`${(100 + r * Math.cos(a)).toFixed(1)},${(100 + r * Math.sin(a)).toFixed(1)}`);
+  }
+  const bottom = t("ct.seal");
+  const cjk = /[^\x00-\x7f]/.test(bottom);
+  return `<svg class="seal" viewBox="0 0 200 200" role="img" aria-label="${esc(bottom)} ${esc(code)}">
+    <defs><linearGradient id="${id}g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${c1}"/><stop offset="1" stop-color="${c2}"/></linearGradient>
+      <path id="${id}t" d="M 28,100 A 72,72 0 0,1 172,100"/><path id="${id}b" d="M 28,100 A 72,72 0 0,0 172,100"/></defs>
+    <polygon points="${pts.join(" ")}" fill="url(#${id}g)"/>
+    <circle cx="100" cy="100" r="85" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="1.4"/>
+    <circle cx="100" cy="100" r="58" fill="#fff" fill-opacity=".13" stroke="#fff" stroke-opacity=".8" stroke-width="1.2"/>
+    <g fill="#fff" font-weight="700" font-family="-apple-system,'Segoe UI','PingFang TC','Noto Sans TC',sans-serif" dominant-baseline="middle">
+      <text font-size="13" letter-spacing="3"><textPath href="#${id}t" startOffset="50%" text-anchor="middle">BOLTCHAIN</textPath></text>
+      <text font-size="${cjk ? 13 : 10.5}" letter-spacing="${cjk ? 5 : 1.5}"><textPath href="#${id}b" startOffset="50%" text-anchor="middle">${esc(bottom)}</textPath></text>
+      <circle cx="28" cy="100" r="2.6"/>${ok === null ? `<circle cx="172" cy="100" r="2.6"/>` : ""}
+    </g>
+    <path d="M106 58 L85 101 H100 L94 130 L119 88 H103 L112 58 Z" fill="#fff"/>
+    <text x="100" y="146" text-anchor="middle" font-size="9.5" font-weight="700" fill="#fff" font-family="ui-monospace,Menlo,monospace">${esc(date || "")}</text>
+    ${ok === null ? "" : `<g transform="translate(176,100)"><circle r="15" fill="#fff" stroke="${c1}" stroke-width="2"/><path d="${ok ? "M-7 0 L-2 6 L8 -6" : "M-6 -6 L6 6 M6 -6 L-6 6"}" stroke="${c1}" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>`}
+  </svg>`;
+}
+
+async function pageRecords() {
+  const cfg = await certConfig().catch(() => false);
+  $app.innerHTML = `
+    <div class="card cv-hero"><h1>${t("cv.title")}</h1><p>${t("cv.lead")}</p></div>
+    <div class="grid two">
+      <div class="card"><div class="card-h"><h2>${t("cv.find")}</h2></div><div class="cv-body">
+        <form class="cv-find" id="cfind"><input id="ccode" autocomplete="off" spellcheck="false" maxlength="24" placeholder="${esc(t("cv.find.ph"))}"><button class="btn acc">${t("cv.find.go")}</button></form>
+        <div class="cv-status" id="cfind-st"></div>
+      </div></div>
+      <div class="card"><div class="card-h"><h2>${t("cv.new")}</h2></div><div class="cv-body" id="cnew">${cfg ? "" : `<div class="muted">—</div>`}</div></div>
+    </div>
+    <div style="margin-top:14px;font-size:13px"><a href="/verify?mode=proof">${t("cv.adv")}</a></div>`;
+  document.getElementById("cfind").onsubmit = (e) => {
+    e.preventDefault();
+    const raw = V.decodeCode(document.getElementById("ccode").value);
+    if (!raw) { document.getElementById("cfind-st").textContent = t("cv.find.bad"); return; }
+    nav(`/cert/${V.formatCode(V.encodeCode(raw))}`);
+  };
+  if (cfg) {
+    renderNew(cfg);
+    // Load the SDK and a saved channel now, so the click can open the CAFECA window at once.
+    if (window.isSecureContext && !cstate.channel) getChannel(cfg).then((ch) => { if (ch) { cstate.channel = ch; renderNew(cfg); } }).catch(() => {});
+  }
+}
+
+function renderNew(cfg) {
+  const box = document.getElementById("cnew");
+  if (!box) return;
+  const total = cstate.files.reduce((a, f) => a + f.file.size, 0);
+  const q = cstate.quote;
+  const secure = window.isSecureContext;
+  const ready = cstate.files.length && cstate.files.every((f) => f.hashes) && q && !q.error;
+  const payLabel = cstate.prepared ? t("cv.confirm", { fee: boltFmt(cstate.prepared.quote.cost) }) : t("cv.pay");
+  box.innerHTML = `
+    <label class="bigdrop" id="cdrop"><input type="file" id="cfiles" multiple>${t("cv.drop")} <b>${t("cv.pick")}</b></label>
+    ${cstate.files.length ? `<div class="flist">${cstate.files.map((f, i) => `<div class="f"><span>${esc(f.file.name)}</span><span class="muted">${bytesFmt(f.file.size)} ${f.hashes ? "" : "…"}</span><button data-rm="${i}" title="✕" ${cstate.busy ? "disabled" : ""}>✕</button></div>`).join("")}<div class="hint">${t("cv.files", { n: cstate.files.length, size: bytesFmt(total) })}</div></div>` : ""}
+    <label class="switch"><input type="checkbox" id="cpub" ${cstate.public ? "checked" : ""} ${cstate.busy ? "disabled" : ""}><span>${t("cv.public")}<br><span class="hint">${t("cv.public.h")}</span></span></label>
+    ${q ? `<div class="hint">${q.error ? esc(q.error) : t("cv.fee", { fee: `<b>${boltFmt(q.cost)}</b>`, n: q.replicas, until: dayOf(q.until) })}</div>` : ""}
+    ${secure ? "" : `<div class="note">${t("cv.https", { url: `<a href="https://boltchain.cafeca.io/verify">https://boltchain.cafeca.io</a>` })}</div>`}
+    <div><button class="btn acc lg" id="cpay" ${ready && secure && !(cstate.busy && !cstate.prepared) ? "" : "disabled"}>${payLabel}</button></div>
+    <div class="cv-status" id="cst">${esc(cstate.status)}</div>`;
+  const inp = document.getElementById("cfiles"), drop = document.getElementById("cdrop");
+  inp.onchange = () => addFiles([...inp.files], cfg);
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); addFiles([...e.dataTransfer.files], cfg); };
+  box.querySelectorAll("[data-rm]").forEach((b) => (b.onclick = (e) => { e.preventDefault(); cstate.files.splice(Number(b.dataset.rm), 1); resetPrepared(); requote(cfg); }));
+  document.getElementById("cpub").onchange = (e) => { cstate.public = e.target.checked; resetPrepared(); requote(cfg); };
+  document.getElementById("cpay").onclick = () => (cstate.prepared ? pay(cfg) : start(cfg));
+}
+const setStatus = (msg, cfg) => { cstate.status = msg; const el = document.getElementById("cst"); if (el) el.textContent = msg; else if (cfg) renderNew(cfg); };
+function resetPrepared() { cstate.prepared = null; }
+async function addFiles(list, cfg) {
+  if (cstate.busy) return;
+  for (const file of list) cstate.files.push({ file, hashes: null });
+  cstate.files = cstate.files.slice(0, 256);
+  resetPrepared();
+  renderNew(cfg);
+  for (const f of cstate.files) {
+    if (!f.hashes) { f.hashes = await V.hashFile(f.file, null, "/verify.js"); renderNew(cfg); }
+  }
+  requote(cfg);
+}
+// Size of the storage deal: the manifest (about 200 bytes a file), plus the files when public.
+const dealSize = () => 1024 + cstate.files.length * 400 + (cstate.public ? cstate.files.reduce((a, f) => a + f.file.size, 0) : 0);
+async function requote(cfg) {
+  if (!cstate.files.length) { cstate.quote = null; renderNew(cfg); return; }
+  try { cstate.quote = await api(`storage/quote?size=${dealSize()}`); }
+  catch (e) { cstate.quote = { error: /offers space|503/.test(e.message) ? t("cv.fee.none") : e.message }; }
+  renderNew(cfg);
+}
+async function getChannel(cfg) {
+  const C = await loadSdk(cfg.wallet);
+  const cafeca = C.create({ wallet: cfg.wallet });
+  let id = null;
+  try { id = localStorage.getItem("cafeca.channel"); } catch (_) {}
+  if (id) { const ch = await cafeca.restoreChannel(id).catch(() => null); if (ch) return ch; }
+  return null;
+}
+/// First click: sign in to CAFECA (popup, must start inside the click), then prepare the deal.
+function start(cfg) {
+  if (cstate.busy) return;
+  cstate.busy = true;
+  const C = window.CafecaConnect;
+  let signing = null;
+  if (C && !cstate.channel) {
+    const cafeca = C.create({ wallet: cfg.wallet });
+    setStatus(t("cv.s.signin"));
+    const nonce = V.toHex(crypto.getRandomValues(new Uint8Array(16))).slice(2);
+    signing = cafeca.signIn({ nonce, statement: t("cv.new"), channel: { ttl: 30 * 86400 } })
+      .then((resp) => cafeca.channel(resp)).then((ch) => { if (!ch) throw new Error("CAFECA channel"); try { localStorage.setItem("cafeca.channel", ch.id); } catch (_) {} return ch; });
+  } else if (!C) {
+    signing = Promise.reject(new Error("cannot load the CAFECA SDK"));
+  }
+  (async () => {
+    try {
+      if (signing) cstate.channel = await signing;
+      cstate.prepared = await prepare(cfg, cstate.channel.account);
+      setStatus(t("cv.s.ready", { acct: short(cstate.channel.account, 8, 6) }));
+    } catch (e) {
+      setStatus(t("cv.s.fail", { e: e.message || e }));
+    } finally { cstate.busy = false; renderNew(cfg); }
+  })();
+}
+/// Uploads the manifest (and the files when public), builds the deal index and the call data.
+async function prepare(cfg, account) {
+  const files = cstate.files.map((f) => f.hashes);
+  let chunks = null;
+  const blocks = [];
+  if (cstate.public) {
+    chunks = [];
+    const total = cstate.files.reduce((a, f) => a + f.file.size, 0) || 1;
+    let sent = 0, batch = [], batchBytes = 0;
+    const flush = async () => {
+      if (!batch.length) return;
+      const got = await fetch("/api/upload", { method: "POST", body: V.uploadBody(batch.map((b) => b.data)) }).then((r) => r.json());
+      if (got.error) throw new Error(got.error);
+      batch.forEach((b, i) => { if (got.cids[i] !== b.cid) throw new Error("the node stored a different block"); });
+      batch = []; batchBytes = 0;
+    };
+    for (const f of cstate.files) {
+      chunks.push(await V.chunkFile(f.file, async (c) => {
+        blocks.push(c.cid);
+        batch.push(c); batchBytes += c.data.length; sent += c.data.length;
+        if (batchBytes >= 6 << 20) await flush();
+        setStatus(t("cv.s.upload", { p: Math.round((sent / total) * 100) }));
+      }));
+    }
+    await flush();
+  }
+  setStatus(t("cv.s.prepare"));
+  const manifest = V.certManifest(files, chunks);
+  const mcid = V.rawCid(manifest);
+  const up = await fetch("/api/upload", { method: "POST", body: V.uploadBody([manifest]) }).then((r) => r.json());
+  if (up.error || up.cids[0] !== mcid) throw new Error(up.error || "manifest upload");
+  const idx = await fetch("/api/deal-index", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ entry: mcid, blocks: [mcid, ...blocks] }) }).then((r) => r.json());
+  if (idx.error) throw new Error(idx.error);
+  const quote = await api(`storage/quote?size=${idx.size}`);
+  const salt = V.toHex(crypto.getRandomValues(new Uint8Array(32)));
+  const root = V.certTree(files).root;
+  const code = V.certCode(root, account, salt);
+  const data = V.issueCalldata({ salt, files, publicFiles: cstate.public, manifest: V.toHex(V.cidBytes(mcid)), dealRoot: idx.rootBytes, blocks: idx.blocks, size: idx.size, replicas: quote.replicas, epochs: quote.epochs, price: quote.price });
+  return { code, data, quote, count: files.length };
+}
+/// Second click: pay through the CAFECA channel (popup inside the click), then wait for the block.
+function pay(cfg) {
+  if (cstate.busy) return;
+  cstate.busy = true;
+  const p = cstate.prepared;
+  setStatus(t("cv.s.pay"));
+  const desc = { title: lang === "zh" ? "建立 Boltchain 存證證書" : "Create a Boltchain certificate", detail: `${p.count} ${lang === "zh" ? "個檔案" : "file(s)"} · ${V.formatCode(V.encodeCode(p.code))} · ${boltFmt(p.quote.cost)} BOLT${cstate.public ? (lang === "zh" ? " · 公開原始檔案" : " · public files") : ""}` };
+  cstate.channel.sendCalls([{ to: cfg.contract, value: p.quote.cost, data: p.data }], desc)
+    .then(async (r) => {
+      if (r && r.success === false) throw new Error("reverted");
+      setStatus(t("cv.s.wait"));
+      const code = V.formatCode(V.encodeCode(p.code));
+      for (let i = 0; i < 60; i++) {
+        try { await api(`cert/${code}`); cstate.files = []; cstate.prepared = null; cstate.quote = null; cstate.status = ""; cstate.busy = false; nav(`/cert/${code}`); return; } catch (_) {}
+        await new Promise((res) => setTimeout(res, 2000));
+      }
+      throw new Error("timeout");
+    })
+    .catch((e) => { cstate.busy = false; if (e && e.code === "channel_closed") { cstate.channel = null; cstate.prepared = null; try { localStorage.removeItem("cafeca.channel"); } catch (_) {} } setStatus(t("cv.s.fail", { e: (e && e.message) || e })); renderNew(cfg); });
+}
+
+async function pageCert(arg) {
+  const raw = V.decodeCode(arg);
+  if (!raw) throw new Error(t("cv.find.bad"));
+  const code = V.formatCode(V.encodeCode(raw));
+  if (arg !== code) history.replaceState(null, "", `/cert/${code}`);
+  let L;
+  try { L = await V.loadCertificate(code, api); }
+  catch (e) {
+    $app.innerHTML = `<div class="card cert"><div class="cert-top"><div><div class="sub">${t("ct.sub")}</div><h1>${t("ct.title")}</h1><div class="cert-code">${code}</div><div class="muted">${esc(/no certificate/.test(e.message) ? t("ct.none") : e.message)}</div></div>${seal(code, "", false)}</div></div>
+      <div style="margin-top:12px"><a href="/verify">← ${t("cv.back")}</a></div>`;
+    return;
+  }
+  const c = L.cert, d = c.deal;
+  const until = Number(c.issuedAt) + (Number(d.endEpoch) - Number(d.startEpoch)) * Number(d.epochSeconds);
+  const keep = d.closed || Number(d.epoch) >= Number(d.endEpoch) ? t("ct.keep.over") : t("ct.keep.v", { n: d.replicas, until: dayOf(until) });
+  const state = L.ok
+    ? `<span class="cert-state" style="color:var(--ok)">✓ ${t("ct.ok")}</span> <span class="hint">${t("ct.ok.d")}</span>`
+    : `<span class="cert-state" style="color:var(--bad)">✗ ${t("ct.bad")}</span> <span class="hint">${t("ct.bad.d")}</span>`;
+  const files = L.files.map((f, i) => `<div class="row"><span class="badge">${i + 1}</span><span class="n mono">${bytesFmt(f.size)} · sha-256 ${short(f.sha256, 10, 8)}</span>${c.public ? `<button class="btn" data-dl="${i}">${t("ct.dl.btn")}</button>` : ""}</div>`).join("");
+  $app.innerHTML = `
+    <div class="card cert">
+      <div class="cert-top">
+        <div style="min-width:0"><div class="sub">${t("ct.sub")}</div><h1>${t("ct.title")}</h1><div class="cert-code">${code}${copyBtn(code)}</div><div>${state}</div></div>
+        ${seal(code, new Date(Number(c.issuedAt) * 1000).toISOString().slice(0, 10), L.ok)}
+      </div>
+      <div style="margin-top:16px;position:relative">${kv([
+        [t("ct.issued"), esc(new Date(Number(c.issuedAt) * 1000).toLocaleString(lang === "zh" ? "zh-TW" : "en-US"))],
+        [t("ct.block"), `${bLink(c.block)} <span class="mono muted">${esc(short(L.blockHash || "", 10, 8))}</span>`],
+        [t("ct.issuer"), aLink(c.issuer, c.issuer)],
+        [t("ct.files"), String(c.files)],
+        [t("ct.public"), c.public ? t("ct.public.y") : t("ct.public.n")],
+        [t("ct.keep"), esc(keep)],
+        [t("ct.root"), `<span class="mono">${esc(c.root)}</span>`],
+      ])}</div>
+    </div>
+    <div class="card no-print" style="margin-top:12px"><div class="card-h"><h2>${t("ct.verify")}</h2></div><div class="cv-body">
+      <label class="bigdrop" id="vdrop"><input type="file" id="vfiles" multiple>${t("cv.drop")} <b>${t("cv.pick")}</b><div class="hint" style="margin-top:6px">${t("ct.verify.h")}</div></label>
+      <div class="match" id="vmatch"></div>
+    </div></div>
+    <div class="card" style="margin-top:12px"><div class="card-h"><h2>${c.public ? t("ct.dl") : t("ct.files")}</h2></div><div class="cv-body"><div class="match">${files}</div></div></div>
+    <div class="actions no-print" style="padding:12px 0"><button class="btn" id="ccopy">${t("ct.copy")}</button><button class="btn" id="cprint">${t("ct.print")}</button></div>
+    <div class="card print-only" style="margin-top:12px;padding:12px 16px;font-size:12px">${esc(location.origin)}/cert/${code}</div>`;
+  const inp = document.getElementById("vfiles"), drop = document.getElementById("vdrop");
+  const matched = new Set();
+  const check = async (list) => {
+    const out = document.getElementById("vmatch");
+    for (const file of list) {
+      const row = document.createElement("div");
+      row.className = "row";
+      row.innerHTML = `<span class="n">${esc(file.name)}</span><span class="muted">${t("v.hashing")}</span>`;
+      out.appendChild(row);
+      const h = await V.hashFile(file, null, "/verify.js");
+      const i = L.ok ? V.matchFile(L.files, h) : -1;
+      if (i >= 0) matched.add(i);
+      row.innerHTML = `<span class="badge ${i >= 0 ? "ok" : "bad"}">${i >= 0 ? "✓" : "✗"}</span><span class="n">${esc(file.name)}</span><span>${i >= 0 ? t("ct.m.yes", { i: i + 1 }) : t("ct.m.no")}</span>`;
+    }
+    let all = document.getElementById("vall");
+    if (matched.size === L.files.length) {
+      if (!all) { all = document.createElement("div"); all.id = "vall"; all.className = "row"; out.prepend(all); }
+      all.innerHTML = `<span class="badge ok">✓</span><b>${t("ct.m.all", { n: L.files.length })}</b>`;
+    }
+  };
+  inp.onchange = () => check([...inp.files]);
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add("over"); };
+  drop.ondragleave = () => drop.classList.remove("over");
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove("over"); check([...e.dataTransfer.files]); };
+  document.getElementById("ccopy").onclick = (e) => { const b = e.target; const done = () => { b.textContent = "✓"; setTimeout(() => (b.textContent = t("ct.copy")), 1200); }; try { navigator.clipboard.writeText(location.href).then(done, done); } catch (_) { done(); } };
+  document.getElementById("cprint").onclick = () => window.print();
+  document.querySelectorAll("[data-dl]").forEach((b) => (b.onclick = async () => {
+    const i = Number(b.dataset.dl);
+    b.disabled = true;
+    try {
+      const blob = await V.downloadFile(L, i, async (cid) => new Uint8Array(await (await fetch(`/ipfs/${cid}?format=raw`)).arrayBuffer()), (p) => (b.textContent = t("ct.dl.ing", { p: Math.round(p * 100) })));
+      const head = new Uint8Array(await blob.slice(0, 8).arrayBuffer());
+      const ext = sniffExt(head);
+      const u = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = u; a.download = `${code}-${i + 1}${ext}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(u), 2000);
+      b.textContent = t("ct.dl.btn");
+    } catch (e) { b.textContent = "✗ " + e.message; }
+    finally { b.disabled = false; }
+  }));
+}
+/// A file extension from the first bytes (names are never recorded).
+function sniffExt(h) {
+  const x = Array.from(h, (b) => b.toString(16).padStart(2, "0")).join("");
+  if (x.startsWith("25504446")) return ".pdf";
+  if (x.startsWith("89504e47")) return ".png";
+  if (x.startsWith("ffd8ff")) return ".jpg";
+  if (x.startsWith("47494638")) return ".gif";
+  if (x.startsWith("504b0304")) return ".zip";
+  if (x.startsWith("7b") || x.startsWith("5b")) return ".json";
+  return ".bin";
+}
+
 // ---------- routing & search ----------
 async function doSearch(input) {
   const q = input.value.trim();
   if (!q) return;
+  if (q.replace(/[\s-]/g, "").length === 16 && V.decodeCode(q)) { input.value = ""; nav(`/cert/${V.formatCode(V.encodeCode(V.decodeCode(q)))}`); return; }
   try {
     const r = await api("search?q=" + encodeURIComponent(q));
     if (r.kind === "cid") location.href = `/ipfs/${r.id}?format=raw`;
@@ -979,7 +1368,7 @@ function mesh(w, h, n, seed) {
 }
 const MESH = mesh(1100, 300, 120, 7);
 // Clean URLs (/block/12, /tx/0x…): the server answers every page path with this file.
-const PAGES = new Set(["blocks", "block", "tx", "address", "validators", "validator", "epoch", "verify"]);
+const PAGES = new Set(["blocks", "block", "tx", "address", "validators", "validator", "epoch", "verify", "cert"]);
 function nav(url) {
   history.pushState(null, "", url);
   route();
@@ -988,7 +1377,7 @@ async function route() {
   clearInterval(timer);
   const [page, arg] = location.pathname.replace(/^\/+/, "").split("/").map(decodeURIComponent);
   const q = new URLSearchParams(location.search);
-  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("on", a.dataset.nav === (PAGES.has(page) ? page : "home")));
+  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("on", a.dataset.nav === (page === "cert" ? "verify" : PAGES.has(page) ? page : "home")));
   document.body.classList.toggle("home", !PAGES.has(page));
   loading();
   try {
@@ -999,7 +1388,8 @@ async function route() {
     else if (page === "validators") await pageValidators();
     else if (page === "validator") await pageValidator(arg);
     else if (page === "epoch") await pageEpoch(arg);
-    else if (page === "verify") pageVerify();
+    else if (page === "verify") q.get("mode") === "proof" ? pageVerify() : await pageRecords();
+    else if (page === "cert") await pageCert(arg);
     else await pageHome();
     window.scrollTo(0, 0);
   } catch (e) { fail(e); }

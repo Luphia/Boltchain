@@ -106,6 +106,16 @@ pub enum WalletCmd {
         #[arg(long, default_value = "http://127.0.0.1:8545")]
         rpc: String,
     },
+    /// Deploy the evidence certificates contract (ADR 0016) from this account and print its
+    /// address; then run the explorer node with `--certificates <address>`.
+    DeployCertificates {
+        /// Account key file (pays the gas).
+        #[arg(long)]
+        wallet: PathBuf,
+        /// JSON-RPC endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:8545")]
+        rpc: String,
+    },
     /// Register this account as a storage provider without stake (ADR 0012), serving history
     /// from the node key's peer id. Needs a little BOLT for gas; with `--signed` it only prints a
     /// signed registration that anyone can submit for you (`wallet send --to <to> --data <data>`).
@@ -232,6 +242,24 @@ pub fn send_tx(
     value: U256,
     data: Bytes,
 ) -> Result<B256> {
+    send_kind(rpc_url, signer, TxKind::Call(to), value, data)
+}
+
+/// Deploys `initcode`; returns the new contract's address.
+pub fn deploy(rpc_url: &str, signer: &PrivateKeySigner, initcode: Bytes) -> Result<Address> {
+    let hash = send_kind(rpc_url, signer, TxKind::Create, U256::ZERO, initcode)?;
+    let r = rpc(rpc_url, "eth_getTransactionReceipt", json!([hash]))?;
+    serde_json::from_value(r["contractAddress"].clone())
+        .context("no contract address in the receipt")
+}
+
+fn send_kind(
+    rpc_url: &str,
+    signer: &PrivateKeySigner,
+    to: TxKind,
+    value: U256,
+    data: Bytes,
+) -> Result<B256> {
     let from = signer.address();
     let chain_id = quantity(&rpc(rpc_url, "eth_chainId", json!([]))?)?.to::<u64>();
     let nonce =
@@ -240,7 +268,10 @@ pub fn send_tx(
     let tip = quantity(&rpc(rpc_url, "eth_maxPriorityFeePerGas", json!([]))?)
         .map(|t| t.to::<u128>())
         .unwrap_or(1_000_000);
-    let call = json!({"from": from, "to": to, "value": format!("0x{value:x}"), "data": data});
+    let mut call = json!({"from": from, "value": format!("0x{value:x}"), "data": data});
+    if let TxKind::Call(a) = to {
+        call["to"] = json!(a);
+    }
     let gas = quantity(&rpc(rpc_url, "eth_estimateGas", json!([call, "latest"]))?)?.to::<u64>();
     let mut tx = TxEip1559 {
         chain_id,
@@ -248,7 +279,7 @@ pub fn send_tx(
         gas_limit: gas + gas / 5,
         max_fee_per_gas: gas_price * 2 + tip,
         max_priority_fee_per_gas: tip,
-        to: TxKind::Call(to),
+        to,
         value,
         input: data,
         ..Default::default()
@@ -347,6 +378,12 @@ pub fn run(cmd: WalletCmd) -> Result<()> {
             let data: Bytes = tx["data"].as_str().context("data")?.parse()?;
             send_tx(&url, &s, bolt_system::addresses::SWARM, U256::ZERO, data)?;
             println!("validator {id} serves history from {peer}");
+        }
+        WalletCmd::DeployCertificates { wallet, rpc: url } => {
+            let s = load_wallet(&wallet)?;
+            let code = bolt_system::artifacts::certificates().bytecode.clone();
+            let a = deploy(&url, &s, code)?;
+            println!("Certificates deployed at {a}");
         }
         WalletCmd::StorageRegister { wallet, node_key, signed, rpc: url } => {
             use bolt_system::abi::ISwarmStorage;

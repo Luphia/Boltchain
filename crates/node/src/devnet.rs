@@ -33,6 +33,12 @@ pub struct DevnetArgs {
     /// Serve the block explorer (and the IPFS gateway) on this address, e.g. `127.0.0.1:8080`.
     #[arg(long, value_name = "ADDR")]
     pub explorer: Option<SocketAddr>,
+    /// `Certificates` contract for the explorer's evidence certificates (ADR 0016).
+    #[arg(long, value_name = "ADDRESS")]
+    pub certificates: Option<Address>,
+    /// CAFECA wallet the certificate page pays with.
+    #[arg(long, default_value = "https://cafeca.io")]
+    pub cafeca_wallet: String,
     /// Disable P2P (no announcements, no followers).
     #[arg(long)]
     pub no_p2p: bool,
@@ -74,8 +80,20 @@ pub async fn run(args: DevnetArgs) -> Result<()> {
     tracing::info!(%addr, chain_id = cfg.chain_id, genesis = %chain.genesis_hash(), "JSON-RPC listening");
 
     if let Some(addr) = args.explorer {
+        let certs = args.certificates.map(|a| {
+            Arc::new(crate::certificates::Certs::new(
+                a,
+                args.cafeca_wallet.clone(),
+                None,
+                Some(args.datadir.join("cert-uploads.json")),
+            ))
+        });
         crate::explorer::spawn_address_index(chain.clone())?;
-        let ex = crate::explorer::Explorer { chain: chain.clone(), pool: Some(pool.clone()) };
+        let ex = crate::explorer::Explorer {
+            chain: chain.clone(),
+            pool: Some(pool.clone()),
+            certs: certs.clone(),
+        };
         crate::explorer::start(addr, ex).await?;
     }
 

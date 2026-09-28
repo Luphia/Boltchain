@@ -20,6 +20,7 @@ const WANT = [
   'src/RewardDistributor.sol:RewardDistributor',
   'src/SwarmStorage.sol:SwarmStorage',
   'src/ComputeMarket.sol:ComputeMarket',
+  'src/Certificates.sol:Certificates',
 ];
 
 const sources = {};
