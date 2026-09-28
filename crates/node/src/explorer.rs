@@ -21,6 +21,8 @@ use std::{collections::HashMap, sync::Arc};
 
 /// The web interface (one self-contained file).
 const INDEX_HTML: &str = include_str!("explorer/index.html");
+/// Evidence verification library (issue #1), used by the page and as its hashing Worker.
+const VERIFY_JS: &str = include_str!("explorer/verify.js");
 
 /// Largest page size.
 const MAX_LIMIT: usize = 50;
@@ -145,6 +147,9 @@ impl Explorer {
         if path == "/" || path == "/index.html" || path == "/explorer" || is_page(path) {
             return Some((200, "text/html; charset=utf-8", INDEX_HTML.as_bytes().to_vec()));
         }
+        if path == "/verify.js" {
+            return Some((200, "text/javascript; charset=utf-8", VERIFY_JS.as_bytes().to_vec()));
+        }
         let api = path.strip_prefix("/api/")?;
         let r = match self.chain.store().reader() {
             Ok(r) => r,
@@ -162,6 +167,9 @@ impl Explorer {
             ["validator", id] => self.validator(&r, id),
             ["epoch", n] => self.epoch(&r, n),
             ["search"] => self.search(&r, query_param(query, "q").unwrap_or("")),
+            ["raw", "block", id] => self.raw_block(&r, id),
+            ["proof", a] => self.proof(&r, a, query),
+            ["call"] => self.call(&r, query),
             _ => Err(not_found("unknown API path")),
         };
         Some(match res {
@@ -249,6 +257,7 @@ impl Explorer {
         let epoch = rules.epoch_of(next);
         Ok(json!({
             "chainId": cfg.chain_id,
+            "version": concat!("boltchain/v", env!("CARGO_PKG_VERSION")),
             "genesis": self.chain.genesis_hash(),
             "head": self.block_summary(r, &head),
             "finalized": if stage == "pos" { head.number } else { finalized },
@@ -315,6 +324,87 @@ impl Explorer {
             n -= 1;
         }
         Ok(json!({ "txs": out }))
+    }
+
+    /// A block as raw consensus bytes, for verifying in the browser without trusting this node:
+    /// the header RLP (its keccak is the block hash), and every transaction and receipt in
+    /// EIP-2718 encoding (their tries give `transactionsRoot` and `receiptsRoot`).
+    fn raw_block(&self, r: &Tx<'_, RO>, id: &str) -> ApiResult {
+        use alloy_eips::eip2718::Encodable2718;
+        let n = self.resolve_block(r, id)?;
+        let h = r.header(n).map_err(internal)?.ok_or_else(|| not_found("block not found"))?;
+        let body = r.block(n).map_err(internal)?.ok_or_else(|| not_found("block body pruned"))?;
+        let receipts =
+            r.receipts(n).map_err(internal)?.ok_or_else(|| not_found("receipts pruned"))?;
+        let txs: Vec<Bytes> = body.transactions.iter().map(|t| t.encoded_2718().into()).collect();
+        let rcs: Vec<Bytes> = receipts.iter().map(|x| x.encoded_2718().into()).collect();
+        Ok(json!({
+            "number": n,
+            "hash": h.hash_slow(),
+            "final": self.is_final(n),
+            "header": Bytes::from(alloy_rlp::encode(&h)),
+            "transactions": txs,
+            "receipts": rcs,
+        }))
+    }
+
+    /// Latest head as raw header bytes (for state proofs and calls made against it).
+    fn head_raw(&self, r: &Tx<'_, RO>) -> Result<(Header, Value), (u16, String)> {
+        let h = self.head(r)?;
+        let v = json!({
+            "number": h.number,
+            "hash": h.hash_slow(),
+            "final": self.is_final(h.number),
+            "timestamp": h.timestamp,
+            "header": Bytes::from(alloy_rlp::encode(&h)),
+        });
+        Ok((h, v))
+    }
+
+    /// EIP-1186 proof of an account and storage slots (`?slots=0x..,0x..`) in the latest state,
+    /// with the head header they verify against. Only the latest state has proofs.
+    fn proof(&self, r: &Tx<'_, RO>, a: &str, query: &str) -> ApiResult {
+        let addr: Address = a.parse().map_err(|_| (400, "bad address".to_string()))?;
+        let mut keys = Vec::new();
+        for s in query_param(query, "slots").unwrap_or("").split(',').filter(|s| !s.is_empty()) {
+            let k: B256 = s.parse().map_err(|_| (400, format!("bad slot {s}")))?;
+            keys.push(k.into());
+        }
+        if keys.len() > 16 {
+            return Err((400, "at most 16 slots".into()));
+        }
+        let (_, block) = self.head_raw(r)?;
+        let proof = bolt_rpc::get_proof(r, addr, keys).map_err(internal)?;
+        Ok(json!({ "block": block, "proof": proof }))
+    }
+
+    /// Read-only call (`?to=0x..&data=0x..`) against the latest state; returns the output and the
+    /// block it ran on. The output is only as trustworthy as this node.
+    fn call(&self, r: &Tx<'_, RO>, query: &str) -> ApiResult {
+        let to: Address = query_param(query, "to")
+            .and_then(|v| v.parse().ok())
+            .ok_or_else(|| (400, "to: expected an address".to_string()))?;
+        let data: Bytes = query_param(query, "data")
+            .unwrap_or("0x")
+            .parse()
+            .map_err(|_| (400, "data: expected hex".to_string()))?;
+        let (h, block) = self.head_raw(r)?;
+        let cfg = self.chain.config();
+        let input = bolt_exec::BlockInput {
+            chain_id: cfg.chain_id,
+            number: h.number + 1,
+            timestamp: h.timestamp + cfg.slot_seconds,
+            beneficiary: h.beneficiary,
+            gas_limit: cfg.gas_limit,
+            base_fee: 0,
+            prevrandao: h.mix_hash,
+        };
+        let db = revm::database::WrapDatabaseRef(StateView::latest(r));
+        match bolt_exec::view_call(db, &input, to, data) {
+            Ok(out) => Ok(json!({ "block": block, "output": out })),
+            Err(bolt_exec::ViewError::Reverted) => Err((400, "execution reverted".into())),
+            Err(e) => Err(internal(format!("{e:?}"))),
+        }
     }
 
     fn resolve_block(&self, r: &Tx<'_, RO>, id: &str) -> Result<u64, (u16, String)> {
@@ -869,7 +959,7 @@ fn is_page(path: &str) -> bool {
     let (page, arg, rest) = (parts.next().unwrap_or(""), parts.next(), parts.next());
     rest.is_none()
         && match page {
-            "blocks" | "validators" => arg.is_none_or(str::is_empty),
+            "blocks" | "validators" | "verify" => arg.is_none_or(str::is_empty),
             "block" | "tx" | "address" | "validator" | "epoch" => {
                 arg.is_some_and(|a| !a.is_empty())
             }
@@ -966,12 +1056,48 @@ mod tests {
         assert_eq!(v["kind"], "block");
         let (_, v) = get(&ex, &format!("/api/search?q={}", STAKING));
         assert_eq!(v["kind"], "address");
+        // Raw block: the header RLP hashes to the block hash; receipts give receiptsRoot.
+        let (s, v) = get(&ex, "/api/raw/block/0");
+        assert_eq!(s, 200);
+        let hdr: Bytes = serde_json::from_value(v["header"].clone()).unwrap();
+        assert_eq!(json!(alloy_primitives::keccak256(&hdr)), v["hash"]);
+        // State proof of a system contract verifies against the head's stateRoot.
+        let (s, v) = get(&ex, &format!("/api/proof/{STAKING}?slots=0x{}", "00".repeat(32)));
+        assert_eq!(s, 200, "{v}");
+        let hdr: Bytes = serde_json::from_value(v["block"]["header"].clone()).unwrap();
+        let head = <Header as alloy_rlp::Decodable>::decode(&mut hdr.as_ref()).unwrap();
+        let p: alloy_rpc_types_eth::EIP1186AccountProofResponse =
+            serde_json::from_value(v["proof"].clone()).unwrap();
+        let acct = alloy_trie::TrieAccount {
+            nonce: p.nonce,
+            balance: p.balance,
+            storage_root: p.storage_hash,
+            code_hash: p.code_hash,
+        };
+        alloy_trie::proof::verify_proof(
+            head.state_root,
+            alloy_trie::Nibbles::unpack(alloy_primitives::keccak256(STAKING)),
+            Some(alloy_rlp::encode(acct)),
+            &p.account_proof,
+        )
+        .unwrap();
+        assert_eq!(get(&ex, "/api/proof/0x01?slots=zz").0, 400);
+        // Read-only call: StakingManager.count() is the 7 genesis validators.
+        let data = Bytes::from(IStakingManager::countCall {}.abi_encode());
+        let (s, v) = get(&ex, &format!("/api/call?to={STAKING}&data={data}"));
+        assert_eq!(s, 200, "{v}");
+        let out: Bytes = serde_json::from_value(v["output"].clone()).unwrap();
+        assert_eq!(U256::from_be_slice(&out), U256::from(7));
+        assert_eq!(get(&ex, "/api/call?to=0x01").0, 400);
         assert_eq!(get(&ex, "/api/tx/0x00").0, 400);
         assert_eq!(get(&ex, "/api/nope").0, 404);
         let (s, ct, body) = ex.respond("GET / HTTP/1.1\r\n\r\n").unwrap();
         assert_eq!((s, ct), (200, "text/html; charset=utf-8"));
         assert!(String::from_utf8(body).unwrap().contains("Boltchain"));
         assert!(ex.respond("GET /ipfs/x HTTP/1.1\r\n\r\n").is_none(), "left to the gateway");
+        let (s, ct, body) = ex.respond("GET /verify.js HTTP/1.1\r\n\r\n").unwrap();
+        assert_eq!((s, ct), (200, "text/javascript; charset=utf-8"));
+        assert!(String::from_utf8(body).unwrap().contains("verifyEvidence"));
         for page in [
             "/blocks",
             "/blocks?before=26",
@@ -981,6 +1107,7 @@ mod tests {
             "/validators",
             "/validator/3",
             "/epoch/4",
+            "/verify",
         ] {
             let (s, ct, _) = ex.respond(&format!("GET {page} HTTP/1.1\r\n\r\n")).unwrap();
             assert_eq!((s, ct), (200, "text/html; charset=utf-8"), "{page}");

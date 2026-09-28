@@ -30,6 +30,9 @@ pub struct DevnetArgs {
     /// Seconds between blocks (defaults to the genesis slot length).
     #[arg(long)]
     pub block_time: Option<u64>,
+    /// Serve the block explorer (and the IPFS gateway) on this address, e.g. `127.0.0.1:8080`.
+    #[arg(long, value_name = "ADDR")]
+    pub explorer: Option<SocketAddr>,
     /// Disable P2P (no announcements, no followers).
     #[arg(long)]
     pub no_p2p: bool,
@@ -69,6 +72,12 @@ pub async fn run(args: DevnetArgs) -> Result<()> {
     };
     let (addr, handle) = bolt_rpc::start(args.rpc, ctx).await?;
     tracing::info!(%addr, chain_id = cfg.chain_id, genesis = %chain.genesis_hash(), "JSON-RPC listening");
+
+    if let Some(addr) = args.explorer {
+        crate::explorer::spawn_address_index(chain.clone())?;
+        let ex = crate::explorer::Explorer { chain: chain.clone(), pool: Some(pool.clone()) };
+        crate::explorer::start(addr, ex).await?;
+    }
 
     let net = if args.no_p2p {
         None

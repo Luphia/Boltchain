@@ -473,6 +473,43 @@ fn decode_node(rlp: &[u8]) -> Option<Node> {
     }
 }
 
+/// Merkle proof of `key` (EIP-1186 style): the RLP of every node on the path from the root,
+/// root first, leaving out nodes shorter than 32 bytes (those are embedded in their parent).
+/// Proves presence when the path ends at the key's leaf, absence otherwise. Empty for an empty
+/// trie.
+pub fn proof<S: NodeSource>(source: &S, key: &B256) -> Result<Vec<Vec<u8>>, TrieError<S::Error>> {
+    let full = to_nibbles(key);
+    let mut rest: &[u8] = &full;
+    let mut path: Path = Vec::with_capacity(64);
+    let mut out = Vec::new();
+    loop {
+        let Some(rlp) = source.node(&path).map_err(TrieError::Source)? else { break };
+        let node = decode_node(&rlp).ok_or_else(|| TrieError::Corrupt(path.clone()))?;
+        if path.is_empty() || rlp.len() >= 32 {
+            out.push(rlp);
+        }
+        match node {
+            Node::Leaf { .. } => break,
+            Node::Ext { key, .. } => {
+                if !rest.starts_with(&key) {
+                    break;
+                }
+                path.extend_from_slice(&key);
+                rest = &rest[key.len()..];
+            }
+            Node::Branch { children } => {
+                let Some(&nib) = rest.first() else { break };
+                if children[nib as usize].is_none() {
+                    break;
+                }
+                path.push(nib);
+                rest = &rest[1..];
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// In-memory node store, used in tests and as a reference.
 #[derive(Debug, Default, Clone)]
 pub struct MemNodes(pub BTreeMap<Path, Vec<u8>>);
@@ -534,6 +571,38 @@ mod tests {
         assert_eq!(apply(&mut nodes, &upd), reference(&m));
         assert_eq!(apply(&mut nodes, &[(upd[0].0, U256::ZERO)]), EMPTY_ROOT_HASH);
         assert!(nodes.0.is_empty(), "all nodes deleted: {:?}", nodes.0.keys());
+    }
+
+    #[test]
+    fn proofs_verify_against_alloy() {
+        use alloy_trie::{Nibbles, proof::verify_proof};
+        let mut nodes = MemNodes::default();
+        // Empty trie: an empty proof proves absence.
+        assert!(proof(&nodes, &keccak256(B256::ZERO)).unwrap().is_empty());
+        // Mix of short values (inline nodes) and long ones, many shared prefixes.
+        let updates: Vec<(B256, U256)> = (0u64..300)
+            .map(|i| {
+                (
+                    B256::from(U256::from(i)),
+                    if i % 3 == 0 { U256::from(i % 7 + 1) } else { U256::from(i) << 200 },
+                )
+            })
+            .collect();
+        let root = apply(&mut nodes, &updates);
+        for i in 0u64..400 {
+            let key = keccak256(B256::from(U256::from(i)));
+            let p: Vec<alloy_primitives::Bytes> =
+                proof(&nodes, &key).unwrap().into_iter().map(Into::into).collect();
+            let expected = updates
+                .iter()
+                .find(|(s, _)| keccak256(s) == key)
+                .map(|(_, v)| alloy_rlp::encode(v));
+            verify_proof(root, Nibbles::unpack(key), expected.clone(), &p)
+                .unwrap_or_else(|e| panic!("slot {i}: {e:?}"));
+            // A wrong value must not verify.
+            let wrong = Some(alloy_rlp::encode(U256::from(123_456_789u64)));
+            assert!(verify_proof(root, Nibbles::unpack(key), wrong, &p).is_err(), "slot {i}");
+        }
     }
 
     #[test]

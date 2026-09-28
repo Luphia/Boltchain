@@ -27,6 +27,7 @@
 | Bootnode（TCP） | `/ip4/211.22.118.149/tcp/8017/p2p/12D3KooWCFZiVi5pkzNA83AZqaUevCbi5fYULiEGtmz8FSvMuhDo` |
 | JSON-RPC | `http://211.22.118.149:8545` |
 | 區塊鏈瀏覽器 | `http://211.22.118.149:8080/`（繁體中文與英文） |
+| 存證驗證 | `http://211.22.118.149:8080/verify`（上傳檔案或證明檔比對鏈上證據，格式見 `docs/evidence-proof-format.md`） |
 | IPFS 閘道 | `http://211.22.118.149:8080/ipfs/<cid>?format=car`、`http://211.22.118.149:8080/history/epoch/<n>.car` |
 
 MetaMask：新增網路。網路名稱填 `Boltchain Testnet`，RPC 填 `http://211.22.118.149:8545`，Chain ID 填 `8018`，貨幣符號填 `BOLT`。

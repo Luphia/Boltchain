@@ -262,6 +262,21 @@ impl<'e, K: TransactionKind> Tx<'e, K> {
             .transpose()
     }
 
+    /// Merkle proof of an account in the latest state trie (EIP-1186 `accountProof`).
+    pub fn account_proof(&self, addr: &Address) -> Result<Vec<Bytes>> {
+        crate::trie::proof(&AccountNodes(self), &hashed_address(addr))
+            .map(|p| p.into_iter().map(Bytes::from).collect())
+            .map_err(|e| StoreError::Trie(format!("{e:?}")))
+    }
+
+    /// Merkle proof of a storage slot in the account's latest storage trie (EIP-1186).
+    pub fn storage_proof(&self, addr: &Address, slot: &B256) -> Result<Vec<Bytes>> {
+        let nodes = StorageNodes { tx: self, hashed: hashed_address(addr) };
+        crate::trie::proof(&nodes, &keccak256(slot))
+            .map(|p| p.into_iter().map(Bytes::from).collect())
+            .map_err(|e| StoreError::Trie(format!("{e:?}")))
+    }
+
     /// Flat storage slot (zero if unset).
     pub fn storage(&self, addr: &Address, slot: &B256) -> Result<U256> {
         Ok(self

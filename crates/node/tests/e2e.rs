@@ -121,6 +121,34 @@ async fn wallet_flow_over_json_rpc() {
     assert_eq!(U256::from_be_slice(&out), value);
     assert_eq!(provider.get_storage_at(contract, U256::ZERO).await.unwrap(), value);
 
+    // eth_getProof: account and slot 0 verify against the head block's stateRoot.
+    let proof = provider.get_proof(contract, vec![alloy_primitives::B256::ZERO]).await.unwrap();
+    let head =
+        provider.get_block_by_number(alloy_eips::BlockNumberOrTag::Latest).await.unwrap().unwrap();
+    let acct = alloy_trie::TrieAccount {
+        nonce: proof.nonce,
+        balance: proof.balance,
+        storage_root: proof.storage_hash,
+        code_hash: proof.code_hash,
+    };
+    alloy_trie::proof::verify_proof(
+        head.header.state_root,
+        alloy_trie::Nibbles::unpack(alloy_primitives::keccak256(contract)),
+        Some(alloy_rlp::encode(acct)),
+        &proof.account_proof,
+    )
+    .unwrap();
+    assert_eq!(proof.storage_proof[0].value, value);
+    alloy_trie::proof::verify_proof(
+        proof.storage_hash,
+        alloy_trie::Nibbles::unpack(alloy_primitives::keccak256(alloy_primitives::B256::ZERO)),
+        Some(alloy_rlp::encode(value)),
+        &proof.storage_proof[0].proof,
+    )
+    .unwrap();
+    // Only the latest state has proofs.
+    assert!(provider.get_proof(contract, vec![]).block_id(1.into()).await.is_err());
+
     // eth_getLogs finds the event.
     let logs = provider.get_logs(&Filter::new().address(contract).from_block(0)).await.unwrap();
     assert_eq!(logs.len(), 1);

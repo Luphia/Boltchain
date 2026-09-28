@@ -473,3 +473,51 @@ fn address_index_follows_blocks_backfills_and_unwinds() {
     assert_eq!(w.address_txs(&alice, None, 10).unwrap().len(), 1);
     assert!(w.address_txs(&carol, None, 10).unwrap().is_empty());
 }
+
+#[test]
+fn account_and_storage_proofs_verify_against_the_state_root() {
+    use alloy_trie::{Nibbles, proof::verify_proof};
+    let (_d, store) = open();
+    let mut alloc = BTreeMap::new();
+    for i in 1u8..40 {
+        let mut storage = BTreeMap::new();
+        for s in 0u8..(i % 5) {
+            storage.insert(
+                B256::with_last_byte(s),
+                U256::from(u64::from(i) * 1000 + u64::from(s) + 1),
+            );
+        }
+        let code = if i % 4 == 0 { Bytes::from(vec![0x60, i, 0x00]) } else { Bytes::new() };
+        alloc.insert(
+            Address::repeat_byte(i),
+            InitAccount { nonce: u64::from(i), balance: U256::from(i) << 70, code, storage },
+        );
+    }
+    let w = store.writer().unwrap();
+    let root = w.init_state(&alloc).unwrap();
+    w.commit().unwrap();
+    let r = store.reader().unwrap();
+    for (addr, init) in &alloc {
+        let acc = r.account(addr).unwrap().unwrap();
+        let p = r.account_proof(addr).unwrap();
+        let key = Nibbles::unpack(alloy_primitives::keccak256(addr));
+        verify_proof(root, key, Some(acc.trie_value()), &p).unwrap();
+        for s in 0u8..6 {
+            let slot = B256::with_last_byte(s);
+            let v = init.storage.get(&slot).copied().unwrap_or_default();
+            let sp = r.storage_proof(addr, &slot).unwrap();
+            let expected = (!v.is_zero()).then(|| alloy_rlp::encode(v));
+            verify_proof(
+                acc.storage_root,
+                Nibbles::unpack(alloy_primitives::keccak256(slot)),
+                expected,
+                &sp,
+            )
+            .unwrap_or_else(|e| panic!("{addr} slot {s}: {e:?}"));
+        }
+    }
+    // An account that does not exist: the proof shows absence.
+    let missing = Address::repeat_byte(0xee);
+    let p = r.account_proof(&missing).unwrap();
+    verify_proof(root, Nibbles::unpack(alloy_primitives::keccak256(missing)), None, &p).unwrap();
+}

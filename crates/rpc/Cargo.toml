@@ -17,6 +17,8 @@ alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-eth = { version = "2.5", features = ["serde"] }
+alloy-serde = "2.5"
+alloy-trie.workspace = true
 revm.workspace = true
 jsonrpsee.workspace = true
 serde.workspace = true

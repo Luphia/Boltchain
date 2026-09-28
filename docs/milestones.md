@@ -348,6 +348,20 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
 - [ ] 保存者刪除已結束委託的區塊
 - [ ] 依委託金額加權抽查、提供者拒收、同一委託的副本分散到不同機器
 
+## 存證與託管證據驗證（ADR 0015，issue #1）：已實作
+
+決定（2026-09-28）：瀏覽器新增 `/verify`，用戶上傳檔案或證明檔，在瀏覽器中比對鏈上證據，並可下載報告。第一版不處理歷史狀態：事件證據任何時間都能驗證，`eth_call` 錨點與託管餘額以最新狀態為準。
+
+- [x] `verify.js`：keccak-256 / sha-256（32 位元版本、Worker 分段，40 MiB 約 2.6 秒）、RLP、MPT 重建與 proof 驗證、ABI 編解碼（帶名稱的簽章與 tuple）、四種 Merkle 規則（對齊 CO2Exchange 的 `LedgerMerkle`、`MerkleSumTree`，以及 OpenZeppelin）
+- [x] 不相信節點：區塊標頭 → 區塊雜湊，交易與 receipt trie → 標頭 root，託管餘額以 storage proof 對 `stateRoot` 證明
+- [x] API：`/api/raw/block/<n>`、`/api/proof/<address>`、`/api/call`；RPC `eth_getProof`（只支援最新狀態）；`boltchain devnet --explorer`
+- [x] 報告：JSON（附原始資料，可對任一節點重做）與可列印版（另存 PDF）；繁中／英文；手機寬度
+- [x] 證明檔格式：`docs/evidence-proof-format.md`
+- [x] 測試：參考向量 357 項（viem、@ethereumjs/trie、OpenZeppelin、CO2Exchange 的樹）、state proof 對 alloy-trie、端到端（本機鏈部署 CO2Exchange `Ledger`，Chromium 操作頁面）
+- [ ] 巢狀證明（先證明小樹的 root 在葉子裡）
+- [ ] 完整狀態歷史與歷史 `eth_getProof`（有需求再做）
+- [ ] 公開瀏覽器走 HTTPS（反向代理）
+
 ## TEE Agent 租用（ADR 0013）：已採納，未實作
 
 決定（2026-09-26）：必須支援 DGX Spark、Intel AI PC、AMD AI PC（沒有機密 VM，新增 T2「量測開機裝置」等級，靠 TPM 與驗證小組）；接受驗證小組背書；公開機器 ID；檢查點每小時上鏈；LLM 呼叫外部 API；映像開放登記；同版本雙簽罰沒全部押金。

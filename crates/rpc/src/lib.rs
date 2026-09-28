@@ -241,6 +241,22 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         Ok(B256::from(v))
     });
 
+    method!("eth_getProof", |p,
+                             c|
+     -> RpcResult<alloy_rpc_types_eth::EIP1186AccountProofResponse> {
+        let mut seq = p.sequence();
+        let (addr, keys): (Address, Vec<alloy_serde::storage::JsonStorageKey>) =
+            (seq.next()?, seq.next()?);
+        let id: Option<BlockId> = seq.optional_next()?;
+        let r = c.chain.store().reader().map_err(internal)?;
+        if let Some(n) = c.resolve(&r, id)? {
+            return Err(err(
+                -32000,
+                format!("eth_getProof serves the latest state only (block {n} is not the head)"),
+            ));
+        }
+        get_proof(&r, addr, keys).map_err(internal)
+    });
     method!("eth_call", |p, c| -> RpcResult<Bytes> {
         let (req, id): (TransactionRequest, Option<BlockId>) = with_block(&p)?;
         call::eth_call(c, req, id)
@@ -366,6 +382,38 @@ pub fn module(ctx: RpcContext) -> RpcModule<RpcContext> {
         Ok(fh)
     });
     m
+}
+
+/// EIP-1186 proof of `addr` and its `keys` in the latest state of `r` (the head block's
+/// `stateRoot`). Proofs of older states are not available: the tries keep only the latest nodes.
+pub fn get_proof(
+    r: &Tx<'_, RO>,
+    addr: Address,
+    keys: Vec<alloy_serde::storage::JsonStorageKey>,
+) -> bolt_store::Result<alloy_rpc_types_eth::EIP1186AccountProofResponse> {
+    let acc = r.account(&addr)?;
+    let account_proof = r.account_proof(&addr)?;
+    let mut storage_proof = Vec::with_capacity(keys.len());
+    for key in keys {
+        let slot = key.as_b256();
+        let (value, proof) = match &acc {
+            Some(a) if a.storage_root != alloy_trie::EMPTY_ROOT_HASH => {
+                (r.storage(&addr, &slot)?, r.storage_proof(&addr, &slot)?)
+            }
+            _ => (U256::ZERO, vec![]),
+        };
+        storage_proof.push(alloy_rpc_types_eth::EIP1186StorageProof { key, value, proof });
+    }
+    let acc = acc.unwrap_or_default();
+    Ok(alloy_rpc_types_eth::EIP1186AccountProofResponse {
+        address: addr,
+        balance: acc.balance,
+        code_hash: acc.code_hash,
+        nonce: acc.nonce,
+        storage_hash: acc.storage_root,
+        account_proof,
+        storage_proof,
+    })
 }
 
 /// Starts the HTTP JSON-RPC server (with permissive CORS for browser wallets).

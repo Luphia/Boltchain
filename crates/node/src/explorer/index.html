@@ -125,6 +125,37 @@ footer.wrap { color: var(--muted); font-size: 12px; padding: 20px 16px 32px; bor
 .hero form { display: flex; }
 .hero input { flex: 1; min-width: 0; height: 46px; border: 1px solid #27405a; border-radius: 12px 0 0 12px; background: rgba(11,15,23,.85); color: #e7edf5; padding: 0 14px; font-size: 15px; outline: none; }
 .hero button { height: 46px; border: 0; background: linear-gradient(135deg, #4d9bf0, #2f6fcf); color: #fff; padding: 0 22px; border-radius: 0 12px 12px 0; font-weight: 700; cursor: pointer; }
+.vform { padding: 16px; display: grid; gap: 14px; }
+.vform label.f { display: grid; gap: 4px; font-size: 13px; }
+.vform label.f > span { color: var(--muted); }
+.vform input[type=text], .vform textarea, .vform select { width: 100%; border: 1px solid var(--line); background: var(--panel2); color: var(--text); border-radius: 8px; padding: 8px 10px; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.vform textarea { min-height: 64px; resize: vertical; }
+.drop { border: 1.5px dashed var(--line); border-radius: 10px; padding: 14px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.drop input[type=file] { display: none; }
+.drop .nm { min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+.hint { font-size: 12px; color: var(--muted); }
+.radios { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+.cols2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 700px) { .cols2 { grid-template-columns: 1fr; } }
+.verdict { display: flex; gap: 14px; align-items: center; padding: 18px 16px; border-bottom: 1px solid var(--line); }
+.verdict .big { font-size: 22px; font-weight: 700; }
+.verdict.ok .big { color: var(--ok); } .verdict.bad .big { color: var(--bad); } .verdict.warn .big { color: var(--warn); }
+.checks .row { align-items: flex-start; }
+.checks .ic.ok { color: var(--ok); background: var(--ok-soft); } .checks .ic.bad { color: var(--bad); background: var(--bad-soft); } .checks .ic.warn { color: var(--warn); background: var(--warn-soft); }
+.checks .main div { white-space: normal !important; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 16px; }
+.print-only { display: none; }
+#vres table.kv { table-layout: fixed; }
+#vres table.kv td { overflow-wrap: anywhere; word-break: break-word; }
+@media print {
+  :root, :root[data-theme="light"] { --bg: #fff; --panel: #fff; --panel2: #fff; --text: #000; --muted: #444; --line: #bbb; --code: #f2f2f2; --ok: #0a6b35; --bad: #b00020; --warn: #8a5a00; --ok-soft: #fff; --bad-soft: #fff; --warn-soft: #fff; --link: #000; }
+  header.top, footer.wrap, .no-print, .actions, .tabs { display: none !important; }
+  .print-only { display: block; }
+  main.wrap { padding: 0; max-width: none; }
+  .card { border: 1px solid #bbb; break-inside: avoid; }
+  body { font-size: 12px; }
+}
 </style>
 </head>
 <body>
@@ -135,6 +166,7 @@ footer.wrap { color: var(--muted); font-size: 12px; padding: 20px 16px 32px; bor
       <a href="/" data-nav="home" data-i18n="nav.home"></a>
       <a href="/blocks" data-nav="blocks" data-i18n="nav.blocks"></a>
       <a href="/validators" data-nav="validators" data-i18n="nav.validators"></a>
+      <a href="/verify" data-nav="verify" data-i18n="nav.verify"></a>
     </nav>
     <form class="search" id="search">
       <input id="q" autocomplete="off" spellcheck="false">
@@ -148,6 +180,7 @@ footer.wrap { color: var(--muted); font-size: 12px; padding: 20px 16px 32px; bor
 </header>
 <main class="wrap" id="app"></main>
 <footer class="wrap" id="foot"></footer>
+<script src="/verify.js"></script>
 <script>
 "use strict";
 // ---------- i18n ----------
@@ -198,6 +231,44 @@ const T = {
     "pruned": "本節點已清除此區塊內容，可透過 IPFS 向保存者取得。",
     "foot": "資料直接來自這個 Boltchain 節點。所有區塊都以 IPFS 內容定址，可自行驗證。",
     "sys": "系統合約", "pendingtx": "等待上鏈", "peers": "連線節點", "chain": "Chain ID",
+    "nav.verify": "存證驗證",
+    "v.title": "存證與託管證據驗證",
+    "v.intro": "上傳你手上的檔案或證明檔，比對它是否符合鏈上的證據。檔案只在你的瀏覽器裡計算雜湊，不會上傳到任何伺服器；鏈上資料會對區塊雜湊逐一核對，不必相信這個節點。",
+    "v.tab.proof": "證明檔", "v.tab.file": "檔案雜湊",
+    "v.proof": "證明檔（JSON）", "v.proof.h": "由應用方提供，描述鏈上錨點、雜湊規則與 Merkle 路徑。",
+    "v.file": "檔案", "v.file.h": "證明檔要求時才需要（例如證明的是某份文件的雜湊）。只計算雜湊，不上傳。",
+    "v.file.q": "要比對的檔案", "v.pick": "選擇檔案", "v.none": "尚未選擇",
+    "v.hashing": "計算雜湊中…", "v.hashes": "檔案雜湊",
+    "v.anchor": "鏈上證據在哪裡", "v.a.log": "交易的事件（event）", "v.a.call": "合約 view 函式（最新狀態）",
+    "v.tx": "交易雜湊", "v.find": "在這筆交易的事件中尋找檔案雜湊", "v.found": "找到 {n} 處符合", "v.found0": "這筆交易的 {logs} 個事件中都沒有這個檔案的雜湊。可以改填事件簽章與欄位，或確認檔案是否相同。",
+    "v.logindex": "Log index（區塊內）", "v.event": "事件簽章（選填）", "v.event.h": "例如 Committed(uint64 indexed epoch, bytes32 anchor)。不填時以 topics.N / data.N 指定 32 bytes 的欄位。",
+    "v.field": "欄位", "v.alg": "雜湊演算法",
+    "v.contract": "合約地址", "v.fn": "函式簽章（含 returns）", "v.args": "參數（JSON 陣列）",
+    "v.run": "驗證", "v.running": "驗證中…",
+    "v.match": "符合", "v.mismatch": "不符合", "v.error": "無法驗證",
+    "v.match.d": "上傳的內容與鏈上證據一致。", "v.mismatch.d": "上傳的內容與鏈上證據不一致，見下方未通過的檢查。", "v.error.d": "驗證沒有完成，見下方說明。",
+    "v.summary": "鏈上證據", "v.block": "區塊", "v.time": "時間", "v.tx2": "交易", "v.contract2": "合約", "v.codehash": "合約程式碼雜湊（最新狀態）",
+    "v.event2": "事件", "v.fn2": "函式", "v.field2": "欄位", "v.onchain": "鏈上的值", "v.mine": "重算的值", "v.scheme": "雜湊規則",
+    "v.leaf": "你的葉子", "v.sums": "總額",
+    "v.custody": "託管資產", "v.holder": "託管合約", "v.token": "資產", "v.held": "目前實際持有", "v.claimed": "root 宣稱的總額",
+    "v.custody.n": "「目前實際持有」是查詢當下的最新狀態，不是證據所在區塊的持有；節點只保留最近的狀態歷史。",
+    "v.checks": "檢查項目", "v.dl.json": "下載 JSON 報告", "v.print": "列印／另存 PDF",
+    "v.t.verified": "已對區塊雜湊驗證", "v.t.local": "本機計算", "v.t.node": "節點回報", "v.t.latest": "最新狀態", "v.t.error": "錯誤",
+    "v.nondec": "僅供參考，不影響結果",
+    "v.fmt": "證明檔格式", "v.fmt.d": "欄位說明與範例見 <a href=\"https://github.com/Luphia/Boltchain/blob/main/docs/evidence-proof-format.md\" target=\"_blank\" rel=\"noopener\">docs/evidence-proof-format.md</a>。",
+    "v.bad.json": "證明檔不是有效的 JSON",
+    "v.r.title": "Boltchain 存證驗證報告", "v.r.gen": "產出時間", "v.r.ver": "Explorer 版本", "v.r.hash": "報告雜湊", "v.r.result": "結果", "v.r.origin": "Explorer 位址",
+    "v.r.how": "驗證方式",
+    "v.r.how.d": "上傳的檔案只在瀏覽器中計算 keccak-256 與 sha-256，報告只包含雜湊。區塊標頭的 keccak-256 必須等於區塊雜湊；交易與 receipt 以 Merkle-Patricia trie 重算，必須等於標頭中的 transactionsRoot 與 receiptsRoot；事件依簽章解碼後取出欄位，再依證明檔宣告的雜湊規則重算 Merkle root 比對。託管餘額以 storage proof 對最新區塊的 stateRoot 驗證。",
+    "v.r.replay": "重做驗證",
+    "v.r.replay.d": "JSON 報告附有比對用到的原始資料（區塊標頭 RLP、交易與 receipt、log、eth_call 的參數與回傳、storage proof）。任何人都可以向任一 Boltchain 節點以 eth_getBlockByNumber、eth_getTransactionReceipt、eth_call、eth_getProof 取回相同資料重做；報告雜湊是去掉 reportHash 欄位、鍵排序後 JSON 的 keccak-256。",
+    "c.chain.id": "證明檔的鏈與這個節點相同", "c.block.header": "區塊標頭的雜湊等於區塊雜湊", "c.block.transactions": "交易重算出標頭的 transactionsRoot",
+    "c.tx.inBlock": "交易雜湊對應區塊中的這筆交易", "c.block.receipts": "Receipt 重算出標頭的 receiptsRoot", "c.tx.success": "交易執行成功",
+    "c.log.contract": "事件由指定的合約發出", "c.log.event": "事件簽章相符", "c.block.final": "區塊已最終確定",
+    "c.call.block.header": "查詢所在區塊的標頭相符", "c.call.output": "合約 view 函式的回傳", "c.file.hash": "檔案雜湊",
+    "c.match": "與鏈上證據比對", "c.sums": "總額", "c.custody.block.header": "餘額查詢所在區塊的標頭相符",
+    "c.custody.token.account": "資產合約帳戶對 stateRoot 證明", "c.custody.balance": "託管合約的資產餘額", "c.custody.solvent": "目前持有足以支付 root 宣稱的總額",
+    "c.error": "錯誤",
   },
   "en": {
     "hero.title": "Boltchain Explorer", "hero.tag": "A shared rental chain for AI compute and encrypted storage",
@@ -245,6 +316,44 @@ const T = {
     "pruned": "This node pruned the block body; it is available over IPFS from its keepers.",
     "foot": "Data comes straight from this Boltchain node. Every block is content-addressed on IPFS and can be verified independently.",
     "sys": "System contract", "pendingtx": "pending", "peers": "peers", "chain": "Chain ID",
+    "nav.verify": "Verify",
+    "v.title": "Evidence and custody verification",
+    "v.intro": "Upload the file or proof file you hold to check it against the evidence on chain. Files are hashed in your browser and never uploaded; chain data is checked against block hashes, so you do not have to trust this node.",
+    "v.tab.proof": "Proof file", "v.tab.file": "File hash",
+    "v.proof": "Proof file (JSON)", "v.proof.h": "Provided by the application: where the evidence is on chain, the hashing rules and the Merkle path.",
+    "v.file": "File", "v.file.h": "Needed only when the proof file asks for it (for example, it proves a document's hash). Only its hash is computed; nothing is uploaded.",
+    "v.file.q": "File to check", "v.pick": "Choose file", "v.none": "No file chosen",
+    "v.hashing": "Hashing…", "v.hashes": "File hashes",
+    "v.anchor": "Where the evidence is", "v.a.log": "An event of a transaction", "v.a.call": "A contract view function (latest state)",
+    "v.tx": "Transaction hash", "v.find": "Look for the file's hash in this transaction's events", "v.found": "{n} match(es) found", "v.found0": "None of the {logs} events of this transaction contains this file's hash. Give the event signature and field instead, or check that it is the same file.",
+    "v.logindex": "Log index (in the block)", "v.event": "Event signature (optional)", "v.event.h": "For example Committed(uint64 indexed epoch, bytes32 anchor). Without it, name a 32-byte word as topics.N or data.N.",
+    "v.field": "Field", "v.alg": "Hash",
+    "v.contract": "Contract address", "v.fn": "Function signature (with returns)", "v.args": "Arguments (JSON array)",
+    "v.run": "Verify", "v.running": "Verifying…",
+    "v.match": "Match", "v.mismatch": "No match", "v.error": "Could not verify",
+    "v.match.d": "What you uploaded matches the evidence on chain.", "v.mismatch.d": "What you uploaded does not match the evidence on chain; see the failed checks below.", "v.error.d": "The verification did not complete; see below.",
+    "v.summary": "Evidence on chain", "v.block": "Block", "v.time": "Time", "v.tx2": "Transaction", "v.contract2": "Contract", "v.codehash": "Contract code hash (latest state)",
+    "v.event2": "Event", "v.fn2": "Function", "v.field2": "Field", "v.onchain": "Value on chain", "v.mine": "Recomputed", "v.scheme": "Hashing rules",
+    "v.leaf": "Your leaf", "v.sums": "Totals",
+    "v.custody": "Custody", "v.holder": "Custody contract", "v.token": "Asset", "v.held": "Held now", "v.claimed": "Total claimed by the root",
+    "v.custody.n": "\"Held now\" is the latest state at the time of the query, not the holding at the evidence's block; nodes keep only recent state history.",
+    "v.checks": "Checks", "v.dl.json": "Download JSON report", "v.print": "Print / save as PDF",
+    "v.t.verified": "checked against block hashes", "v.t.local": "computed locally", "v.t.node": "reported by the node", "v.t.latest": "latest state", "v.t.error": "error",
+    "v.nondec": "for information; does not affect the result",
+    "v.fmt": "Proof file format", "v.fmt.d": "Fields and examples: <a href=\"https://github.com/Luphia/Boltchain/blob/main/docs/evidence-proof-format.md\" target=\"_blank\" rel=\"noopener\">docs/evidence-proof-format.md</a>.",
+    "v.bad.json": "The proof file is not valid JSON",
+    "v.r.title": "Boltchain evidence verification report", "v.r.gen": "Generated", "v.r.ver": "Explorer version", "v.r.hash": "Report hash", "v.r.result": "Result", "v.r.origin": "Explorer",
+    "v.r.how": "How it was verified",
+    "v.r.how.d": "Uploaded files were hashed in the browser with keccak-256 and sha-256; the report holds only the hashes. The block header's keccak-256 must equal the block hash; transactions and receipts are rebuilt into Merkle-Patricia tries that must equal the header's transactionsRoot and receiptsRoot; the event is decoded by its signature, the field taken, and the Merkle root recomputed with the hashing rules the proof file declares. Custody balances are proven with a storage proof against the latest block's stateRoot.",
+    "v.r.replay": "Replaying it",
+    "v.r.replay.d": "The JSON report carries the raw data used (header RLP, transaction and receipt, log, eth_call parameters and output, storage proof). Anyone can fetch the same data from any Boltchain node with eth_getBlockByNumber, eth_getTransactionReceipt, eth_call and eth_getProof and redo the checks. The report hash is keccak-256 of the key-sorted JSON without the reportHash field.",
+    "c.chain.id": "The proof is for this chain", "c.block.header": "The block header hashes to the block hash", "c.block.transactions": "Transactions rebuild the header's transactionsRoot",
+    "c.tx.inBlock": "The transaction hash is this transaction of the block", "c.block.receipts": "Receipts rebuild the header's receiptsRoot", "c.tx.success": "The transaction succeeded",
+    "c.log.contract": "The event was emitted by the given contract", "c.log.event": "The event signature matches", "c.block.final": "The block is final",
+    "c.call.block.header": "The header of the queried block matches", "c.call.output": "Output of the view function", "c.file.hash": "File hash",
+    "c.match": "Compared with the evidence on chain", "c.sums": "Totals", "c.custody.block.header": "The header of the balance query's block matches",
+    "c.custody.token.account": "Asset contract account proven against stateRoot", "c.custody.balance": "Asset balance of the custody contract", "c.custody.solvent": "Holdings now cover the total claimed by the root",
+    "c.error": "Error",
   },
 };
 const store = {
@@ -623,6 +732,219 @@ async function verifyBlock(b) {
   }
 }
 
+// ---------- evidence verification (issue #1) ----------
+const V = window.BoltVerify;
+const vstate = { tab: "proof", proofText: null, proofName: null, file: null, hashes: null, report: null, anchorType: "log" };
+function dropBox(id, accept) {
+  return `<div class="drop" id="${id}-drop"><label class="btn"><input type="file" id="${id}" ${accept ? `accept="${accept}"` : ""}>${t("v.pick")}</label><div class="nm muted" id="${id}-nm">${t("v.none")}</div></div>`;
+}
+function wireDrop(id, onFile) {
+  const box = document.getElementById(id + "-drop"), inp = document.getElementById(id);
+  inp.onchange = () => inp.files[0] && onFile(inp.files[0]);
+  box.ondragover = (e) => { e.preventDefault(); box.classList.add("over"); };
+  box.ondragleave = () => box.classList.remove("over");
+  box.ondrop = (e) => { e.preventDefault(); box.classList.remove("over"); if (e.dataTransfer.files[0]) onFile(e.dataTransfer.files[0]); };
+}
+function pageVerify() {
+  const tab = vstate.tab;
+  $app.innerHTML = `
+    <h1 class="no-print">${t("v.title")}</h1>
+    <div class="note no-print" style="background:var(--accent-soft);color:var(--text)">${t("v.intro")}</div>
+    <div class="tabs no-print"><button class="btn ${tab === "proof" ? "acc" : ""}" data-vtab="proof">${t("v.tab.proof")}</button><button class="btn ${tab === "file" ? "acc" : ""}" data-vtab="file">${t("v.tab.file")}</button></div>
+    <div class="card no-print"><div class="vform" id="vform">${tab === "proof" ? proofForm() : fileForm()}</div></div>
+    <div id="vres" style="margin-top:16px"></div>`;
+  document.querySelectorAll("[data-vtab]").forEach((b) => (b.onclick = () => { vstate.tab = b.dataset.vtab; vstate.report = null; pageVerify(); }));
+  wireDrop("vfile", pickFile);
+  if (tab === "proof") {
+    wireDrop("vproof", async (f) => { vstate.proofName = f.name; vstate.proofText = await f.text(); document.getElementById("vproof-nm").textContent = f.name; });
+    if (vstate.proofName) document.getElementById("vproof-nm").textContent = vstate.proofName;
+  } else {
+    document.querySelectorAll("input[name=atype]").forEach((r) => (r.onchange = () => { vstate.anchorType = r.value; document.getElementById("a-log").style.display = r.value === "log" ? "" : "none"; document.getElementById("a-call").style.display = r.value === "call" ? "" : "none"; }));
+    document.getElementById("vfind").onclick = findHash;
+  }
+  document.getElementById("vrun").onclick = runVerify;
+  showHashes();
+  if (vstate.report) showReport(vstate.report);
+}
+function proofForm() {
+  return `
+    <label class="f"><span>${t("v.proof")}</span>${dropBox("vproof", ".json,application/json")}<span class="hint">${t("v.proof.h")}</span></label>
+    <label class="f"><span>${t("v.file")}</span>${dropBox("vfile")}<span class="hint">${t("v.file.h")}</span></label>
+    <div id="vhash" class="hint mono break"></div>
+    <details class="hint"><summary>${t("v.fmt")}</summary><div style="margin-top:6px">${t("v.fmt.d")}</div></details>
+    <div><button class="btn acc" id="vrun">${t("v.run")}</button></div>`;
+}
+function fileForm() {
+  const at = vstate.anchorType;
+  return `
+    <label class="f"><span>${t("v.file.q")}</span>${dropBox("vfile")}</label>
+    <div id="vhash" class="hint mono break"></div>
+    <div class="f"><span class="muted" style="font-size:13px">${t("v.anchor")}</span>
+      <div class="radios"><label><input type="radio" name="atype" value="log" ${at === "log" ? "checked" : ""}> ${t("v.a.log")}</label><label><input type="radio" name="atype" value="call" ${at === "call" ? "checked" : ""}> ${t("v.a.call")}</label></div></div>
+    <div id="a-log" style="display:${at === "log" ? "" : "none"}" class="vform" >
+      <label class="f"><span>${t("v.tx")}</span><input type="text" id="f-tx" spellcheck="false" placeholder="0x…"></label>
+      <div><button class="btn" id="vfind">${t("v.find")}</button> <span id="vfound" class="hint"></span></div>
+      <div class="cols2"><label class="f"><span>${t("v.logindex")}</span><input type="text" id="f-li" placeholder="0"></label>
+      <label class="f"><span>${t("v.field")}</span><input type="text" id="f-field" placeholder="data.0 / commitment.balanceRoot"></label></div>
+      <label class="f"><span>${t("v.event")}</span><input type="text" id="f-ev" spellcheck="false"><span class="hint">${t("v.event.h")}</span></label>
+    </div>
+    <div id="a-call" style="display:${at === "call" ? "" : "none"}" class="vform">
+      <label class="f"><span>${t("v.contract")}</span><input type="text" id="f-to" spellcheck="false" placeholder="0x…"></label>
+      <label class="f"><span>${t("v.fn")}</span><input type="text" id="f-fn" spellcheck="false" placeholder="documentHash(uint256 id) view returns (bytes32 h)"></label>
+      <div class="cols2"><label class="f"><span>${t("v.args")}</span><input type="text" id="f-args" placeholder='["1"]'></label>
+      <label class="f"><span>${t("v.field")}</span><input type="text" id="f-cfield" placeholder="h"></label></div>
+    </div>
+    <label class="f" style="max-width:240px"><span>${t("v.alg")}</span><select id="f-alg"><option value="keccak256">keccak-256</option><option value="sha256">sha-256</option></select></label>
+    <div><button class="btn acc" id="vrun">${t("v.run")}</button></div>`;
+}
+async function pickFile(f) {
+  vstate.file = f; vstate.hashes = null;
+  document.getElementById("vfile-nm").textContent = `${f.name} · ${num(f.size)} bytes`;
+  const out = document.getElementById("vhash");
+  out.textContent = t("v.hashing");
+  try {
+    vstate.hashes = await V.hashFile(f, (p) => { if (vstate.file === f) out.textContent = `${t("v.hashing")} ${Math.round(p * 100)}%`; }, "/verify.js");
+    if (vstate.file === f) showHashes();
+  } catch (e) { out.textContent = e.message; }
+}
+function showHashes() {
+  const out = document.getElementById("vhash");
+  if (!out || !vstate.hashes) return;
+  if (vstate.file) document.getElementById("vfile-nm").textContent = `${vstate.file.name} · ${num(vstate.file.size)} bytes`;
+  out.innerHTML = `${t("v.hashes")}<br>keccak-256 ${vstate.hashes.keccak256}${copyBtn(vstate.hashes.keccak256)}<br>sha-256&nbsp;&nbsp;&nbsp; ${vstate.hashes.sha256}${copyBtn(vstate.hashes.sha256)}`;
+}
+async function waitHashes() {
+  while (vstate.file && !vstate.hashes) await new Promise((r) => setTimeout(r, 100));
+  return vstate.hashes;
+}
+async function findHash() {
+  const out = document.getElementById("vfound");
+  const tx = document.getElementById("f-tx").value.trim();
+  out.textContent = t("loading");
+  try {
+    const h = await waitHashes();
+    if (!h) throw new Error(t("v.none"));
+    const r = await V.findInTransaction(tx, { keccak256: h.keccak256, sha256: h.sha256 }, api);
+    if (!r.found.length) { out.textContent = t("v.found0", { logs: r.logs }); return; }
+    const f = r.found[0];
+    document.getElementById("f-li").value = f.logIndex;
+    document.getElementById("f-field").value = f.field;
+    document.getElementById("f-alg").value = f.alg;
+    out.textContent = t("v.found", { n: r.found.length }) + ": " + r.found.map((x) => `log ${x.logIndex} ${x.field} (${x.alg})`).join(", ");
+  } catch (e) { out.textContent = e.message; }
+}
+function manualProof() {
+  const alg = document.getElementById("f-alg").value;
+  if (vstate.anchorType === "call") {
+    let args = [];
+    const a = document.getElementById("f-args").value.trim();
+    if (a) args = JSON.parse(a);
+    return { version: 1, anchor: { type: "call", to: document.getElementById("f-to").value.trim(), function: document.getElementById("f-fn").value.trim(), args, field: document.getElementById("f-cfield").value.trim() || "0" }, leaf: { file: alg } };
+  }
+  const li = document.getElementById("f-li").value.trim();
+  const ev = document.getElementById("f-ev").value.trim();
+  return { version: 1, anchor: { type: "log", txHash: document.getElementById("f-tx").value.trim(), logIndex: li === "" ? undefined : Number(li), event: ev || undefined, field: document.getElementById("f-field").value.trim() || "data.0" }, leaf: { file: alg } };
+}
+async function runVerify() {
+  const btn = document.getElementById("vrun");
+  const res = document.getElementById("vres");
+  let proof;
+  try {
+    if (vstate.tab === "proof") {
+      if (!vstate.proofText) throw new Error(t("v.proof") + ": " + t("v.none"));
+      try { proof = JSON.parse(vstate.proofText); } catch (_) { throw new Error(t("v.bad.json")); }
+    } else proof = manualProof();
+  } catch (e) { res.innerHTML = `<div class="err">${esc(e.message)}</div>`; return; }
+  btn.disabled = true; btn.textContent = t("v.running");
+  try {
+    const file = vstate.file ? await waitHashes() : null;
+    vstate.report = await V.verifyEvidence({ proof, file, fetchJson: api, origin: location.origin });
+    showReport(vstate.report);
+  } finally { btn.disabled = false; btn.textContent = t("v.run"); }
+}
+const trustBadge = (c) => {
+  const cls = c.trust === "verified" ? "ok" : c.trust === "local" ? "acc" : c.trust === "error" ? "bad" : "warn";
+  return `<span class="badge ${cls}">${t("v.t." + c.trust)}</span>`;
+};
+function checkLabel(id) {
+  const k = "c." + id;
+  if (T[lang][k] || T.en[k]) return t(k);
+  const base = "c." + id.replace(/\.[0-9]+$/, "");
+  return (T[lang][base] || T.en[base]) ? `${t(base)} ${id.split(".").pop()}` : id;
+}
+function amount(v, decimals) {
+  if (v === null || v === undefined) return "—";
+  if (decimals === null || decimals === undefined) return num(v);
+  const x = BigInt(v), d = 10n ** BigInt(decimals);
+  const i = (x / d).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const f = (x % d).toString().padStart(Number(decimals), "0").replace(/0+$/, "");
+  return i + (f ? "." + f : "");
+}
+function showReport(r) {
+  const res = document.getElementById("vres");
+  const cls = r.result === "match" ? "ok" : r.result === "mismatch" ? "bad" : "warn";
+  const icon = r.result === "match" ? "✓" : r.result === "mismatch" ? "✗" : "!";
+  const a = r.chain.anchor;
+  const P = r.proof || {};
+  const A = P.anchor || {};
+  const onchain = (() => { try { return a ? V.plain(V.getField(a.decoded, A.field || "0")) : null; } catch (_) { return null; } })();
+  const rows = a ? [
+    [t("v.block"), `${bLink(a.block.number)} <span class="mono muted">${esc(short(a.block.hash, 12, 10))}</span>`],
+    a.block.timestamp ? [t("v.time"), esc(dateOf(Number(a.block.timestamp)))] : null,
+    a.transaction ? [t("v.tx2"), txLink(a.transaction.hash, true) + ` <span class="muted">· log ${a.log.index}</span>`] : null,
+    [t("v.contract2"), aLink(a.log ? a.log.address : a.to, a.log ? a.log.address : a.to)],
+    r.chain.contract ? [t("v.codehash"), `<span class="mono break">${esc(r.chain.contract.codeHash)}</span>`] : null,
+    a.event ? [t("v.event2"), `<span class="mono break">${esc(a.event)}</span>`] : a.function ? [t("v.fn2"), `<span class="mono break">${esc(a.function)}</span>`] : null,
+    [t("v.field2"), `<span class="mono">${esc(A.field || "0")}</span>`],
+    onchain !== null ? [t("v.onchain"), `<span class="mono break">${esc(typeof onchain === "object" ? JSON.stringify(onchain) : onchain)}</span>`] : null,
+    r.root ? [t("v.mine"), `<span class="mono break">${esc(r.root.hash)}</span>`] : r.leaf ? [t("v.mine"), `<span class="mono break">${esc(r.leaf.hash)}</span>`] : null,
+    P.scheme ? [t("v.scheme"), `<span class="mono">${esc(P.scheme)}</span> <span class="hint">${esc((V.SCHEMES[P.scheme] || {}).title || "")}</span>`] : null,
+    r.root && r.root.sums ? [t("v.sums"), (A.sums || []).map((f, i) => `<span class="mono">${esc(f)}</span> = ${num(r.root.sums[i])}`).join("<br>")] : null,
+  ] : [];
+  let leafRows = "";
+  if (P.leaf && P.leaf.types && P.leaf.values) {
+    const names = P.leaf.names || [];
+    leafRows = `<div class="card" style="margin-top:12px"><div class="card-h"><h2>${t("v.leaf")}</h2></div>${kv(P.leaf.types.map((ty, i) => [`${esc(names[i] || "#" + i)} <span class="hint mono">${esc(ty)}</span>`, `<span class="mono break">${esc(P.leaf.values[i])}</span>${(P.leaf.sums || []).includes(i) ? ` <span class="badge acc">${t("v.sums")}</span>` : ""}`]))}</div>`;
+  }
+  let cust = "";
+  if (r.custody) {
+    const c = r.custody;
+    const sym = c.symbol ? " " + esc(c.symbol) : "";
+    cust = `<div class="card" style="margin-top:12px"><div class="card-h"><h2>${t("v.custody")}</h2></div>${kv([
+      [t("v.holder"), aLink(c.holder, c.holder)],
+      [t("v.token"), aLink(c.token, c.token) + sym],
+      [t("v.held"), `<b>${amount(c.held, c.decimals)}${sym}</b> <span class="muted">· ${t("v.block")} ${bLink(c.block.number)}</span> ${c.proof ? `<span class="badge ok">${t("v.t.verified")}</span>` : `<span class="badge warn">${t("v.t.node")}</span>`}`],
+      c.claimed !== null ? [t("v.claimed"), `${amount(c.claimed, c.decimals)}${sym}`] : null,
+    ])}<div class="hint" style="padding:0 16px 12px">${t("v.custody.n")}</div></div>`;
+  }
+  const checks = r.checks.map((c) => `<div class="row"><div class="ic ${c.ok ? "ok" : c.decisive ? "bad" : "warn"}">${c.ok ? "✓" : c.decisive ? "✗" : "!"}</div><div class="main"><div>${esc(checkLabel(c.id))} ${trustBadge(c)}${c.decisive ? "" : ` <span class="hint">${t("v.nondec")}</span>`}</div><div class="mono muted" style="font-size:12px">${esc(c.detail)}</div></div></div>`).join("");
+  res.innerHTML = `
+    <div class="print-only"><h1>${t("v.r.title")}</h1></div>
+    <div class="card"><div class="verdict ${cls}"><div class="big">${icon} ${t("v." + r.result)}</div><div class="muted">${t("v." + r.result + ".d")}</div></div>
+      ${rows.length ? kv(rows) : ""}
+      <div class="actions"><button class="btn acc" id="vjson">${t("v.dl.json")}</button><button class="btn" id="vprint">${t("v.print")}</button></div></div>
+    ${leafRows}${cust}
+    <div class="card list checks" style="margin-top:12px"><div class="card-h"><h2>${t("v.checks")}</h2></div>${checks}</div>
+    <div class="card" style="margin-top:12px">${kv([
+      [t("v.r.result"), `<b>${t("v." + r.result)}</b>`],
+      [t("v.r.gen"), esc(new Date(r.generatedAt).toLocaleString(lang === "zh" ? "zh-TW" : "en-US")) + ` <span class="mono muted">${esc(r.generatedAt)}</span>`],
+      [t("v.r.origin"), `<span class="mono">${esc(r.explorer.origin || "")}</span> · ${t("chain")} ${esc(r.explorer.chainId)}`],
+      [t("v.r.ver"), `<span class="mono">${esc(r.explorer.version || "")}</span>`],
+      r.file ? [t("v.hashes"), `<span class="mono break">keccak-256 ${esc(r.file.keccak256)}<br>sha-256 ${esc(r.file.sha256)}</span>`] : null,
+      [t("v.r.hash"), `<span class="mono break">${esc(r.reportHash)}</span>`],
+    ])}</div>
+    <div class="card print-only" style="margin-top:12px;padding:12px 16px"><h2>${t("v.r.how")}</h2><p>${t("v.r.how.d")}</p><h2>${t("v.r.replay")}</h2><p>${t("v.r.replay.d")}</p></div>`;
+  document.getElementById("vjson").onclick = () => {
+    const blob = new Blob([JSON.stringify(r, null, 2) + "\n"], { type: "application/json" });
+    const u = URL.createObjectURL(blob);
+    const el = document.createElement("a");
+    el.href = u; el.download = `boltchain-evidence-${r.reportHash.slice(2, 14)}.json`;
+    document.body.appendChild(el); el.click(); el.remove();
+    setTimeout(() => URL.revokeObjectURL(u), 1000);
+  };
+  document.getElementById("vprint").onclick = () => window.print();
+}
+
 // ---------- routing & search ----------
 async function doSearch(input) {
   const q = input.value.trim();
@@ -657,7 +979,7 @@ function mesh(w, h, n, seed) {
 }
 const MESH = mesh(1100, 300, 120, 7);
 // Clean URLs (/block/12, /tx/0x…): the server answers every page path with this file.
-const PAGES = new Set(["blocks", "block", "tx", "address", "validators", "validator", "epoch"]);
+const PAGES = new Set(["blocks", "block", "tx", "address", "validators", "validator", "epoch", "verify"]);
 function nav(url) {
   history.pushState(null, "", url);
   route();
@@ -677,6 +999,7 @@ async function route() {
     else if (page === "validators") await pageValidators();
     else if (page === "validator") await pageValidator(arg);
     else if (page === "epoch") await pageEpoch(arg);
+    else if (page === "verify") pageVerify();
     else await pageHome();
     window.scrollTo(0, 0);
   } catch (e) { fail(e); }
