@@ -251,3 +251,16 @@ fn epochs_rotate_committees_and_pay_rewards() {
         assert_eq!(delta(id), U256::ZERO, "validator {id}");
     }
 }
+
+#[test]
+fn under_pos_the_head_is_final() {
+    let d = tempfile::tempdir().unwrap();
+    let chain = Chain::open(d.path(), &genesis()).unwrap();
+    assert_eq!(chain.final_height().unwrap(), 0);
+    for _ in 0..3 {
+        produce(&chain, vec![]);
+    }
+    // No phase B checkpoint is ever recorded under PoS; /health used to report it (testnet: 6000).
+    assert_eq!(chain.finalized().unwrap(), None);
+    assert_eq!(chain.final_height().unwrap(), 3);
+}

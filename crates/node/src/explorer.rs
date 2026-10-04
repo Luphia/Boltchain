@@ -284,7 +284,7 @@ impl Explorer {
                 hashrate = work / span;
             }
         }
-        let finalized = self.chain.finalized().map_err(internal)?.map(|(n, _)| n).unwrap_or(0);
+        let finalized = self.chain.final_height().map_err(internal)?;
         let epoch = rules.epoch_of(next);
         Ok(json!({
             "chainId": cfg.chain_id,
@@ -292,7 +292,7 @@ impl Explorer {
             "certificates": self.certs.as_ref().map(|c| json!({ "contract": c.address, "wallet": c.wallet })),
             "genesis": self.chain.genesis_hash(),
             "head": self.block_summary(r, &head),
-            "finalized": if stage == "pos" { head.number } else { finalized },
+            "finalized": finalized,
             "stage": stage,
             "epoch": epoch,
             "epochSlots": rules.epoch_slots,

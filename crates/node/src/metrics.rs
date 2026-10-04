@@ -55,7 +55,7 @@ pub fn status(chain: &Chain, pool: Option<&TxPool>) -> Status {
             _ => "mining",
         };
     }
-    s.finalized = chain.finalized().ok().flatten().map(|(n, _)| n).unwrap_or(0);
+    s.finalized = chain.final_height().unwrap_or(0);
     s.base = chain.store().reader().ok().and_then(|r| r.base().ok()).unwrap_or(0);
     s.snapshot = chain.snapshots().ok().and_then(|v| v.last().map(|(n, _)| *n)).unwrap_or(0);
     s

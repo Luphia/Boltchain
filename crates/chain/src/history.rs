@@ -36,6 +36,16 @@ impl Chain {
         Ok(self.head()?.number >= number + MAX_REORG_DEPTH)
     }
 
+    /// Highest block final by stake: the head once it was produced under PoS (only final blocks
+    /// are stored then), otherwise the last checkpoint certified in phase B (0 for none).
+    pub fn final_height(&self) -> Result<u64> {
+        let head = self.head()?.number;
+        if head > 0 && self.phase()?.is_pos(&self.rules, head) {
+            return Ok(head);
+        }
+        Ok(self.finalized()?.map(|(n, _)| n).unwrap_or(0))
+    }
+
     /// Snapshot roots this node keeps, oldest first, with their block numbers.
     pub fn snapshots(&self) -> Result<Vec<(u64, Cid)>> {
         let r = self.store.reader()?;

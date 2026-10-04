@@ -521,7 +521,9 @@ fn finalized_checkpoints_stop_reorganisations() {
     }
     // Block 5 of A's chain is finalized: B's branch forks at 3, below it: refused.
     let a5 = a.store().reader().unwrap().header(5).unwrap().unwrap();
+    assert_eq!(a.final_height().unwrap(), 0, "mined blocks are not final by stake");
     assert!(a.finalize(&a5.hash_slow(), 5).unwrap());
+    assert_eq!(a.final_height().unwrap(), 5, "the certified checkpoint, not the head");
     let first = a.import_mined(&branch[0], vec![], None);
     assert!(matches!(first, Err(ChainError::DeepReorg(_))), "{first:?}");
     assert_eq!(a.head().unwrap().number, 6);
