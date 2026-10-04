@@ -53,10 +53,14 @@ pub(crate) mod t {
     pub const TD: &str = "td";
     /// addr(20) ++ number(8 BE) ++ index(4 BE) -> role flags (address index, when enabled)
     pub const ADDR_TX: &str = "addr_tx";
+    /// number(8 BE) ++ hash(32) -> CID bytes of the envelope of an executed block that is not
+    /// final yet (its IPFS blocks are in `ipld`); lets a restarted node re-execute the blocks it
+    /// voted for or proposed
+    pub const PENDING: &str = "pending";
 
     pub const ALL: &[&str] = &[
         ACCOUNTS, STORAGE, CODES, TRIE_ACC, TRIE_STO, HEADERS, HASH_NUM, BODIES, SENDERS, RECEIPTS,
-        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META, IPLD, ENVELOPES, TD, ADDR_TX,
+        TX_INDEX, ACC_HIST, STO_HIST, HIST_KEYS, META, IPLD, ENVELOPES, TD, ADDR_TX, PENDING,
     ];
 }
 
@@ -415,6 +419,25 @@ impl<'e, K: TransactionKind> Tx<'e, K> {
             .transpose()
     }
 
+    /// Executed blocks above `above` that are not final yet: (number, hash, envelope CID),
+    /// lowest first.
+    pub fn pending_blocks(&self, above: u64) -> Result<Vec<(u64, B256, Cid)>> {
+        let tbl = self.table(t::PENDING)?;
+        let mut cursor = self.txn.cursor(&tbl)?;
+        let mut out = Vec::new();
+        let mut item = cursor.set_range::<Vec<u8>, Vec<u8>>(&num_key(above.saturating_add(1)))?;
+        while let Some((k, v)) = item {
+            if k.len() != 40 {
+                return Err(StoreError::Corrupt(t::PENDING));
+            }
+            let number = u64::from_be_bytes(k[..8].try_into().expect("8 bytes"));
+            let cid = Cid::try_from(v.as_slice()).map_err(|_| StoreError::Corrupt(t::PENDING))?;
+            out.push((number, B256::from_slice(&k[8..]), cid));
+            item = cursor.next::<Vec<u8>, Vec<u8>>()?;
+        }
+        Ok(out)
+    }
+
     /// Latest block known final by stake (a checkpoint certified in phase B): (number, hash).
     pub fn finalized(&self) -> Result<Option<(u64, B256)>> {
         Ok(self.get_raw(t::META, META_FINALIZED)?.and_then(|v| {
@@ -576,6 +599,35 @@ impl<'e> Tx<'e, RW> {
             self.put_raw(t::IPLD, &cid.to_bytes(), data)?;
         }
         self.put_raw(t::ENVELOPES, &num_key(number), &root.to_bytes())
+    }
+
+    /// Records an executed, not yet final block (its IPFS blocks must be stored too).
+    pub fn put_pending(&self, number: u64, hash: &B256, root: &Cid) -> Result<()> {
+        self.put_raw(
+            t::PENDING,
+            &[&num_key(number)[..], hash.as_slice()].concat(),
+            &root.to_bytes(),
+        )
+    }
+
+    /// Forgets pending-block records up to and including `number`.
+    pub fn prune_pending(&self, number: u64) -> Result<()> {
+        let tbl = self.table(t::PENDING)?;
+        let mut cursor = self.txn.cursor(&tbl)?;
+        let mut keys = Vec::new();
+        let mut item = cursor.first::<Vec<u8>, ()>()?;
+        while let Some((k, ())) = item {
+            if k.len() < 8 || u64::from_be_bytes(k[..8].try_into().expect("8 bytes")) > number {
+                break;
+            }
+            keys.push(k);
+            item = cursor.next::<Vec<u8>, ()>()?;
+        }
+        drop(cursor);
+        for k in keys {
+            self.txn.del(&tbl, &k, None)?;
+        }
+        Ok(())
     }
 
     /// Commits the transaction.

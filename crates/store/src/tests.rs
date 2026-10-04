@@ -521,3 +521,24 @@ fn account_and_storage_proofs_verify_against_the_state_root() {
     let p = r.account_proof(&missing).unwrap();
     verify_proof(root, Nibbles::unpack(alloy_primitives::keccak256(missing)), None, &p).unwrap();
 }
+
+#[test]
+fn pending_block_records_list_above_a_height_and_prune() {
+    let (_d, store) = open();
+    let cid = |n: u8| bolt_ipld::sha256_cid(bolt_ipld::RAW, &[n]);
+    let w = store.writer().unwrap();
+    for n in [5u64, 6, 7] {
+        w.put_pending(n, &B256::repeat_byte(n as u8), &cid(n as u8)).unwrap();
+    }
+    w.put_pending(6, &B256::repeat_byte(0xee), &cid(0xee)).unwrap();
+    w.commit().unwrap();
+    let all = store.reader().unwrap().pending_blocks(4).unwrap();
+    assert_eq!(all.iter().map(|x| x.0).collect::<Vec<_>>(), vec![5, 6, 6, 7]);
+    assert_eq!(store.reader().unwrap().pending_blocks(5).unwrap().len(), 3);
+    assert_eq!(all[2].2, cid(0xee));
+    let w = store.writer().unwrap();
+    w.prune_pending(6).unwrap();
+    w.commit().unwrap();
+    let left = store.reader().unwrap().pending_blocks(0).unwrap();
+    assert_eq!(left, vec![(7, B256::repeat_byte(7), cid(7))]);
+}

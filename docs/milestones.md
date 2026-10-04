@@ -20,8 +20,8 @@
 必要條件：
 
 - [ ] 外部安全稽核：共識（HotStuff-2、BLS 聚合與延後驗證、檢查點）、系統合約（質押、罰沒、SwarmStorage、ComputeMarket）、分叉機制
-- [ ] 測試網在 PoS 下連續 2–4 週未停鏈，期間有外部驗證者加入、快照同步、修剪與抽查正常；gossip 重送警告查明
-- [ ] 主網 genesis：7 位驗證者以 `boltchain keys` 產生 BLS 公鑰、PoP 與綁定簽章並填入範本
+- [ ] 測試網在 PoS 下連續 2–4 週未停鏈，期間有外部驗證者加入、快照同步、修剪與抽查正常（全體重啟停鏈已修正並有測試、gossip 重複警告已查明，2026-10-04）
+- [ ] 主網 genesis 定稿（依 ADR 0007，genesis 沒有驗證者與多簽、從 PoW 開始）：填入上線時間 `timestamp` 與最終 `extraData`、確認起始難度 2¹⁸ 與 T1/T2 門檻、bootstrap `node001`–`node009.cafeca.io` 架設並設好 DNS
 - [x] 金鑰保護：驗證者金鑰預設為 EIP-2335 keystore（通過 EIP-2335 測試向量）、錢包為 v3 keystore（與 eth-account 互通）；`keys encrypt` / `wallet encrypt` 轉換舊檔；主網拒絕未加密的驗證者金鑰；密碼取自 `BOLT_PASSWORD_FILE`、`BOLT_PASSWORD` 或終端機
 - [ ] 安全升級：簽章發布清單、可重現建置與 CI 建置證明、`--auto-update notify`
 - [ ] 規模與硬體：128 位驗證者 / 1,000 萬 BOLT 規模的模擬或測試網演練、樹莓派實測、修剪巡檢改成游標與事件驅動
@@ -29,7 +29,7 @@
 建議完成：
 
 - [ ] leader 依質押權重做不可預測的 VRF 抽樣；投票直送下一任 leader
-- [ ] 營運演練：監控與告警、備份、崩潰後重啟、停鏈處理手冊
+- [ ] 營運演練：監控與告警、備份、崩潰後重啟（全體同時重啟已有自動恢復與測試）、停鏈處理手冊
 - [ ] BOLT 發行的法律與法規確認（台灣及其他地區）
 
 上線後再做：零 BOLT 執行者中繼、開放承接與 `ModelRegistry`、TEE Agent 租用、公開 IPFS 橋接。
@@ -79,7 +79,7 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 - [x] Bitswap 1.2.0：自行實作，與 Kubo/Helia 線上格式相容（見 ADR 0004）；以 Helia 7.1.15 實測可取回並驗證區塊
 - [x] `sync`：收到公告 → 驗證 envelope 與 header → 用 Bitswap 抓 chunk（先向轉發者要，對方回 DONT_HAVE 或 150 ms 內沒回應就改問其他節點）→ 重新執行並核對 header 與 envelope；落後時沿 `parent` 回填
 - [x] `boltchain follow`、`boltchain node-id`；出塊者每塊發公告並接收轉發的交易
-- [x] 主網 genesis 範本：7 個驗證者收款地址、9 位多簽簽署者（EIP-55 校驗碼全數正確）、bootstrap `node001`–`node009.cafeca.io`
+- [x] 主網 genesis 範本：7 個驗證者收款地址、9 位多簽簽署者（EIP-55 校驗碼全數正確）、bootstrap `node001`–`node009.cafeca.io`（驗證者與多簽已由 ADR 0007 取消，現行範本只保留參數與 bootstrap）
 
 ### 驗收測試（`crates/node/tests/m2_sync.rs`）
 
@@ -125,7 +125,7 @@ GitHub 的 ARM64 runner 比樹莓派快，只能當下限參考；最終要在�
 - [ ] 投票直送下一任 leader，不走 gossip 廣播（M4/M6）
 - [ ] 模擬器加入能精準分割誠實節點的對手，用來抓「同輪兩票」這類變異（M4）
 - [x] 加密 keystore（EIP-2335）（M6，2026-09-27）
-- [ ] 主網 genesis 填入 7 位驗證者的 BLS 公鑰、PoP 和綁定簽章（由各驗證者用 `boltchain keys` 產生）
+- [x] ~~主網 genesis 填入 7 位驗證者的 BLS 公鑰、PoP 和綁定簽章~~：已取消，主網改由 PoW 啟動，驗證者在鏈上質押加入（ADR 0007，2026-09-25）
 
 ## M4 結果（2026-09-25）
 
@@ -320,6 +320,12 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
   - 唯一的缺塊：9/27 07:55 UTC 只重啟 n1（部署瀏覽器）後，n1 一直到下一個 epoch（約 1 小時）都無法驗證提案，輪到它的 27 次都逾時（每次 30–36 秒）。原因：重啟時錯過了一個提案，之後每個提案都建立在它沒有的區塊上，被拒絕的提案也不保留，於是一路拒絕；已最終的區塊經 catch-up 匯入又總是落後
   - 修正：提案因父區塊未知而失敗時，沿著信封的 parent CID 向 peer 取回缺的區塊並驗證（成為待定區塊，仍只經共識提交），並保留父區塊未知的提案供後續使用；新測試 `m3_restart`（第 7 位驗證者中途加入，之後不能有任何一輪逾時）修正前 4 次失敗 3 次，修正後 5 次全過
   - 記憶體：跑了 1–2 天的節點 RSS 約 800 MB，持平；繼續觀察
+- [x] 測試網事件 7（2026-09-30 – 10-02）：主機 2（約 78% 質押）斷電，質押不足 2/3 停鏈是預期的；10/1 08:27 UTC 兩台主機開機後節點自動啟動，鏈卻停了約 26 小時，每位 leader 都報「could not build proposal: parent block not available」，10/2 10:26 UTC 手動把各節點的 high_qc 改回 committed_qc 才恢復
+  - 原因：HotStuff-2 的 high_qc 永遠指向已認證、尚未最終的區塊（兩鏈規則下最終區塊是它的父區塊），而待定區塊只存在記憶體。全部節點同時重啟後沒有人有它，所有提案都必須建立在它之上，因此永遠停住。區塊資料其實已寫入 blockstore（投票前就寫入），只是沒有「區塊 hash → 信封」的對照，重啟後無法重建
+  - 修正（r35）：執行過的待定區塊在同一筆交易中把信封 CID 記入新表 `pending`（最終後刪除）；重啟時在恢復共識狀態前，依共識狀態中的區塊、high_qc 與 committed 從 blockstore 重新執行（`Chain::restore_pending`），不需要網路
+  - 共識狀態檔改成寫入暫存檔 → fsync → rename → fsync 目錄，斷電後不會變成空檔；狀態檔存在卻無法解析時拒絕啟動（不再當成沒有狀態，以免同一 round 重複投票）
+  - 新測試 `whole_committee_restarts`：7 個驗證者各自在獨立 runtime 上執行，連續 3 次全部同時終止再啟動，每次都要再出 6 塊；修正前第一次重啟後就重現測試網的錯誤並停住，修正後連跑 3 次通過
+- [x] gossip「Not publishing a message that has already been published」查明（觀察 5 的待查項目；n1 九天約 13,000 行，約占 17% 的區塊）：每個驗證者在區塊最終時都會發布同一則最終性公告，內容只差發送時間 `at`（毫秒）。不同節點在同一毫秒提交時，公告逐位元相同，別人的那份先到，gossipsub 就拒絕我們的並記一行 WARN。不是重送、沒有遺失訊息，去重本身是好事；10/2 之後的 WARN 只剩這一種。改成發布前先比對最近收到的公告，相同就不再交給 gossipsub
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## 發行改制（ADR 0012）：已實作

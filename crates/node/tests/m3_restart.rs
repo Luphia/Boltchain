@@ -136,3 +136,69 @@ async fn late_validator_keeps_its_slots() {
         n.net.shutdown().await;
     }
 }
+
+/// Every validator stops at once (testnet, 2026-10-01: both hosts rebooted) and restarts on its
+/// data. The highest certificate names a block that was certified but not yet final, which every
+/// node held only in memory: before pending blocks were recorded, each leader failed with "parent
+/// block not available" and the chain never moved again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn whole_committee_restarts() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "warn,libmdbx=off".into()),
+        )
+        .with_test_writer()
+        .try_init();
+    // Each node runs on its own runtime; shutting that down ends all its tasks at once, like the
+    // process dying.
+    struct Proc {
+        rt: tokio::runtime::Runtime,
+        node: Node,
+    }
+    let boot_all = async |dirs: &[tempfile::TempDir]| {
+        let mut procs = Vec::new();
+        let mut boot = Vec::new();
+        for (i, d) in dirs.iter().enumerate() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap();
+            let (path, b) = (d.path().to_path_buf(), boot.clone());
+            let node = rt.spawn(async move { start(&path, i as u32, b).await }).await.unwrap();
+            if boot.len() < 2 {
+                boot.push(addr_of(&node.net).await);
+            }
+            procs.push(Proc { rt, node });
+        }
+        procs
+    };
+    let kill_all = async |procs: Vec<Proc>| {
+        let mut weak = Vec::new();
+        for p in procs {
+            weak.push(Arc::downgrade(&p.node.chain));
+            drop(p.node);
+            p.rt.shutdown_background();
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while weak.iter().any(|w| w.strong_count() > 0) {
+            assert!(tokio::time::Instant::now() < deadline, "database still open after the kill");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let head = |p: &Proc| height(&p.node);
+    let wait = async |p: &Proc, h: u64, secs: u64| wait_for(&p.node, h, secs).await;
+
+    let dirs: Vec<_> = (0..7).map(|_| tempfile::tempdir().unwrap()).collect();
+    let mut procs = boot_all(&dirs).await;
+    wait(&procs[0], 6, 90).await;
+    for round in 0..3 {
+        let at = head(&procs[0]);
+        eprintln!("kill {round}: all validators at height {at}");
+        kill_all(procs).await;
+        procs = boot_all(&dirs).await;
+        wait(&procs[0], at + 6, 90).await;
+    }
+    kill_all(procs).await;
+}

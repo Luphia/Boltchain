@@ -669,7 +669,15 @@ async fn run(
                             .unwrap_or(0);
                         last_at = now.max(last_at + 1);
                         a.at = last_at;
-                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), a.encode()) {
+                        let data = a.encode();
+                        // Validators on one host commit the same block in the same millisecond
+                        // and so build byte-identical announcements; when a peer's copy arrived
+                        // first ours is already out (gossipsub would refuse it with a warning).
+                        if !published.fresh(&data) {
+                            tracing::trace!(height = a.height, "announcement already gossiped");
+                            continue;
+                        }
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data) {
                             tracing::debug!(height = a.height, "publish announce: {e}");
                         }
                     }
@@ -871,6 +879,7 @@ async fn run(
                         Some(p) => author == Some(p),
                         None => true,
                     };
+                    published.seen(&message.data);
                     let decoded = if allowed { Announce::decode(&message.data) } else { None };
                     let acceptance = if decoded.is_some() {
                         gossipsub::MessageAcceptance::Accept
@@ -1006,7 +1015,12 @@ impl RecentlyPublished {
     /// Gossipsub's default duplicate-cache time.
     const WINDOW: Duration = Duration::from_secs(60);
 
-    /// Whether `data` was not published within the window (and records it).
+    /// Records `data` as received from the network (publishing it again would be a duplicate).
+    fn seen(&mut self, data: &[u8]) {
+        self.seen.insert(alloy_primitives::keccak256(data), std::time::Instant::now());
+    }
+
+    /// Whether `data` was neither published nor received within the window (and records it).
     fn fresh(&mut self, data: &[u8]) -> bool {
         let now = std::time::Instant::now();
         if self.seen.len() > 4096 {
@@ -1135,6 +1149,8 @@ mod scope_tests {
         let id = alloy_primitives::keccak256(b"vote");
         r.seen.insert(id, std::time::Instant::now() - RecentlyPublished::WINDOW);
         assert!(r.fresh(b"vote"), "goes out again after the window");
+        r.seen(b"announce from a peer");
+        assert!(!r.fresh(b"announce from a peer"), "a copy received first is not published");
     }
 
     #[test]

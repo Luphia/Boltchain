@@ -144,4 +144,5 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 - 中繼連線有時間與流量上限（每條 30 分鐘、256 MiB），會自動重建；打洞在對稱型 NAT 後面通常不會成功，這時資料一直走中繼。
 - 同一把驗證者金鑰不要同時在兩個節點上執行。節點發現金鑰在別處被使用時會停止用它簽署（日誌出現 `another node is signing with this validator key`，`/metrics` 的 `doppelganger` 大於 0）；停掉另一個節點後重新啟動即可恢復。
 - 公開的閘道與瀏覽器每個 IP 每秒限 20 次請求。
+- 舊版（r34 以前）在全部驗證者同時重啟後會停鏈，日誌一直出現 `could not build proposal: parent block not available`。r35 起重啟時會從本機資料重建尚未最終的區塊（日誌 `restored pending blocks`），請升級。
 - 測試網可能因為修正而重置，重置時會更新本頁的 genesis 雜湊。

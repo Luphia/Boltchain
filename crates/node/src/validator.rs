@@ -352,9 +352,19 @@ impl Validator {
             end_height: end,
             base_timeout_ms,
         };
-        let persisted = std::fs::read(self.state_path())
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Persisted<BlsScheme>>(&b).ok());
+        // A state file that exists but cannot be read must not be ignored: starting over would
+        // let this node vote again in rounds it already voted in (equivocation).
+        let persisted = match std::fs::read(self.state_path()) {
+            Ok(b) => Some(serde_json::from_slice::<Persisted<BlsScheme>>(&b).with_context(|| {
+                format!(
+                    "consensus state {} is unreadable; restore it from a backup (or, knowing this \
+                     node's keys signed nothing in the current epoch, remove it)",
+                    self.state_path().display()
+                )
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e).context("reading consensus state"),
+        };
         let resumed_round =
             persisted.as_ref().filter(|p| p.epoch == epoch).map(|p| p.last_voted).unwrap_or(0);
         let engine = match persisted {
@@ -374,6 +384,16 @@ impl Validator {
                 Engine::reanchored(cfg, scheme, p.last_voted)
             }
             Some(p) if p.epoch == epoch => {
+                // Blocks the engine knows above the last final one were only in memory; the
+                // highest certificate usually names one of them, and every leader must build on
+                // it. Execute them again from the blockstore (all nodes may have restarted).
+                let mut wanted: Vec<B256> = p.blocks.iter().map(|b| b.hash).collect();
+                wanted.extend([p.high_qc.block, p.committed.hash]);
+                match self.chain.restore_pending(&wanted) {
+                    Ok(0) => {}
+                    Ok(n) => tracing::info!(epoch, blocks = n, "restored pending blocks"),
+                    Err(e) => tracing::warn!(epoch, "could not restore pending blocks: {e}"),
+                }
                 tracing::info!(
                     epoch,
                     committed = p.committed.height,
@@ -874,9 +894,8 @@ impl Validator {
     fn persist(&self, engine: &Engine<BlsScheme>) {
         let bytes = serde_json::to_vec(&engine.persisted()).expect("state serializes");
         let path = self.state_path();
-        let tmp = path.with_extension("tmp");
-        if std::fs::write(&tmp, bytes).and_then(|_| std::fs::rename(&tmp, &path)).is_err() {
-            tracing::error!("could not persist consensus state");
+        if let Err(e) = write_durable(&path, &bytes) {
+            tracing::error!("could not persist consensus state: {e}");
         }
     }
 
@@ -1136,6 +1155,23 @@ impl Validator {
         tracing::info!(height = last.height, hash = %last.hash, round = last.round, "finalized");
         let _ = self.net.publish(announce).await;
     }
+}
+
+/// Replaces `path` with `bytes` so that after a power cut it holds either the old or the new
+/// content, never a truncated file: write a temporary file, flush it to disk, rename it over
+/// `path`, flush the directory. Votes are sent only after this returns.
+fn write_durable(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension("tmp");
+    let mut f = std::fs::File::create(&tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        std::fs::File::open(dir)?.sync_all()?;
+    }
+    Ok(())
 }
 
 fn save_proof_at(path: &std::path::Path, epoch: u64, proof: &CommitProof<BlsScheme>) {

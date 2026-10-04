@@ -703,18 +703,21 @@ impl Chain {
         };
         let bundle =
             bolt_ipld::bundle_with_audits(&header, &executed.transactions, parent_root, qc, audits);
+        let hash = header.hash_slow();
         // Publish the IPFS blocks right away so peers can fetch them before the block is final
-        // (validators must hold the data to vote).
+        // (validators must hold the data to vote), and record the block so that a restart can
+        // execute it again ([`Chain::restore_pending`]): a certificate may name it while no node
+        // still has it in memory.
         {
             let w = self.store.writer()?;
             for (cid, data) in &bundle.blocks {
                 w.put_ipld(cid, data)?;
             }
+            w.put_pending(header.number, &hash, &bundle.root)?;
             w.commit()?;
         }
         let (changes_plain, _) =
             executed.bundle.to_plain_state_and_reverts(OriginalValuesKnown::Yes);
-        let hash = header.hash_slow();
         let pending =
             Arc::new(PendingBlock { hash, header, executed, changes: changes_plain, bundle });
         self.pending.lock().insert(hash, pending.clone());
@@ -897,6 +900,64 @@ impl Chain {
         Ok(pending)
     }
 
+    /// Executes again, from the blockstore, the recorded pending blocks among `wanted` and their
+    /// pending ancestors (after a restart: the consensus engine's certified and voted blocks are
+    /// in no node's memory any more, and without them no leader can build on the highest
+    /// certificate). Blocks that no longer apply are forgotten. Returns how many were restored.
+    pub fn restore_pending(&self, wanted: &[B256]) -> Result<usize> {
+        let head = self.head()?;
+        let head_hash = head.hash_slow();
+        let records = self.store.reader()?.pending_blocks(head.number)?;
+        let mut blocks = HashMap::new();
+        {
+            let r = self.store.reader()?;
+            for (number, hash, root) in records {
+                let decoded =
+                    r.ipld(&root)?.and_then(|b| bolt_ipld::Envelope::decode(&b).ok()).and_then(
+                        |env| bolt_ipld::decode_block(env, |c| r.ipld(c).ok().flatten()).ok(),
+                    );
+                match decoded {
+                    Some(d) if d.header.number == number && d.header.hash_slow() == hash => {
+                        blocks.insert(hash, d);
+                    }
+                    _ => tracing::warn!(number, %hash, "pending block not in the blockstore"),
+                }
+            }
+        }
+        // `wanted` and their ancestors down to the head, lowest first.
+        let mut chosen: Vec<B256> = Vec::new();
+        for w in wanted {
+            let mut path = Vec::new();
+            let mut cur = *w;
+            while let Some(b) = blocks.get(&cur) {
+                if chosen.contains(&cur) || path.contains(&cur) {
+                    break;
+                }
+                path.push(cur);
+                cur = b.header.parent_hash;
+            }
+            chosen.extend(path);
+        }
+        chosen.sort_by_key(|h| blocks[h].header.number);
+        let mut restored = 0;
+        for hash in chosen {
+            if self.pending(&hash).is_some() {
+                continue;
+            }
+            let b = &blocks[&hash];
+            if b.header.parent_hash != head_hash && self.pending(&b.header.parent_hash).is_none() {
+                continue; // its parent did not restore, or it is on a branch below the head
+            }
+            match self.verify_block(&b.header, b.transactions.clone(), Certs::of(&b.envelope)) {
+                Ok(_) => restored += 1,
+                Err(e) => {
+                    tracing::warn!(number = b.header.number, %hash, "pending block not restored: {e}")
+                }
+            }
+        }
+        Ok(restored)
+    }
+
     /// Makes a pending block final. It must extend the committed head.
     pub fn commit_pending(&self, hash: &B256) -> Result<Header> {
         let p = self.pending(hash).ok_or(ChainError::UnknownParent(*hash))?;
@@ -925,6 +986,7 @@ impl Chain {
             &p.executed.receipts,
         )?;
         w.prune_history(number)?;
+        w.prune_pending(number)?;
         w.commit()?;
         // Drop pending blocks that can no longer be built upon, and side blocks too old to win.
         self.pending.lock().retain(|_, b| b.header.number > number);
