@@ -89,7 +89,7 @@ pub async fn run(args: FollowArgs) -> Result<()> {
             cfg.gas_limit,
             cfg.min_base_fee_wei,
         ))),
-        client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
+        client_version: crate::CLIENT_VERSION.to_string(),
         host: None,
         forwarder: Some(Arc::new(Forward {
             net: net.clone(),

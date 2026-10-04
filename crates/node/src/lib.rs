@@ -1,5 +1,12 @@
 //! Boltchain node library: devnet producer, follower, benchmarks, used by the `boltchain` binary.
 
+/// Version with the source commit, e.g. `0.1.0-9ffeafb` (see `build.rs`).
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-", env!("BOLT_COMMIT"));
+
+/// Client name and version, e.g. `boltchain/v0.1.0-9ffeafb` (explorer, `web3_clientVersion`).
+pub const CLIENT_VERSION: &str =
+    concat!("boltchain/v", env!("CARGO_PKG_VERSION"), "-", env!("BOLT_COMMIT"));
+
 pub mod bench;
 pub mod certificates;
 pub mod checkpoint;

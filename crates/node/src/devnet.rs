@@ -72,7 +72,7 @@ pub async fn run(args: DevnetArgs) -> Result<()> {
     let ctx = RpcContext {
         chain: chain.clone(),
         pool: pool.clone(),
-        client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
+        client_version: crate::CLIENT_VERSION.to_string(),
         host: None,
         forwarder: None,
     };

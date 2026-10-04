@@ -288,7 +288,7 @@ impl Explorer {
         let epoch = rules.epoch_of(next);
         Ok(json!({
             "chainId": cfg.chain_id,
-            "version": concat!("boltchain/v", env!("CARGO_PKG_VERSION")),
+            "version": crate::CLIENT_VERSION,
             "certificates": self.certs.as_ref().map(|c| json!({ "contract": c.address, "wallet": c.wallet })),
             "genesis": self.chain.genesis_hash(),
             "head": self.block_summary(r, &head),
@@ -1075,6 +1075,14 @@ mod tests {
         assert_eq!(v["chainId"], 1337);
         assert_eq!(v["stage"], "pos");
         assert_eq!(v["validators"], 7);
+        let version = v["version"].as_str().unwrap();
+        let commit = version.strip_prefix(concat!("boltchain/v", env!("CARGO_PKG_VERSION"), "-"));
+        assert!(
+            commit.is_some_and(|c| c == "unknown"
+                || c.trim_end_matches("-dirty").len() == 7
+                    && c.trim_end_matches("-dirty").bytes().all(|b| b.is_ascii_hexdigit())),
+            "version names the commit: {version}"
+        );
         let (_, v) = get(&ex, "/api/block/0");
         assert_eq!(v["number"], 0);
         assert!(v["ipfs"]["root"].is_string());

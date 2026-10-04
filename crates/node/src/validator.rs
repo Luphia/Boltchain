@@ -1622,7 +1622,7 @@ pub async fn run(args: ValidatorArgs) -> Result<()> {
     let ctx = bolt_rpc::RpcContext {
         chain: chain.clone(),
         pool: pool.clone(),
-        client_version: format!("boltchain/v{}", env!("CARGO_PKG_VERSION")),
+        client_version: crate::CLIENT_VERSION.to_string(),
         forwarder: None,
         host,
     };

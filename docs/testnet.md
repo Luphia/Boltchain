@@ -135,6 +135,7 @@ $B validator --genesis genesis/testnet.json --datadir ~/.boltchain-testnet/data2
 
 ## 監看與回報
 
+- 執行中的版本：`https://boltchain.cafeca.io/api/status` 的 `version`（如 `boltchain/v0.1.0-1a2b3c4`），或 `boltchain --version`。
 - `curl 127.0.0.1:9017/health`：高度、階段、peer 數、最終區塊、快照高度。
 - `curl 127.0.0.1:9017/metrics`：Prometheus 格式，包括匯入、重組、被拒提案、Bitswap、抽查、修剪等計數。
 - 回報問題時請附上：`/health` 輸出、日誌中的 `WARN` 與 `ERROR`、作業系統與 CPU、網路環境（是否在 NAT 後面）。

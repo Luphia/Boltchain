@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "boltchain", version, about = "Boltchain node")]
+#[command(name = "boltchain", version = boltchain::VERSION, about = "Boltchain node")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

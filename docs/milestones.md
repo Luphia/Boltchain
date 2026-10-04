@@ -327,6 +327,7 @@ M4 的 PoS 機制完整保留，用在階段 B 與階段 C；啟動期驗證者�
   - 新測試 `whole_committee_restarts`：7 個驗證者各自在獨立 runtime 上執行，連續 3 次全部同時終止再啟動，每次都要再出 6 塊；修正前第一次重啟後就重現測試網的錯誤並停住，修正後連跑 3 次通過
 - [x] gossip「Not publishing a message that has already been published」查明（觀察 5 的待查項目；n1 九天約 13,000 行，約占 17% 的區塊）：每個驗證者在區塊最終時都會發布同一則最終性公告，內容只差發送時間 `at`（毫秒）。不同節點在同一毫秒提交時，公告逐位元相同，別人的那份先到，gossipsub 就拒絕我們的並記一行 WARN。不是重送、沒有遺失訊息，去重本身是好事；10/2 之後的 WARN 只剩這一種。改成發布前先比對最近收到的公告，相同就不再交給 gossipsub
 - [x] `/health`、`/metrics` 的 `finalized` 在 PoS 下一直停在最後一個階段 B 檢查點（測試網 6000）：PoS 下只存已最終的區塊，改成回報 head（`Chain::final_height`，瀏覽器狀態也改用同一個函式）
+- [x] 版本帶 commit：`boltchain --version`、瀏覽器 `/api/status` 的 `version`、`web3_clientVersion` 都顯示 `0.1.0-<commit>`（有未提交修改時加 `-dirty`；沒有 git 時可用環境變數 `BOLT_COMMIT` 指定），從外部就能確認節點跑的是哪個版本
 - [ ] 觀察一週：A → B → C 轉換、外部節點加入、抽查與修剪、快照同步；依觀察到的問題排定網路強化的順序
 
 ## 發行改制（ADR 0012）：已實作
